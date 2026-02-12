@@ -1,4 +1,5 @@
 FROM node:20-alpine
+RUN apk add --no-cache openssl openssl-dev libc6-compat
 WORKDIR /app
 COPY . .
 RUN npm install && npx prisma generate
