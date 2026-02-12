@@ -1,0 +1,285 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: raahi-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: raahi
+      POSTGRES_USER: raahi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raahi_prod_2024_secure}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raahi -d raahi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    container_name: raahi-gateway
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      AUTH_SERVICE_URL: http://auth-service:5001
+      USER_SERVICE_URL: http://user-service:5002
+      DRIVER_SERVICE_URL: http://driver-service:5003
+      RIDE_SERVICE_URL: http://ride-service:5004
+      PRICING_SERVICE_URL: http://pricing-service:5005
+      NOTIFICATION_SERVICE_URL: http://notification-service:5006
+      REALTIME_SERVICE_URL: http://realtime-service:5007
+      ADMIN_SERVICE_URL: http://admin-service:5008
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      driver-service:
+        condition: service_healthy
+      ride-service:
+        condition: service_healthy
+      pricing-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      realtime-service:
+        condition: service_healthy
+      admin-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    container_name: raahi-auth-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5001
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-raahi-5f22e}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: raahi-user-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5002
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  driver-service:
+    build:
+      context: .
+      dockerfile: services/driver-service/Dockerfile
+    container_name: raahi-driver-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5003
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      DIGILOCKER_CLIENT_ID: ${DIGILOCKER_CLIENT_ID}
+      DIGILOCKER_CLIENT_SECRET: ${DIGILOCKER_CLIENT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  ride-service:
+    build:
+      context: .
+      dockerfile: services/ride-service/Dockerfile
+    container_name: raahi-ride-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5004
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      PRICING_SERVICE_URL: http://pricing-service:5005
+      REALTIME_SERVICE_URL: http://realtime-service:5007
+      NOTIFICATION_SERVICE_URL: http://notification-service:5006
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pricing-service:
+        condition: service_healthy
+      realtime-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  pricing-service:
+    build:
+      context: .
+      dockerfile: services/pricing-service/Dockerfile
+    container_name: raahi-pricing-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5005
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      BASE_FARE: ${BASE_FARE:-25}
+      PER_KM_RATE: ${PER_KM_RATE:-12}
+      PER_MINUTE_RATE: ${PER_MINUTE_RATE:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5005/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    container_name: raahi-notification-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5006
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-raahi-5f22e}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5006/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  realtime-service:
+    build:
+      context: .
+      dockerfile: services/realtime-service/Dockerfile
+    container_name: raahi-realtime-service
+    restart: always
+    ports:
+      - "5007:5007"
+    environment:
+      NODE_ENV: production
+      PORT: 5007
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      NOTIFICATION_SERVICE_URL: http://notification-service:5006
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  admin-service:
+    build:
+      context: .
+      dockerfile: services/admin-service/Dockerfile
+    container_name: raahi-admin-service
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 5008
+      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Nginx reverse proxy for SSL termination
+  nginx:
+    image: nginx:alpine
+    container_name: raahi-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - gateway
+      - realtime-service
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  pgdata:
