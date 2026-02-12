@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+    "declaration": true,
+    "sourceMap": true
+  },
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "services/gateway" },
+    { "path": "services/auth-service" },
+    { "path": "services/user-service" },
+    { "path": "services/driver-service" },
+    { "path": "services/ride-service" },
+    { "path": "services/pricing-service" },
+    { "path": "services/notification-service" },
+    { "path": "services/realtime-service" },
+    { "path": "services/admin-service" }
+  ]
+}

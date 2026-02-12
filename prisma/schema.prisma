@@ -1,0 +1,476 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String?   @unique
+  phone             String    @unique
+  firstName         String
+  lastName          String?
+  profileImage      String?
+  isVerified        Boolean   @default(false)
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastLoginAt       DateTime?
+  
+  // Firebase Auth integration
+  firebaseUid       String?   @unique  // Firebase user UID for phone auth
+  
+  // Push notification tokens (FCM for both iOS and Android)
+  fcmToken          String?   // Firebase Cloud Messaging token for push notifications
+  fcmTokenUpdatedAt DateTime? // When the token was last updated
+  devicePlatform    String?   // 'ios', 'android', or 'web'
+  deviceId          String?   // Unique device identifier for multi-device support
+  
+  // Last known location (updated when user requests a ride or updates location)
+  lastLatitude      Float?
+  lastLongitude     Float?
+  lastLocationAt    DateTime?
+  
+  // Relations
+  rides             Ride[]    @relation("PassengerRides")
+  driverProfile     Driver?
+  refreshTokens     RefreshToken[]
+  notifications     Notification[]
+  savedPlaces       SavedPlace[]
+  supportTickets    SupportTicket[]
+  
+  @@index([lastLatitude, lastLongitude])
+  @@index([firebaseUid])
+  @@index([fcmToken])
+  @@map("users")
+}
+
+model SavedPlace {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String   // e.g. "Home", "Work", "Gym"
+  address     String
+  latitude    Float
+  longitude   Float
+  placeType   String?  // home, work, other
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@map("saved_places")
+}
+
+model SupportTicket {
+  id          String              @id @default(cuid())
+  userId      String?             // For passenger support
+  driverId    String?             // For driver support
+  issueType   String
+  description String   @db.VarChar(2000)  // Limit description length
+  priority    SupportPriority     @default(MEDIUM)
+  status      SupportTicketStatus @default(OPEN)
+  response    String?  @db.VarChar(2000)  // Limit response length
+  respondedAt DateTime?
+  respondedBy String?             // Admin user ID
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  
+  user        User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  driver      Driver?             @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  
+  @@index([userId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("support_tickets")
+}
+
+model Driver {
+  id                String    @id @default(cuid())
+  userId            String    @unique
+  licenseNumber     String?   @unique
+  licenseExpiry     DateTime?
+  vehicleNumber     String?   @unique
+  vehicleModel      String?
+  vehicleColor      String?
+  vehicleYear       Int?
+  isVerified        Boolean   @default(false)
+  isActive          Boolean   @default(true)
+  isOnline          Boolean   @default(false)
+  currentLatitude   Float?
+  currentLongitude  Float?
+  h3Index           String?   // H3 hexagonal geospatial index for efficient matching
+  rating            Float     @default(0.0)
+  ratingCount       Int       @default(0)  // Actual count of ratings received (for correct average)
+  totalRides        Int       @default(0)
+  totalEarnings     Float     @default(0.0)
+  totalOnlineSeconds Int      @default(0)  // Track total online time for hours_online
+  joinedAt          DateTime  @default(now())
+  lastActiveAt      DateTime?
+  lastOnlineAt      DateTime? // When driver last went online (for session tracking)
+  
+  // Onboarding fields
+  onboardingStatus  OnboardingStatus @default(EMAIL_COLLECTION)
+  preferredLanguage String?
+  vehicleType       String?
+  serviceTypes      String[]  // Array of service types: ["bike_rescue", "raahi_driver"]
+  documentsSubmittedAt DateTime?
+  documentsVerifiedAt  DateTime?
+  verificationNotes    String?
+  referralCode      String?   // Referral code used during signup
+  
+  // KYC/Verification fields
+  aadhaarNumber     String?   @unique  // 12-digit Aadhaar number (encrypted in production)
+  aadhaarVerified   Boolean   @default(false)
+  aadhaarVerifiedAt DateTime?
+  panNumber         String?   @unique  // 10-character PAN (e.g., ABCDE1234F)
+  panVerified       Boolean   @default(false)
+  panVerifiedAt     DateTime?
+  digilockerLinked  Boolean   @default(false)  // Whether DigiLocker is linked
+  digilockerToken   String?   // DigiLocker access token (encrypted)
+  
+  // Settings
+  notificationsEnabled Boolean @default(true)
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rides             Ride[]    @relation("DriverRides")
+  documents         DriverDocument[]
+  earnings          DriverEarning[]
+  penalties         DriverPenalty[]
+  supportTickets    SupportTicket[]
+  
+  @@index([isOnline, isActive])
+  @@index([currentLatitude, currentLongitude])
+  @@index([h3Index])  // H3 index for geospatial queries - critical for performance
+  @@index([onboardingStatus])
+  @@map("drivers")
+}
+
+model DriverPenalty {
+  id         String        @id @default(cuid())
+  driverId   String
+  amount     Float         // in INR, e.g. 10 for "Stop Riding"
+  reason     String        // e.g. "STOP_RIDING"
+  status     PenaltyStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+  paidAt     DateTime?
+  
+  driver     Driver        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  @@index([driverId])
+  @@index([status])
+  @@map("driver_penalties")
+}
+
+model DriverDocument {
+  id                String    @id @default(cuid())
+  driverId          String
+  documentType      DocumentType
+  documentUrl       String
+  documentName      String?
+  documentSize      Int?
+  isVerified        Boolean   @default(false)
+  verifiedAt        DateTime?
+  verifiedBy        String?   // Admin user ID who verified
+  rejectionReason   String?
+  uploadedAt        DateTime  @default(now())
+  
+  // Relations
+  driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  @@index([driverId])
+  @@index([documentType])
+  @@map("driver_documents")
+}
+
+model DriverEarning {
+  id                String    @id @default(cuid())
+  driverId          String
+  rideId            String?   @unique
+  amount            Float     // Gross fare
+  commission        Float     // Platform fee deducted
+  commissionRate    Float     @default(0.20) // Platform fee rate (e.g. 0.20 = 20%)
+  netAmount         Float     // amount - commission
+  baseFare          Float     @default(0)    // Breakdown: base fare portion
+  distanceFare      Float     @default(0)    // Breakdown: distance fare portion
+  timeFare          Float     @default(0)    // Breakdown: time fare portion
+  surgeFare         Float     @default(0)    // Breakdown: surge bonus portion
+  date              DateTime  @default(now())
+  
+  // Relations
+  driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  @@index([driverId])
+  @@index([date])
+  @@index([driverId, date])
+  @@map("driver_earnings")
+}
+
+model Ride {
+  id                String    @id @default(cuid())
+  passengerId       String
+  driverId          String?
+  pickupLatitude    Float
+  pickupLongitude   Float
+  dropLatitude      Float
+  dropLongitude     Float
+  pickupAddress     String
+  dropAddress       String
+  distance          Float     // in kilometers
+  duration          Int       // in minutes
+  baseFare          Float
+  distanceFare      Float
+  timeFare          Float
+  surgeMultiplier   Float     @default(1.0)
+  surgeFare         Float     @default(0.0)  // Surge bonus amount
+  totalFare         Float
+  status            RideStatus @default(PENDING)
+  paymentMethod     PaymentMethod
+  paymentStatus     PaymentStatus @default(PENDING)
+  rideOtp           String?   // 4-digit OTP for ride verification (driver must enter to start ride)
+  scheduledAt       DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  cancelledBy       String?   // 'passenger' or 'driver'
+  cancellationReason String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  
+  // Rating fields (per-ride rating)
+  passengerRating   Int?      // 1-5 rating given by passenger to driver
+  passengerFeedback String?   @db.VarChar(500)  // Optional feedback from passenger
+  ratedByPassengerAt DateTime?
+  driverRating      Int?      // 1-5 rating given by driver to passenger (future use)
+  driverFeedback    String?   @db.VarChar(500)  // Optional feedback from driver
+  ratedByDriverAt   DateTime?
+  
+  // Relations
+  passenger         User      @relation("PassengerRides", fields: [passengerId], references: [id])
+  driver            Driver?   @relation("DriverRides", fields: [driverId], references: [id])
+  tracking          RideTracking[]
+  messages          RideMessage[]
+  shareTokens       RideShareToken[]
+  
+  @@index([passengerId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([status, driverId])
+  @@index([passengerId, status])
+  @@map("rides")
+}
+
+model RideShareToken {
+  id        String   @id @default(cuid())
+  rideId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  
+  ride      Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  
+  @@index([rideId])
+  @@index([expiresAt])
+  @@map("ride_share_tokens")
+}
+
+model RideTracking {
+  id                String    @id @default(cuid())
+  rideId            String
+  latitude          Float
+  longitude         Float
+  heading           Float?
+  speed             Float?
+  timestamp         DateTime  @default(now())
+  
+  // Relations
+  ride              Ride      @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  
+  @@index([rideId])
+  @@index([timestamp])
+  @@map("ride_tracking")
+}
+
+model RideMessage {
+  id                String    @id @default(cuid())
+  rideId            String
+  senderId          String
+  message           String    @db.VarChar(1000)
+  timestamp         DateTime  @default(now())
+  
+  // Relations
+  ride              Ride      @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  
+  @@index([rideId])
+  @@index([timestamp])
+  @@map("ride_messages")
+}
+
+model RefreshToken {
+  id                String    @id @default(cuid())
+  userId            String
+  token             String    @unique
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Notification {
+  id                String    @id @default(cuid())
+  userId            String
+  title             String
+  message           String
+  type              NotificationType
+  isRead            Boolean   @default(false)
+  data              Json?
+  createdAt         DateTime  @default(now())
+  
+  // Geo-targeting fields (for location-based notifications)
+  // If these are set, notification was sent based on geographic targeting
+  targetLatitude    Float?    // Center latitude of target area (null for user-specific)
+  targetLongitude   Float?    // Center longitude of target area (null for user-specific)
+  targetRadius      Float?    // Radius in kilometers (null for user-specific)
+  
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@index([targetLatitude, targetLongitude])
+  @@map("notifications")
+}
+
+model PricingRule {
+  id                String    @id @default(cuid())
+  name              String
+  baseFare          Float
+  perKmRate         Float
+  perMinuteRate     Float
+  surgeMultiplier   Float     @default(1.0)
+  peakHourMultiplier Float    @default(1.0)
+  isActive          Boolean   @default(true)
+  validFrom         DateTime
+  validTo           DateTime?
+  createdAt         DateTime  @default(now())
+  
+  @@index([isActive])
+  @@index([validFrom, validTo])
+  @@map("pricing_rules")
+}
+
+model SurgeArea {
+  id                String    @id @default(cuid())
+  name              String
+  centerLatitude    Float
+  centerLongitude   Float
+  radius            Float     // in kilometers
+  multiplier        Float
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  
+  @@index([isActive])
+  @@index([centerLatitude, centerLongitude])
+  @@map("surge_areas")
+}
+
+// Enums
+enum DocumentType {
+  LICENSE
+  RC
+  INSURANCE
+  PUC
+  PROFILE_PHOTO
+  PAN_CARD
+  AADHAAR_CARD
+}
+
+enum OnboardingStatus {
+  EMAIL_COLLECTION
+  LANGUAGE_SELECTION
+  EARNING_SETUP
+  VEHICLE_SELECTION
+  LICENSE_UPLOAD
+  PROFILE_PHOTO
+  PHOTO_CONFIRMATION
+  DOCUMENT_UPLOAD
+  DOCUMENT_VERIFICATION
+  COMPLETED
+  REJECTED
+}
+
+enum RideStatus {
+  PENDING
+  CONFIRMED
+  DRIVER_ASSIGNED
+  DRIVER_ARRIVED
+  RIDE_STARTED
+  RIDE_COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  WALLET
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PenaltyStatus {
+  PENDING
+  PAID
+}
+
+enum NotificationType {
+  RIDE_UPDATE
+  PAYMENT
+  PROMOTION
+  SYSTEM
+  SUPPORT
+}
+
+enum SupportPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// Platform configuration model for dynamic fee rates
+model PlatformConfig {
+  id                 String   @id @default(cuid())
+  key                String   @unique
+  value              String   // JSON or string value
+  description        String?
+  updatedAt          DateTime @updatedAt
+  
+  @@map("platform_config")
+}
