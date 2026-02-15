@@ -5,9 +5,12 @@ import { asyncHandler } from '@raahi/shared';
 import * as AuthService from '../authService';
 import { createLogger } from '@raahi/shared';
 
-const logger = createLogger('auth-service');
+const logger = createLogger('auth-routes');
 const router = express.Router();
 
+/**
+ * Send OTP via MSG91
+ */
 router.post(
   '/send-otp',
   [body('phone').isMobilePhone('any'), body('countryCode').optional().isString()],
@@ -19,10 +22,13 @@ router.post(
     }
     const { phone, countryCode = '+91' } = req.body;
     const result = await AuthService.sendMobileOTP(phone, countryCode);
-    res.status(200).json({ success: true, message: result.message });
+    res.status(200).json({ success: true, message: result.message, data: { mode: result.mode } });
   })
 );
 
+/**
+ * Verify OTP via MSG91
+ */
 router.post(
   '/verify-otp',
   [
@@ -42,6 +48,92 @@ router.post(
   })
 );
 
+/**
+ * Resend OTP via MSG91
+ */
+router.post(
+  '/resend-otp',
+  [
+    body('phone').isMobilePhone('any'),
+    body('countryCode').optional().isString(),
+    body('method').optional().isIn(['text', 'voice']),
+  ],
+  asyncHandler(async (req, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const { phone, countryCode = '+91', method = 'text' } = req.body;
+    const result = await AuthService.resendOTP(phone, countryCode, method);
+    res.status(200).json({ success: true, message: result.message });
+  })
+);
+
+/**
+ * Get OTP service status (MSG91)
+ */
+router.get(
+  '/otp-status',
+  asyncHandler(async (_req, res: Response) => {
+    const status = AuthService.getOTPServiceStatus();
+    res.status(200).json({ 
+      success: true, 
+      data: {
+        otpServiceAvailable: status.available,
+        provider: status.provider,
+      }
+    });
+  })
+);
+
+/**
+ * Phone authentication (after MSG91 OTP verified on client)
+ * 
+ * This endpoint is called after the client has verified OTP with MSG91 Widget.
+ * The phone number is trusted since MSG91 verification was completed on client side.
+ * Optionally, pass the widget access token for server-side verification.
+ */
+router.post(
+  '/phone',
+  [
+    body('phone').isString().notEmpty().withMessage('Phone number is required'),
+    body('widgetToken').optional().isString(),
+  ],
+  asyncHandler(async (req, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ 
+        success: false, 
+        message: 'Validation failed', 
+        errors: errors.array() 
+      });
+      return;
+    }
+    
+    let { phone, widgetToken } = req.body;
+    
+    // Normalize phone number format
+    phone = phone.replace(/[\s\-()]/g, '');
+    if (!phone.startsWith('+')) {
+      phone = `+${phone}`;
+    }
+    
+    logger.info(`[AUTH] Phone authentication request for: ${phone}`);
+    
+    const result = await AuthService.authenticateWithVerifiedPhone(phone, widgetToken);
+    
+    res.status(200).json({ 
+      success: true, 
+      message: result.isNewUser ? 'Account created successfully' : 'Phone authentication successful', 
+      data: result 
+    });
+  })
+);
+
+/**
+ * Google Authentication
+ */
 router.post(
   '/google',
   [body('idToken').isString()],
@@ -57,92 +149,11 @@ router.post(
 );
 
 /**
- * Firebase Phone Authentication Endpoint
- * 
- * This is the recommended method for phone number verification.
- * Client handles OTP flow with Firebase SDK, then sends the Firebase ID token here.
- * 
- * Flow:
- * 1. Client initiates phone auth with Firebase SDK (signInWithPhoneNumber)
- * 2. Firebase sends SMS OTP to user
- * 3. User enters OTP, client verifies with Firebase
- * 4. Client gets Firebase ID token (user.getIdToken())
- * 5. Client sends Firebase ID token to this endpoint
- * 6. Backend verifies token, creates/updates user, returns JWT
- * 
- * Request body: { firebaseIdToken: string }
- * 
- * Benefits over Twilio:
- * - Free tier includes phone auth (no per-SMS cost)
- * - Built-in rate limiting and abuse protection
- * - reCAPTCHA integration for bot protection
- * - Global phone number support
- */
-router.post(
-  '/firebase-phone',
-  [body('firebaseIdToken').isString().notEmpty()],
-  asyncHandler(async (req, res: Response) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ 
-        success: false, 
-        message: 'Validation failed', 
-        errors: errors.array() 
-      });
-      return;
-    }
-    
-    const result = await AuthService.authenticateWithFirebasePhone(req.body.firebaseIdToken);
-    
-    res.status(200).json({ 
-      success: true, 
-      message: 'Firebase phone authentication successful', 
-      data: result 
-    });
-  })
-);
-
-/**
- * Get Firebase configuration status
- * 
- * Allows client to check if Firebase auth is available before attempting
- * This is useful for conditional UI (show Firebase auth option only if configured)
- */
-router.get(
-  '/firebase-status',
-  asyncHandler(async (_req, res: Response) => {
-    const status = AuthService.getFirebaseAuthStatus();
-    
-    res.status(200).json({ 
-      success: true, 
-      data: {
-        firebaseAuthAvailable: status.available,
-        projectId: status.projectId,
-      }
-    });
-  })
-);
-
-/**
- * Truecaller Authentication Endpoint
- * 
- * Accepts either:
- * 1. Legacy format: { phone: string, truecallerToken: string }
- * 2. New format: { profile: TruecallerProfile, accessToken?: string }
- * 
- * TruecallerProfile: {
- *   firstName?: string,
- *   lastName?: string,
- *   phoneNumber: string,
- *   countryCode?: string,
- *   email?: string,
- *   avatarUrl?: string
- * }
+ * Truecaller Authentication
  */
 router.post(
   '/truecaller',
   [
-    // Support both legacy (phone) and new (profile) format
     body('phone').optional().isMobilePhone('any'),
     body('profile').optional().isObject(),
     body('profile.phoneNumber').optional().isString(),
@@ -158,16 +169,13 @@ router.post(
     
     const { phone, profile, truecallerToken, accessToken } = req.body;
     
-    // Determine payload format
     let payload: string | AuthService.TruecallerProfile;
     let token: string | undefined;
     
     if (profile && profile.phoneNumber) {
-      // New format with full profile
       payload = profile;
       token = accessToken;
     } else if (phone) {
-      // Legacy format with just phone
       payload = phone;
       token = truecallerToken;
     } else {
@@ -187,6 +195,9 @@ router.post(
   })
 );
 
+/**
+ * Refresh Token
+ */
 router.post(
   '/refresh',
   [body('refreshToken').isString()],
@@ -201,6 +212,9 @@ router.post(
   })
 );
 
+/**
+ * Logout
+ */
 router.post(
   '/logout',
   authenticate,
@@ -224,6 +238,9 @@ router.post(
   })
 );
 
+/**
+ * Get current user profile
+ */
 router.get(
   '/me',
   authenticate,
@@ -237,6 +254,9 @@ router.get(
   })
 );
 
+/**
+ * Update user profile
+ */
 router.put(
   '/profile',
   authenticate,
@@ -278,7 +298,6 @@ router.put(
 
 /**
  * Add phone number for users who signed up with Google
- * This is required for ride booking and other phone-dependent features
  */
 router.post(
   '/add-phone',
