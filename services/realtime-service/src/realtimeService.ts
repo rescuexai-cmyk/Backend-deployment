@@ -1,6 +1,9 @@
-import { prisma, latLngToH3, getH3Config } from '@raahi/shared';
+import { prisma, latLngToH3, getH3Config, getKRing } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import type { Server as SocketServer } from 'socket.io';
+import { eventBus, CHANNELS } from './eventBus';
+import { sseManager } from './sseManager';
+import { mqttBroker } from './mqttBroker';
 
 const logger = createLogger('realtime-service');
 let io: SocketServer | null = null;
@@ -176,15 +179,36 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
   
   logger.debug(`[H3] Driver ${driverId} location updated: h3Index=${h3Index}, res=${config.resolution}`);
   
+  const timestamp = new Date().toISOString();
+
+  // ── Broadcast via EventBus (reaches SSE + Socket.io + MQTT) ──────────────
+  eventBus.publish(CHANNELS.driverLocations, {
+    type: 'driver-location',
+    driverId,
+    lat,
+    lng,
+    h3Index,
+    heading,
+    speed,
+    timestamp,
+  });
+
+  // ── Direct MQTT publish for high-frequency location (bypass EventBus for perf) ──
+  mqttBroker.publishDriverLocation(driverId, lat, lng, h3Index, heading, speed);
+
+  // ── Update SSE H3 subscriptions if driver moved to new cell ──────────────
+  sseManager.updateDriverH3(driverId, h3Index);
+
+  // ── Legacy Socket.io broadcast (backward compatibility) ──────────────────
   if (io) {
     io.emit('driver-location-update', {
       driverId,
       lat,
       lng,
-      h3Index,  // Include H3 index in event for debugging
+      h3Index,
       heading,
       speed,
-      timestamp: new Date().toISOString(),
+      timestamp,
     });
   }
 }
@@ -366,7 +390,7 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     });
   }
   
-  // STEP 2: Broadcast to all available drivers room as fallback
+  // STEP 2: Broadcast to all available drivers room as fallback (Socket.io)
   const availableDriversRoom = io.sockets.adapter.rooms.get('available-drivers');
   result.availableDrivers = availableDriversRoom?.size || 0;
   
@@ -374,52 +398,90 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
   
   if (result.availableDrivers > 0) {
     io.to('available-drivers').emit('new-ride-request', payload);
-    logger.info(`[BROADCAST]   ✅ EMITTED to available-drivers room`);
+    logger.info(`[BROADCAST]   ✅ EMITTED to available-drivers room (Socket.io)`);
   } else {
-    logger.warn(`[BROADCAST]   ⚠️ available-drivers room is EMPTY`);
+    logger.warn(`[BROADCAST]   ⚠️ available-drivers room is EMPTY (Socket.io)`);
+  }
+  
+  // ── STEP 3: Broadcast via EventBus to SSE + MQTT transports ──────────────
+  // This is the key improvement - SSE and MQTT provide reliable delivery
+  // even when Socket.io connections fail (which caused "Start Ride" errors).
+  
+  const rideRequestEvent = {
+    type: 'new-ride-request' as const,
+    rideId,
+    targetDriverIds: driverIds,
+    payload,
+  };
+  
+  // 3a: Publish to available-drivers channel (SSE + MQTT subscribers)
+  const sseAvailableSize = eventBus.getTotalListeners(CHANNELS.availableDrivers);
+  eventBus.publish(CHANNELS.availableDrivers, rideRequestEvent);
+  logger.info(`[BROADCAST]   ✅ EventBus → available-drivers (${sseAvailableSize} listeners)`);
+  
+  // 3b: Publish to individual driver channels (SSE + MQTT)
+  let eventBusDriversReached = 0;
+  for (const driverId of driverIds) {
+    const listeners = eventBus.getTotalListeners(CHANNELS.driver(driverId));
+    if (listeners > 0) {
+      eventBus.publish(CHANNELS.driver(driverId), rideRequestEvent);
+      eventBusDriversReached++;
+    }
+  }
+  logger.info(`[BROADCAST]   ✅ EventBus → ${eventBusDriversReached}/${driverIds.length} individual drivers`);
+  
+  // 3c: Publish to H3 cell channels for geospatial targeting (SSE + MQTT)
+  if (rideData.pickupLatitude && rideData.pickupLongitude) {
+    try {
+      const pickupH3 = latLngToH3(rideData.pickupLatitude, rideData.pickupLongitude);
+      const h3Config = getH3Config();
+      const nearbyCells = getKRing(pickupH3, h3Config.maxKRing);
+      
+      let h3Listeners = 0;
+      for (const cell of nearbyCells) {
+        const listeners = eventBus.getTotalListeners(CHANNELS.h3Cell(cell));
+        if (listeners > 0) {
+          eventBus.publish(CHANNELS.h3Cell(cell), rideRequestEvent);
+          h3Listeners += listeners;
+        }
+      }
+      logger.info(`[BROADCAST]   ✅ EventBus → H3 cells (${nearbyCells.length} cells, ${h3Listeners} listeners)`);
+    } catch (h3Error) {
+      logger.warn(`[BROADCAST]   ⚠️ H3 cell broadcast failed`, { error: h3Error });
+    }
   }
   
   // SUMMARY
   logger.info(`[BROADCAST] ========== BROADCAST SUMMARY ==========`);
   logger.info(`[BROADCAST] Ride ID: ${rideId}`);
-  logger.info(`[BROADCAST] Targeted drivers (from nearby): ${result.targetedDrivers}/${driverIds.length}`);
-  logger.info(`[BROADCAST] Drivers emitted to: ${JSON.stringify(driversEmitted)}`);
-  logger.info(`[BROADCAST] Drivers NOT connected: ${JSON.stringify(driversNotConnected)}`);
-  logger.info(`[BROADCAST] Available drivers room: ${result.availableDrivers}`);
-  logger.info(`[BROADCAST] Total unique connected drivers: ${result.connectedDrivers}`);
+  logger.info(`[BROADCAST] Transport Results:`);
+  logger.info(`[BROADCAST]   Socket.io: ${result.targetedDrivers} targeted, ${result.availableDrivers} in available room`);
+  logger.info(`[BROADCAST]   EventBus:  ${eventBusDriversReached} targeted, ${sseAvailableSize} in available channel`);
+  logger.info(`[BROADCAST] Drivers emitted to (Socket.io): ${JSON.stringify(driversEmitted)}`);
+  logger.info(`[BROADCAST] Drivers NOT on Socket.io: ${JSON.stringify(driversNotConnected)}`);
+  logger.info(`[BROADCAST] Total unique connected drivers (Socket.io): ${result.connectedDrivers}`);
   
-  // DETERMINE SUCCESS
-  if (result.targetedDrivers > 0 || result.availableDrivers > 0) {
+  // DETERMINE SUCCESS - now considers ALL transports
+  const totalReach = result.targetedDrivers + result.availableDrivers + sseAvailableSize + eventBusDriversReached;
+  
+  if (totalReach > 0) {
     result.success = true;
-    logger.info(`[BROADCAST] ✅ SUCCESS: Ride request broadcast to at least one driver`);
+    logger.info(`[BROADCAST] ✅ SUCCESS: Ride request delivered via hybrid transports (total reach: ${totalReach})`);
   } else {
     result.success = false;
-    const error = `P0 FAILURE: Ride ${rideId} broadcast to ZERO drivers! ` +
-      `(${driverIds.length} eligible, ${driversNotConnected.length} not connected, ` +
-      `${result.connectedDrivers} total connected)`;
+    const error = `P0 FAILURE: Ride ${rideId} broadcast to ZERO drivers across ALL transports! ` +
+      `(${driverIds.length} eligible, Socket.io: ${result.connectedDrivers}, EventBus: ${sseAvailableSize})`;
     logger.error(`[BROADCAST] 🚨 ${error}`);
     result.errors.push(error);
     
-    // Log additional diagnostic info
-    logger.error(`[BROADCAST] DIAGNOSTIC: This means either:`);
-    logger.error(`[BROADCAST]   1. No drivers are online in the app`);
-    logger.error(`[BROADCAST]   2. Drivers are online but not connected to Socket.io`);
-    logger.error(`[BROADCAST]   3. Drivers connected with wrong ID (userId vs driverId)`);
-    logger.error(`[BROADCAST]   4. Socket connection dropped and not reconnected`);
+    logger.error(`[BROADCAST] DIAGNOSTIC: All transports failed.`);
+    logger.error(`[BROADCAST]   Socket.io: ${result.connectedDrivers} connected`);
+    logger.error(`[BROADCAST]   SSE:       ${sseAvailableSize} connected`);
+    logger.error(`[BROADCAST]   EventBus:  ${eventBus.getMetrics().transports.join(', ')} registered`);
     
-    // P0 INCONSISTENCY CHECK: If there are eligible drivers but none connected
-    if (driverIds.length > 0 && result.connectedDrivers === 0) {
-      logger.error(`[BROADCAST] 🚨🚨🚨 P0 INCONSISTENCY DETECTED 🚨🚨🚨`);
-      logger.error(`[BROADCAST] ${driverIds.length} drivers are ELIGIBLE (online in DB) but ZERO are connected to Socket.io`);
-      logger.error(`[BROADCAST] This is a critical state mismatch that MUST be investigated`);
-      result.errors.push(`P0_INCONSISTENCY: ${driverIds.length} eligible drivers but 0 socket connections`);
-    }
-    
-    // If drivers are connected but not in the eligible list
-    if (driverIds.length === 0 && result.connectedDrivers > 0) {
-      logger.error(`[BROADCAST] 🚨 MISMATCH: ${result.connectedDrivers} drivers connected to socket but NONE are eligible`);
-      logger.error(`[BROADCAST] Check: Are connected drivers isOnline=true in DB? Do they have valid locations?`);
-      result.errors.push(`ELIGIBILITY_MISMATCH: ${result.connectedDrivers} connected but 0 eligible`);
+    if (driverIds.length > 0 && totalReach === 0) {
+      logger.error(`[BROADCAST] 🚨 ${driverIds.length} drivers eligible but NONE reachable on ANY transport`);
+      result.errors.push(`ALL_TRANSPORTS_UNREACHABLE: ${driverIds.length} eligible, 0 reachable`);
     }
   }
   
@@ -429,51 +491,103 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
 }
 
 export function broadcastRideStatusUpdate(rideId: string, status: string, data?: any) {
-  if (!io) {
-    logger.warn(`[REALTIME] Cannot broadcast ride status update - Socket.io not initialized`);
-    return;
-  }
-  try {
-    const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
-    io.to(`ride-${rideId}`).emit('ride-status-update', { rideId, status, data, timestamp: new Date().toISOString() });
-    logger.info(`[REALTIME] Broadcast ride status update: ride=${rideId}, status=${status}, room_size=${roomSize}`);
-  } catch (error) {
-    logger.error(`[REALTIME] Failed to broadcast ride status update`, { error, rideId, status });
+  const timestamp = new Date().toISOString();
+
+  // ── Primary: Broadcast via EventBus (SSE + MQTT + Socket.io) ─────────────
+  eventBus.publish(CHANNELS.ride(rideId), {
+    type: 'ride-status-update',
+    rideId,
+    status,
+    data,
+    timestamp,
+  });
+
+  // ── Also publish via MQTT directly for QoS 1 delivery guarantee ──────────
+  mqttBroker.deliver(CHANNELS.ride(rideId), {
+    type: 'ride-status-update',
+    rideId,
+    status,
+    data,
+    timestamp,
+  });
+
+  // ── Legacy Socket.io broadcast (backward compatibility) ──────────────────
+  if (io) {
+    try {
+      const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
+      io.to(`ride-${rideId}`).emit('ride-status-update', { rideId, status, data, timestamp });
+      logger.info(`[REALTIME] Ride status update broadcast: ride=${rideId}, status=${status}, socketio_room=${roomSize}, eventbus_listeners=${eventBus.getTotalListeners(CHANNELS.ride(rideId))}`);
+    } catch (error) {
+      logger.error(`[REALTIME] Socket.io broadcast failed for ride status`, { error, rideId, status });
+    }
+  } else {
+    logger.info(`[REALTIME] Ride status update broadcast (SSE/MQTT only): ride=${rideId}, status=${status}`);
   }
 }
 
 export function broadcastDriverAssigned(rideId: string, driver: any) {
-  if (!io) {
-    logger.warn(`[REALTIME] Cannot broadcast driver assigned - Socket.io not initialized`);
-    return;
+  const timestamp = new Date().toISOString();
+
+  // ── Primary: EventBus broadcast (SSE + MQTT + Socket.io) ─────────────────
+  eventBus.publish(CHANNELS.ride(rideId), {
+    type: 'driver-assigned',
+    rideId,
+    driver,
+    timestamp,
+  });
+
+  // ── Auto-subscribe driver to ride SSE channel ────────────────────────────
+  if (driver?.id) {
+    sseManager.subscribeToRide(driver.id, rideId);
   }
-  try {
-    const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
-    io.to(`ride-${rideId}`).emit('driver-assigned', { rideId, driver, timestamp: new Date().toISOString() });
-    logger.info(`[REALTIME] Broadcast driver assigned: ride=${rideId}, driver=${driver?.id}, room_size=${roomSize}`);
-  } catch (error) {
-    logger.error(`[REALTIME] Failed to broadcast driver assigned`, { error, rideId, driverId: driver?.id });
+
+  // ── Legacy Socket.io broadcast ───────────────────────────────────────────
+  if (io) {
+    try {
+      const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
+      io.to(`ride-${rideId}`).emit('driver-assigned', { rideId, driver, timestamp });
+      logger.info(`[REALTIME] Driver assigned broadcast: ride=${rideId}, driver=${driver?.id}, socketio_room=${roomSize}`);
+    } catch (error) {
+      logger.error(`[REALTIME] Socket.io broadcast failed for driver assigned`, { error, rideId });
+    }
+  } else {
+    logger.info(`[REALTIME] Driver assigned broadcast (SSE/MQTT only): ride=${rideId}, driver=${driver?.id}`);
   }
 }
 
 export function broadcastRideCancelled(rideId: string, cancelledBy: string, reason?: string) {
-  if (!io) {
-    logger.warn(`[REALTIME] Cannot broadcast ride cancelled - Socket.io not initialized`);
-    return;
-  }
-  try {
-    const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
-    io.to(`ride-${rideId}`).emit('ride-cancelled', { rideId, cancelledBy, reason, timestamp: new Date().toISOString() });
-    logger.info(`[REALTIME] Broadcast ride cancelled: ride=${rideId}, by=${cancelledBy}, room_size=${roomSize}`);
-  } catch (error) {
-    logger.error(`[REALTIME] Failed to broadcast ride cancelled`, { error, rideId, cancelledBy });
+  const timestamp = new Date().toISOString();
+
+  // ── Primary: EventBus broadcast (SSE + MQTT + Socket.io) ─────────────────
+  eventBus.publish(CHANNELS.ride(rideId), {
+    type: 'ride-cancelled',
+    rideId,
+    cancelledBy,
+    reason,
+    timestamp,
+  });
+
+  // ── Legacy Socket.io broadcast ───────────────────────────────────────────
+  if (io) {
+    try {
+      const roomSize = io.sockets.adapter.rooms.get(`ride-${rideId}`)?.size || 0;
+      io.to(`ride-${rideId}`).emit('ride-cancelled', { rideId, cancelledBy, reason, timestamp });
+      logger.info(`[REALTIME] Ride cancelled broadcast: ride=${rideId}, by=${cancelledBy}, socketio_room=${roomSize}`);
+    } catch (error) {
+      logger.error(`[REALTIME] Socket.io broadcast failed for ride cancelled`, { error, rideId });
+    }
+  } else {
+    logger.info(`[REALTIME] Ride cancelled broadcast (SSE/MQTT only): ride=${rideId}, by=${cancelledBy}`);
   }
 }
 
 /** Broadcast new chat message to everyone in the ride room (driver + passenger) */
 export function broadcastRideChatMessage(rideId: string, message: { id: string; senderId: string; message: string; timestamp: Date }) {
-  if (!io) return;
-  io.to(`ride-${rideId}`).emit('ride-chat-message', {
+  const timestamp = new Date().toISOString();
+
+  // ── Primary: EventBus broadcast (SSE + MQTT + Socket.io) ─────────────────
+  eventBus.publish(CHANNELS.ride(rideId), {
+    type: 'ride-chat-message',
     rideId,
     message: {
       id: message.id,
@@ -481,9 +595,22 @@ export function broadcastRideChatMessage(rideId: string, message: { id: string; 
       message: message.message,
       timestamp: message.timestamp.toISOString(),
     },
-    timestamp: new Date().toISOString(),
   });
-  logger.debug(`[REALTIME] Chat message broadcast to ride-${rideId}`);
+
+  // ── Legacy Socket.io broadcast ───────────────────────────────────────────
+  if (io) {
+    io.to(`ride-${rideId}`).emit('ride-chat-message', {
+      rideId,
+      message: {
+        id: message.id,
+        senderId: message.senderId,
+        message: message.message,
+        timestamp: message.timestamp.toISOString(),
+      },
+      timestamp,
+    });
+  }
+  logger.debug(`[REALTIME] Chat message broadcast to ride-${rideId} (EventBus + Socket.io)`);
 }
 
 export async function getDriverHeatmapData(): Promise<Array<{ lat: number; lng: number; count: number }>> {

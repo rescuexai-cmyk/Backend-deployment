@@ -41,6 +41,8 @@
   },
   "dependencies": {
     "@prisma/client": "^5.7.1",
+    "aedes": "^1.0.0",
+    "aedes-server-factory": "^0.2.1",
     "axios": "^1.6.2",
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.4",

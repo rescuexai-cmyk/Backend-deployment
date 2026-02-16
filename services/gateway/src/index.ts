@@ -94,18 +94,69 @@ const wsProxyOptions = {
   },
 };
 
+// SSE proxy options - disable response buffering for streaming
+const sseProxyOptions = {
+  target: REALTIME_SERVICE,
+  changeOrigin: true,
+  // Critical for SSE: disable response buffering so events stream immediately
+  onProxyRes: (proxyRes: any) => {
+    // Ensure no buffering for SSE connections
+    proxyRes.headers['x-accel-buffering'] = 'no';
+    proxyRes.headers['cache-control'] = 'no-cache, no-transform';
+  },
+  onProxyReq: (proxyReq: any, req: express.Request) => {
+    fixRequestBody(proxyReq, req);
+    if (req.headers.authorization && !proxyReq.headersSent) {
+      try {
+        proxyReq.setHeader('Authorization', req.headers.authorization);
+      } catch (e) {
+        // Headers already sent, ignore
+      }
+    }
+  },
+  onError: (err: Error, req: express.Request, res: express.Response) => {
+    logger.error('SSE proxy error', { error: err.message, path: req.path });
+    if (!res.headersSent) {
+      res.status(502).json({ success: false, message: 'Real-time service temporarily unavailable' });
+    }
+  },
+};
+
+// MQTT-over-WebSocket proxy options
+const MQTT_WS_SERVICE = process.env.MQTT_WS_SERVICE_URL || 'http://localhost:8883';
+const mqttWsProxyOptions = {
+  target: MQTT_WS_SERVICE,
+  changeOrigin: true,
+  ws: true,
+  onError: (err: Error, req: express.Request, res: express.Response) => {
+    logger.error('MQTT WebSocket proxy error', { error: err.message, path: req.path });
+  },
+};
+
 app.use('/api/auth', createProxyMiddleware({ target: AUTH_SERVICE, ...proxyOptions }));
 app.use('/api/user', createProxyMiddleware({ target: USER_SERVICE, ...proxyOptions }));
 app.use('/api/driver', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
 app.use('/api/notifications', createProxyMiddleware({ target: NOTIFICATION_SERVICE, ...proxyOptions }));
+// SSE endpoints need special proxy config (no buffering)
+app.use('/api/realtime/sse', createProxyMiddleware(sseProxyOptions));
+// Other realtime endpoints use standard proxy
 app.use('/api/realtime', createProxyMiddleware({ target: REALTIME_SERVICE, ...proxyOptions }));
 app.use('/api/admin', createProxyMiddleware({ target: ADMIN_SERVICE, ...proxyOptions }));
 app.use('/uploads', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
-// WebSocket proxy for Socket.io (realtime-service) - separate options to avoid header issues
+// WebSocket proxy for Socket.io (legacy, backward compatibility)
 app.use('/socket.io', createProxyMiddleware(wsProxyOptions));
+// MQTT over WebSocket proxy (for lightweight real-time messaging)
+app.use('/mqtt', createProxyMiddleware(mqttWsProxyOptions));
 
 app.listen(PORT, () => {
-  logger.info(`API Gateway running on port ${PORT}`);
+  logger.info(`════════════════════════════════════════════════════════════════`);
+  logger.info(`  Raahi API Gateway - Hybrid Transport Proxy`);
+  logger.info(`════════════════════════════════════════════════════════════════`);
+  logger.info(`  HTTP API    : port ${PORT}`);
+  logger.info(`  SSE Proxy   : /api/realtime/sse/* → ${REALTIME_SERVICE}`);
+  logger.info(`  Socket.io   : /socket.io → ${REALTIME_SERVICE} (legacy)`);
+  logger.info(`  MQTT WS     : /mqtt → ${MQTT_WS_SERVICE}`);
+  logger.info(`════════════════════════════════════════════════════════════════`);
 });

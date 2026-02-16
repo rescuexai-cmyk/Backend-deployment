@@ -9,6 +9,12 @@ import {
   broadcastDriverAssigned,
   broadcastRideCancelled,
   updateDriverLocationRealtime,
+  // RAMEN/Fireball in-memory state APIs
+  getNearbyDriversFromMemory,
+  registerRideInFireball,
+  transitionRideViaFireball,
+  verifyOtpViaFireball,
+  updateRideLocationViaFireball,
 } from './httpClients';
 
 const logger = createLogger('ride-service');
@@ -268,14 +274,73 @@ export async function createRide(req: CreateRideRequest) {
     },
   });
 
+  // Register ride in Fireball in-memory state store (instant push to subscribers)
+  try {
+    const { latLngToH3 } = require('@raahi/shared');
+    await registerRideInFireball({
+      id: ride.id,
+      status: 'PENDING',
+      passengerId: req.passengerId,
+      driverId: null,
+      pickupLat: req.pickupLat,
+      pickupLng: req.pickupLng,
+      dropLat: req.dropLat,
+      dropLng: req.dropLng,
+      pickupAddress: req.pickupAddress,
+      dropAddress: req.dropAddress,
+      pickupH3: latLngToH3(req.pickupLat, req.pickupLng),
+      totalFare: pricing.totalFare,
+      baseFare: pricing.baseFare,
+      distanceFare: pricing.distanceFare,
+      timeFare: pricing.timeFare,
+      surgeMultiplier: pricing.surgeMultiplier,
+      distance: pricing.distance,
+      duration: pricing.estimatedDuration,
+      rideOtp,
+      paymentMethod: req.paymentMethod,
+      vehicleType: req.vehicleType || 'SEDAN',
+      driverLat: null,
+      driverLng: null,
+      driverHeading: null,
+      driverSpeed: null,
+      createdAt: Date.now(),
+      assignedAt: null,
+      confirmedAt: null,
+      arrivedAt: null,
+      startedAt: null,
+      completedAt: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      cancellationReason: null,
+      passengerName: 'Passenger',
+      driverName: null,
+      driverPhone: null,
+      driverVehicleNumber: null,
+      driverVehicleModel: null,
+      driverRating: null,
+      driverProfileImage: null,
+    });
+  } catch (fireballError) {
+    logger.debug('[RIDE] Fireball registration failed (non-critical)', { error: fireballError });
+  }
+
   try {
     logger.info(`[RIDE] ========== RIDE BROADCAST START ==========`);
     logger.info(`[RIDE] Ride ID: ${ride.id}`);
     logger.info(`[RIDE] Pickup: ${req.pickupAddress} (${req.pickupLat}, ${req.pickupLng})`);
     logger.info(`[RIDE] Fare: ₹${pricing.totalFare}`);
     
-    logger.info(`[RIDE] Fetching nearby drivers...`);
-    const nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10);
+    // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
+    logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
+    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, req.vehicleType);
+    
+    if (!nearbyDrivers) {
+      logger.info(`[RIDE] RAMEN unavailable, falling back to DB query...`);
+      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10);
+    } else {
+      logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
+    }
+    
     const driverIds = nearbyDrivers.map((d: { id: string }) => d.id);
     
     logger.info(`[RIDE] Found ${driverIds.length} nearby drivers: ${JSON.stringify(driverIds)}`);
@@ -943,14 +1008,36 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
 }
 
 export async function updateDriverLocation(driverId: string, lat: number, lng: number, heading?: number, speed?: number) {
-  await prisma.driver.update({
-    where: { id: driverId },
-    data: { currentLatitude: lat, currentLongitude: lng, lastActiveAt: new Date() },
-  });
+  // RAMEN handles location updates in-memory with async DB batching.
+  // This eliminates the synchronous DB write on every location update.
   try {
     await updateDriverLocationRealtime(driverId, lat, lng, heading, speed);
   } catch (e) {
-    logger.error('Realtime driver location update failed', { error: e });
+    // If RAMEN is down, fall back to direct DB write
+    logger.warn('RAMEN location update failed, falling back to direct DB', { error: e });
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: { currentLatitude: lat, currentLongitude: lng, lastActiveAt: new Date() },
+    });
+  }
+
+  // Check if driver has an active ride — push location to ride room via Fireball
+  // This happens in-memory with zero DB writes
+  try {
+    // Get driver's active ride (we check DB only as fallback)
+    const activeRide = await prisma.ride.findFirst({
+      where: {
+        driverId,
+        status: { in: ['DRIVER_ASSIGNED', 'CONFIRMED', 'DRIVER_ARRIVED', 'RIDE_STARTED'] },
+      },
+      select: { id: true },
+    });
+    
+    if (activeRide) {
+      await updateRideLocationViaFireball(activeRide.id, lat, lng, heading, speed);
+    }
+  } catch (e) {
+    logger.debug('Fireball ride location update failed', { error: e });
   }
 }
 

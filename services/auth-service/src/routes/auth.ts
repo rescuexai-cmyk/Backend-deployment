@@ -8,33 +8,26 @@ import { createLogger } from '@raahi/shared';
 const logger = createLogger('auth-routes');
 const router = express.Router();
 
-/**
- * Send OTP via MSG91
- */
-router.post(
-  '/send-otp',
-  [body('phone').isMobilePhone('any'), body('countryCode').optional().isString()],
-  asyncHandler(async (req, res: Response) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
-      return;
-    }
-    const { phone, countryCode = '+91' } = req.body;
-    const result = await AuthService.sendMobileOTP(phone, countryCode);
-    res.status(200).json({ success: true, message: result.message, data: { mode: result.mode } });
-  })
-);
+// ─── Firebase Phone OTP Authentication ──────────────────────────────────
 
 /**
- * Verify OTP via MSG91
+ * Verify Firebase Phone OTP
+ * 
+ * Primary authentication endpoint for phone-based login.
+ * Client verifies OTP via Firebase Auth SDK, then sends the ID token here.
+ * 
+ * Flow:
+ *   1. Client calls Firebase Auth SDK → verifyPhoneNumber(phone)
+ *   2. Firebase sends OTP to user's phone
+ *   3. User enters OTP in the app
+ *   4. Client verifies OTP with Firebase → gets Firebase ID Token
+ *   5. Client sends ID Token to this endpoint
+ *   6. Backend verifies token → creates/logs in user → returns Raahi JWT
  */
 router.post(
   '/verify-otp',
   [
-    body('phone').isMobilePhone('any'),
-    body('otp').isLength({ min: 4, max: 6 }),
-    body('countryCode').optional().isString(),
+    body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
   ],
   asyncHandler(async (req, res: Response) => {
     const errors = validationResult(req);
@@ -42,21 +35,25 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { phone, otp, countryCode = '+91' } = req.body;
-    const result = await AuthService.verifyMobileOTP(phone, otp, countryCode);
-    res.status(200).json({ success: true, message: 'Authentication successful', data: result });
+
+    const { idToken } = req.body;
+    const result = await AuthService.authenticateWithFirebasePhone(idToken);
+
+    res.status(200).json({
+      success: true,
+      message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
+      data: result,
+    });
   })
 );
 
 /**
- * Resend OTP via MSG91
+ * Firebase phone auth (alias for verify-otp for clarity)
  */
 router.post(
-  '/resend-otp',
+  '/firebase-phone',
   [
-    body('phone').isMobilePhone('any'),
-    body('countryCode').optional().isString(),
-    body('method').optional().isIn(['text', 'voice']),
+    body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
   ],
   asyncHandler(async (req, res: Response) => {
     const errors = validationResult(req);
@@ -64,76 +61,83 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { phone, countryCode = '+91', method = 'text' } = req.body;
-    const result = await AuthService.resendOTP(phone, countryCode, method);
-    res.status(200).json({ success: true, message: result.message });
+
+    const { idToken } = req.body;
+    const result = await AuthService.authenticateWithFirebasePhone(idToken);
+
+    res.status(200).json({
+      success: true,
+      message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
+      data: result,
+    });
   })
 );
 
 /**
- * Get OTP service status (MSG91)
+ * Get OTP service status
  */
 router.get(
   '/otp-status',
   asyncHandler(async (_req, res: Response) => {
     const status = AuthService.getOTPServiceStatus();
-    res.status(200).json({ 
-      success: true, 
+    res.status(200).json({
+      success: true,
       data: {
         otpServiceAvailable: status.available,
         provider: status.provider,
-      }
+        projectId: status.projectId,
+      },
     });
   })
 );
 
+// ─── Legacy Phone Auth (dev/testing) ────────────────────────────────────
+
 /**
- * Phone authentication (after MSG91 OTP verified on client)
+ * Phone authentication (dev/testing fallback)
  * 
- * This endpoint is called after the client has verified OTP with MSG91 Widget.
- * The phone number is trusted since MSG91 verification was completed on client side.
- * Optionally, pass the widget access token for server-side verification.
+ * Allows direct phone authentication without Firebase.
+ * Kept for local development and automated testing.
+ * In production, clients should use /verify-otp or /firebase-phone.
  */
 router.post(
   '/phone',
   [
     body('phone').isString().notEmpty().withMessage('Phone number is required'),
-    body('widgetToken').optional().isString(),
   ],
   asyncHandler(async (req, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      res.status(400).json({ 
-        success: false, 
-        message: 'Validation failed', 
-        errors: errors.array() 
+      res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array(),
       });
       return;
     }
-    
-    let { phone, widgetToken } = req.body;
-    
+
+    let { phone } = req.body;
+
     // Normalize phone number format
     phone = phone.replace(/[\s\-()]/g, '');
     if (!phone.startsWith('+')) {
       phone = `+${phone}`;
     }
-    
+
     logger.info(`[AUTH] Phone authentication request for: ${phone}`);
-    
-    const result = await AuthService.authenticateWithVerifiedPhone(phone, widgetToken);
-    
-    res.status(200).json({ 
-      success: true, 
-      message: result.isNewUser ? 'Account created successfully' : 'Phone authentication successful', 
-      data: result 
+
+    const result = await AuthService.authenticateWithVerifiedPhone(phone);
+
+    res.status(200).json({
+      success: true,
+      message: result.isNewUser ? 'Account created successfully' : 'Phone authentication successful',
+      data: result,
     });
   })
 );
 
-/**
- * Google Authentication
- */
+// ─── Google Authentication ──────────────────────────────────────────────
+
 router.post(
   '/google',
   [body('idToken').isString()],
@@ -148,9 +152,8 @@ router.post(
   })
 );
 
-/**
- * Truecaller Authentication
- */
+// ─── Truecaller Authentication ──────────────────────────────────────────
+
 router.post(
   '/truecaller',
   [
@@ -166,12 +169,12 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    
+
     const { phone, profile, truecallerToken, accessToken } = req.body;
-    
+
     let payload: string | AuthService.TruecallerProfile;
     let token: string | undefined;
-    
+
     if (profile && profile.phoneNumber) {
       payload = profile;
       token = accessToken;
@@ -179,25 +182,24 @@ router.post(
       payload = phone;
       token = truecallerToken;
     } else {
-      res.status(400).json({ 
-        success: false, 
-        message: 'Either phone or profile.phoneNumber is required' 
+      res.status(400).json({
+        success: false,
+        message: 'Either phone or profile.phoneNumber is required',
       });
       return;
     }
-    
+
     const result = await AuthService.authenticateWithTruecaller(payload, token);
-    res.status(200).json({ 
-      success: true, 
-      message: result.isNewUser ? 'Account created with Truecaller' : 'Truecaller authentication successful', 
-      data: result 
+    res.status(200).json({
+      success: true,
+      message: result.isNewUser ? 'Account created with Truecaller' : 'Truecaller authentication successful',
+      data: result,
     });
   })
 );
 
-/**
- * Refresh Token
- */
+// ─── Token Management ───────────────────────────────────────────────────
+
 router.post(
   '/refresh',
   [body('refreshToken').isString()],
@@ -212,9 +214,6 @@ router.post(
   })
 );
 
-/**
- * Logout
- */
 router.post(
   '/logout',
   authenticate,
@@ -238,9 +237,8 @@ router.post(
   })
 );
 
-/**
- * Get current user profile
- */
+// ─── User Profile ───────────────────────────────────────────────────────
+
 router.get(
   '/me',
   authenticate,
@@ -254,9 +252,6 @@ router.get(
   })
 );
 
-/**
- * Update user profile
- */
 router.put(
   '/profile',
   authenticate,
@@ -273,7 +268,7 @@ router.put(
       return;
     }
     const { firstName, lastName, email, profileImage } = req.body;
-    
+
     try {
       const user = await AuthService.updateUserProfile(req.user!.id, {
         firstName,
@@ -296,15 +291,19 @@ router.put(
   })
 );
 
+// ─── Phone Number Management (for Google signup users) ──────────────────
+
 /**
- * Add phone number for users who signed up with Google
+ * Add phone number using Firebase verification
+ * 
+ * For users who signed up with Google and need to add a phone number.
+ * Client verifies the phone via Firebase OTP, then sends the ID token here.
  */
 router.post(
   '/add-phone',
   authenticate,
   [
-    body('phone').isMobilePhone('any').withMessage('Valid phone number is required'),
-    body('countryCode').optional().isString().default('+91'),
+    body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
   ],
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
@@ -312,44 +311,25 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    
-    const { phone, countryCode = '+91' } = req.body;
-    const result = await AuthService.addPhoneNumber(req.user!.id, phone, countryCode);
-    
-    res.status(200).json({ 
-      success: true, 
-      message: result.otpSent ? 'OTP sent to verify phone number' : 'Phone number added successfully',
-      data: { otpSent: result.otpSent }
-    });
-  })
-);
 
-/**
- * Verify phone number with OTP (for Google signup users)
- */
-router.post(
-  '/verify-phone',
-  authenticate,
-  [
-    body('phone').isMobilePhone('any').withMessage('Valid phone number is required'),
-    body('otp').isLength({ min: 4, max: 6 }).withMessage('Valid OTP is required'),
-    body('countryCode').optional().isString().default('+91'),
-  ],
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
-      return;
+    try {
+      const result = await AuthService.addPhoneWithFirebase(req.user!.id, req.body.idToken);
+      res.status(200).json({
+        success: true,
+        message: 'Phone number verified and added successfully',
+        data: result,
+      });
+    } catch (error: any) {
+      if (error.name === 'DuplicatePhoneError') {
+        res.status(409).json({
+          success: false,
+          message: error.message,
+          code: 'PHONE_ALREADY_IN_USE',
+        });
+        return;
+      }
+      throw error;
     }
-    
-    const { phone, otp, countryCode = '+91' } = req.body;
-    const user = await AuthService.verifyAndAddPhone(req.user!.id, phone, otp, countryCode);
-    
-    res.status(200).json({ 
-      success: true, 
-      message: 'Phone number verified and added successfully',
-      data: { user }
-    });
   })
 );
 

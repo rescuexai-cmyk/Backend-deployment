@@ -156,15 +156,141 @@ export async function broadcastRideChatMessage(
 }
 
 export async function updateDriverLocationRealtime(driverId: string, lat: number, lng: number, heading?: number, speed?: number) {
-  // Location updates are high-frequency and non-critical - don't retry
+  // Location updates go to RAMEN (in-memory) first, then async to DB
   try {
     await axios.post(
-      `${REALTIME_SERVICE_URL}/api/realtime/update-driver-location`,
+      `${REALTIME_SERVICE_URL}/internal/driver-location`,
       { driverId, lat, lng, heading, speed },
-      { timeout: 2000 } // Shorter timeout for location updates
+      { 
+        timeout: 2000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
     );
   } catch (error) {
-    // Silently fail location updates - they're sent frequently
-    logger.debug('Location update failed', { driverId, error: (error as Error).message });
+    // Fallback to legacy endpoint if RAMEN is down
+    try {
+      await axios.post(
+        `${REALTIME_SERVICE_URL}/api/realtime/update-driver-location`,
+        { driverId, lat, lng, heading, speed },
+        { timeout: 2000 }
+      );
+    } catch {
+      logger.debug('Location update failed', { driverId, error: (error as Error).message });
+    }
+  }
+}
+
+// ─── RAMEN/Fireball In-Memory State APIs ──────────────────────────────────────
+
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+/**
+ * Find nearby drivers from RAMEN in-memory H3 index (0.01ms vs 20-100ms DB query).
+ * Falls back to pricing service DB query if RAMEN is unavailable.
+ */
+export async function getNearbyDriversFromMemory(lat: number, lng: number, radius: number = 10, vehicleType?: string) {
+  try {
+    const { data } = await axios.get(`${REALTIME_SERVICE_URL}/internal/nearby-drivers`, {
+      params: { lat, lng, radius, vehicleType },
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      timeout: 3000,
+    });
+    
+    if (data.success && data.data.source === 'in-memory-ramen') {
+      logger.info(`[RAMEN] Found ${data.data.count} nearby drivers from in-memory store`);
+      return data.data.drivers as Array<{ id: string; [key: string]: any }>;
+    }
+    
+    // Fall back to DB query
+    return null;
+  } catch (error) {
+    logger.debug('RAMEN nearby-drivers unavailable, falling back to DB', { error: (error as Error).message });
+    return null;
+  }
+}
+
+/**
+ * Register ride in Fireball in-memory state store.
+ * Called after creating the ride in the database.
+ */
+export async function registerRideInFireball(ride: any) {
+  try {
+    await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/register-ride`,
+      { ride },
+      {
+        timeout: 3000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
+    );
+    logger.info(`[FIREBALL] Ride ${ride.id} registered in memory`);
+  } catch (error) {
+    logger.debug('Fireball registration failed (non-critical)', { error: (error as Error).message });
+  }
+}
+
+/**
+ * Transition ride status via Fireball (instant push, async DB write).
+ * Falls back to direct DB write if Fireball is unavailable.
+ */
+export async function transitionRideViaFireball(
+  rideId: string,
+  newStatus: string,
+  triggeredBy: string,
+  additionalData?: Record<string, any>,
+): Promise<boolean> {
+  try {
+    const { data } = await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/ride-transition`,
+      { rideId, newStatus, triggeredBy, additionalData },
+      {
+        timeout: 3000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
+    );
+    return data.success;
+  } catch (error) {
+    logger.debug('Fireball transition failed, falling back to direct update', { error: (error as Error).message });
+    return false;
+  }
+}
+
+/**
+ * Verify OTP via Fireball (in-memory, no DB read).
+ * Falls back to DB read if Fireball is unavailable.
+ */
+export async function verifyOtpViaFireball(rideId: string, otp: string): Promise<{ valid: boolean; error?: string } | null> {
+  try {
+    const { data } = await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/verify-otp`,
+      { rideId, otp },
+      {
+        timeout: 2000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
+    );
+    return { valid: data.success, error: data.error };
+  } catch (error) {
+    logger.debug('Fireball OTP verification unavailable, falling back to DB', { error: (error as Error).message });
+    return null; // null = use DB fallback
+  }
+}
+
+/**
+ * Update ride location via Fireball (in-memory, no DB write, instant push).
+ */
+export async function updateRideLocationViaFireball(rideId: string, lat: number, lng: number, heading?: number, speed?: number) {
+  try {
+    await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/ride-location`,
+      { rideId, lat, lng, heading, speed },
+      {
+        timeout: 2000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
+    );
+  } catch (error) {
+    // Non-critical - location updates are high frequency
+    logger.debug('Fireball ride-location failed', { error: (error as Error).message });
   }
 }
