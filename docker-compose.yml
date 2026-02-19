@@ -94,6 +94,10 @@ services:
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
       TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
       TWILIO_VERIFY_SERVICE_SID: ${TWILIO_VERIFY_SERVICE_SID:-}
+      # Firebase configuration
+      FIREBASE_SERVICE_ACCOUNT_PATH: /app/credentials/firebase-service-account.json
+    volumes:
+      - ./credentials:/app/credentials:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -212,6 +216,10 @@ services:
       PORT: 5006
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      # Firebase configuration
+      FIREBASE_SERVICE_ACCOUNT_PATH: /app/credentials/firebase-service-account.json
+    volumes:
+      - ./credentials:/app/credentials:ro
     depends_on:
       postgres:
         condition: service_healthy

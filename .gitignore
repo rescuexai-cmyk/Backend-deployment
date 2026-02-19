@@ -13,6 +13,7 @@ build/
 # Firebase credentials (KEEP SECRET!)
 firebase-service-account.json
 *-firebase-adminsdk-*.json
+credentials/
 
 # IDE
 .vscode/
