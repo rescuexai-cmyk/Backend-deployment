@@ -79,6 +79,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       TRUECALLER_CLIENT_ID: ${TRUECALLER_CLIENT_ID}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      ALLOW_DEV_OTP: ${ALLOW_DEV_OTP:-false}
     depends_on:
       postgres:
         condition: service_healthy

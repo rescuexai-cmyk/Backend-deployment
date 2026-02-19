@@ -14,29 +14,74 @@ const router = express.Router();
  * Verify Firebase Phone OTP
  * 
  * Primary authentication endpoint for phone-based login.
- * Client verifies OTP via Firebase Auth SDK, then sends the ID token here.
  * 
- * Flow:
- *   1. Client calls Firebase Auth SDK → verifyPhoneNumber(phone)
- *   2. Firebase sends OTP to user's phone
- *   3. User enters OTP in the app
- *   4. Client verifies OTP with Firebase → gets Firebase ID Token
- *   5. Client sends ID Token to this endpoint
- *   6. Backend verifies token → creates/logs in user → returns Raahi JWT
+ * Supports two modes:
+ * 
+ * MODE 1 - Firebase Token (production):
+ *   Body: { "idToken": "firebase-id-token" }
+ *   Client verifies OTP via Firebase Auth SDK, then sends the ID token here.
+ * 
+ * MODE 2 - Dev/Testing mode (when Firebase bypassed):
+ *   Body: { "phone": "+91XXXXXXXXXX", "otp": "123456" }
+ *   Accepts static OTP "123456" for any phone number in dev/test mode.
+ *   In production, only works if ALLOW_DEV_OTP=true is set.
  */
 router.post(
   '/verify-otp',
   [
-    body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
+    body('idToken').optional().isString(),
+    body('phone').optional().isString(),
+    body('otp').optional().isString(),
   ],
   asyncHandler(async (req, res: Response) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+    const { idToken, phone, otp } = req.body;
+
+    // MODE 2: Dev/Testing - direct phone + OTP verification
+    if (phone && otp) {
+      const isDevMode = process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_OTP === 'true';
+      
+      if (!isDevMode) {
+        res.status(403).json({
+          success: false,
+          message: 'Dev OTP mode is disabled in production. Use Firebase authentication.',
+          code: 'DEV_OTP_DISABLED',
+        });
+        return;
+      }
+
+      // Accept static OTP "123456" for dev/testing
+      if (otp !== '123456') {
+        res.status(401).json({
+          success: false,
+          message: 'Invalid OTP',
+          code: 'INVALID_OTP',
+        });
+        return;
+      }
+
+      logger.info(`[AUTH] Dev mode OTP verification for phone: ${phone}`);
+      const result = await AuthService.authenticateWithVerifiedPhone(phone);
+
+      res.status(200).json({
+        success: true,
+        message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
+        data: result,
+      });
       return;
     }
 
-    const { idToken } = req.body;
+    // MODE 1: Firebase Token verification (production flow)
+    if (!idToken) {
+      res.status(400).json({
+        success: false,
+        message: 'Either idToken (Firebase) or phone+otp (dev mode) is required',
+        errors: [
+          { msg: 'Provide idToken for Firebase auth, or phone+otp for dev mode' }
+        ],
+      });
+      return;
+    }
+
     const result = await AuthService.authenticateWithFirebasePhone(idToken);
 
     res.status(200).json({
@@ -94,11 +139,71 @@ router.get(
 // ─── Legacy Phone Auth (dev/testing) ────────────────────────────────────
 
 /**
+ * Send OTP (dev/testing endpoint)
+ * 
+ * In dev mode, this just returns success (OTP is always "123456").
+ * Client should then call /verify-otp with { phone, otp: "123456" }
+ */
+router.post(
+  '/send-otp',
+  [
+    body('phone').isString().notEmpty().withMessage('Phone number is required'),
+  ],
+  asyncHandler(async (req, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array(),
+      });
+      return;
+    }
+
+    let { phone } = req.body;
+
+    // Normalize phone number format
+    phone = phone.replace(/[\s\-()]/g, '');
+    if (!phone.startsWith('+')) {
+      phone = `+${phone}`;
+    }
+
+    const isDevMode = process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_OTP === 'true';
+
+    if (!isDevMode) {
+      res.status(403).json({
+        success: false,
+        message: 'Dev OTP mode is disabled in production. Use Firebase authentication on the client.',
+        code: 'DEV_OTP_DISABLED',
+      });
+      return;
+    }
+
+    logger.info(`[AUTH] Dev mode: send-otp requested for ${phone} (OTP: 123456)`);
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP sent successfully',
+      data: {
+        phone,
+        otpSent: true,
+        expiresIn: 300, // 5 minutes
+        // In dev mode, include the OTP in response for convenience
+        ...(process.env.NODE_ENV !== 'production' && { devOtp: '123456' }),
+      },
+    });
+  })
+);
+
+/**
  * Phone authentication (dev/testing fallback)
  * 
  * Allows direct phone authentication without Firebase.
  * Kept for local development and automated testing.
  * In production, clients should use /verify-otp or /firebase-phone.
+ * 
+ * This endpoint creates/logs in a user directly by phone number.
+ * Use this when you've verified the OTP on the client side (e.g., with "123456").
  */
 router.post(
   '/phone',
@@ -126,13 +231,28 @@ router.post(
 
     logger.info(`[AUTH] Phone authentication request for: ${phone}`);
 
-    const result = await AuthService.authenticateWithVerifiedPhone(phone);
+    try {
+      const result = await AuthService.authenticateWithVerifiedPhone(phone);
 
-    res.status(200).json({
-      success: true,
-      message: result.isNewUser ? 'Account created successfully' : 'Phone authentication successful',
-      data: result,
-    });
+      res.status(200).json({
+        success: true,
+        message: result.isNewUser ? 'Account created successfully' : 'Phone authentication successful',
+        data: result,
+      });
+    } catch (error: any) {
+      logger.error(`[AUTH] Phone auth failed for ${phone}:`, { error: error.message, stack: error.stack });
+      
+      if (error.message?.includes('Invalid phone number format')) {
+        res.status(400).json({
+          success: false,
+          message: 'Invalid phone number format. Use E.164 format (e.g., +919876543210)',
+          code: 'INVALID_PHONE_FORMAT',
+        });
+        return;
+      }
+      
+      throw error;
+    }
   })
 );
 
