@@ -20,6 +20,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: raahi-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   gateway:
     build:
       context: .
@@ -123,8 +137,15 @@ services:
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
       PENALTY_STOP_RIDING_AMOUNT: ${PENALTY_STOP_RIDING_AMOUNT:-10}
+      REDIS_URL: redis://redis:6379
+      GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY:-}
+      GOOGLE_VISION_KEY_FILE: ${GOOGLE_VISION_KEY_FILE:-}
+      GOOGLE_VISION_CREDENTIALS: ${GOOGLE_VISION_CREDENTIALS:-}
+      VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5003/health"]
@@ -244,3 +265,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

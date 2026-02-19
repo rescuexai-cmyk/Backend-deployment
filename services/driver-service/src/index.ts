@@ -11,6 +11,9 @@ import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, che
 import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
 import * as DigiLocker from './digilocker';
 import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured } from './storage';
+import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
+import { startVerificationWorker, stopVerificationWorker } from './documentVerificationWorker';
+import { isVisionConfigured } from './visionService';
 
 // Helper function to get platform config with error handling
 async function getPlatformConfig(key: string, defaultValue: string): Promise<string> {
@@ -1058,26 +1061,41 @@ app.post('/api/driver/onboarding/document/upload', authenticate, upload.single('
     return;
   }
   
-  // Get document URL (works for both DO Spaces and local storage)
   const documentUrl = getDocumentUrl(req.file as Express.Multer.File & { key?: string; location?: string });
+  const docType = req.body.documentType.toUpperCase();
   
   const document = await prisma.driverDocument.create({
     data: {
       driverId: driver.id,
-      documentType: req.body.documentType.toUpperCase(),
+      documentType: docType,
       documentUrl,
       documentName: req.file.originalname,
       documentSize: req.file.size,
+      verificationStatus: 'pending',
     },
   });
   
   let newStatus = driver.onboardingStatus;
-  if (req.body.documentType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
-  else if (req.body.documentType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
+  if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
+  else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
   await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: newStatus } });
   
-  logger.info(`[DOCUMENT] Uploaded ${req.body.documentType} for driver ${driver.id}, storage: ${getStorageConfig().type}`);
+  logger.info(`[DOCUMENT] Uploaded ${docType} for driver ${driver.id}, storage: ${getStorageConfig().type}`);
   
+  // Queue async verification if Vision API and Redis are available
+  let verificationQueued = false;
+  const supportedTypes = ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'RC', 'INSURANCE'];
+  
+  if (isVisionConfigured() && isQueueAvailable() && supportedTypes.includes(docType)) {
+    try {
+      await addVerificationJob(document.id, driver.id, docType, documentUrl);
+      verificationQueued = true;
+      logger.info(`[QUEUE] Verification job queued for ${docType} (document ${document.id})`);
+    } catch (err: any) {
+      logger.error(`[QUEUE] Failed to queue verification job`, { error: err.message || err });
+    }
+  }
+
   res.status(201).json({ 
     success: true, 
     message: 'Document uploaded successfully', 
@@ -1088,6 +1106,8 @@ app.post('/api/driver/onboarding/document/upload', authenticate, upload.single('
       uploaded_at: document.uploadedAt, 
       next_step: newStatus,
       storage_type: getStorageConfig().type,
+      verification_status: 'pending',
+      verification_queued: verificationQueued,
     } 
   });
 }));
@@ -1104,8 +1124,97 @@ app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(a
     res.status(400).json({ success: false, message: 'Missing required documents', data: { missing_documents: docCheck.missing, required_documents: [...REQUIRED_DOCUMENTS] } });
     return;
   }
+
+  const allAiVerified = driver.documents.every((d) => d.isVerified);
+  if (allAiVerified && docCheck.isComplete) {
+    await prisma.driver.update({
+      where: { id: driver.id },
+      data: {
+        onboardingStatus: OnboardingStatus.COMPLETED,
+        isVerified: true,
+        documentsSubmittedAt: new Date(),
+        documentsVerifiedAt: new Date(),
+        verificationNotes: 'All documents auto-verified by AI Vision.',
+      },
+    });
+    res.json({
+      success: true,
+      message: 'All documents were auto-verified! You can start accepting rides.',
+      data: {
+        driver_id: driver.id,
+        status: 'COMPLETED',
+        auto_verified: true,
+        submitted_at: new Date(),
+      },
+    });
+    return;
+  }
+
   await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: OnboardingStatus.DOCUMENT_VERIFICATION, documentsSubmittedAt: new Date() } });
-  res.json({ success: true, message: 'Documents submitted for verification', data: { driver_id: driver.id, status: 'DOCUMENT_VERIFICATION', submitted_at: new Date(), estimated_verification_time: '24-48 hours' } });
+
+  const verificationSummary = driver.documents.map((d: any) => ({
+    type: d.documentType,
+    verification_status: d.verificationStatus,
+    ai_verified: d.aiVerified,
+    ai_confidence: d.aiConfidence,
+    mismatch_reason: d.aiMismatchReason,
+  }));
+  const pendingCount = verificationSummary.filter((d) => d.verification_status !== 'verified').length;
+
+  res.json({
+    success: true,
+    message: pendingCount > 0
+      ? `${pendingCount} document(s) pending verification. Estimated wait: 24-48 hours.`
+      : 'Documents submitted for verification',
+    data: {
+      driver_id: driver.id,
+      status: 'DOCUMENT_VERIFICATION',
+      submitted_at: new Date(),
+      verification_summary: verificationSummary,
+      pending_count: pendingCount,
+      estimated_verification_time: pendingCount > 0 ? '24-48 hours' : 'instant',
+    },
+  });
+}));
+
+/**
+ * Get verification status for a specific document
+ */
+app.get('/api/driver/documents/:id/verification-status', authenticate, asyncHandler(async (req: AuthRequest, res) => {
+  const { id } = req.params;
+  
+  const document = await prisma.driverDocument.findUnique({
+    where: { id },
+    include: { driver: true },
+  });
+  
+  if (!document) {
+    res.status(404).json({ success: false, message: 'Document not found' });
+    return;
+  }
+  
+  if (document.driver.userId !== req.user!.id) {
+    res.status(403).json({ success: false, message: 'Access denied' });
+    return;
+  }
+  
+  res.json({
+    success: true,
+    data: {
+      document_id: document.id,
+      document_type: document.documentType,
+      verification_status: document.verificationStatus,
+      is_verified: document.isVerified,
+      ai_verified: document.aiVerified,
+      ai_confidence: document.aiConfidence,
+      ai_extracted_data: document.aiExtractedData,
+      ai_verified_at: document.aiVerifiedAt,
+      mismatch_reason: document.aiMismatchReason,
+      verified_at: document.verifiedAt,
+      verified_by: document.verifiedBy,
+      rejection_reason: document.rejectionReason,
+    },
+  });
 }));
 
 /**
@@ -1599,8 +1708,27 @@ app.use(errorHandler);
 
 const start = async () => {
   await connectDatabase();
+  
+  // Start document verification worker if Redis is available
+  if (isQueueAvailable()) {
+    startVerificationWorker();
+    logger.info('[WORKER] Document verification worker started');
+  } else {
+    logger.warn('[WORKER] Redis not available, document verification worker not started');
+  }
+  
   app.listen(PORT, () => logger.info(`Driver service running on port ${PORT}`));
 };
+
+const shutdown = async () => {
+  logger.info('Shutting down driver service...');
+  await stopVerificationWorker();
+  await closeQueues();
+  process.exit(0);
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 start().catch((err) => {
   logger.error('Failed to start driver-service', { error: err });

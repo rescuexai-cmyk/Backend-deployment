@@ -179,15 +179,24 @@ model DriverDocument {
   documentSize      Int?
   isVerified        Boolean   @default(false)
   verifiedAt        DateTime?
-  verifiedBy        String?   // Admin user ID who verified
+  verifiedBy        String?   // Admin user ID who verified, or "AI_VISION" for auto-verification
   rejectionReason   String?
   uploadedAt        DateTime  @default(now())
+  
+  // AI Vision verification fields
+  aiVerified           Boolean   @default(false)
+  aiConfidence         Float?
+  aiExtractedData      Json?
+  aiVerifiedAt         DateTime?
+  aiMismatchReason     String?
+  verificationStatus   String    @default("pending") // pending, processing, verified, flagged, failed
   
   // Relations
   driver            Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
   
   @@index([driverId])
   @@index([documentType])
+  @@index([verificationStatus])
   @@map("driver_documents")
 }
 
