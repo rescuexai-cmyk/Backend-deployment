@@ -5,6 +5,7 @@ import { connectDatabase, authenticate, AuthRequest } from '@raahi/shared';
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
+import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
 import { OnboardingStatus } from '@prisma/client';
 
 const logger = createLogger('admin-service');
@@ -74,14 +75,16 @@ function formatDriver(driver: any) {
     onboarding_status: driver.onboardingStatus,
     vehicle_info: { type: driver.vehicleType, model: driver.vehicleModel, number: driver.vehicleNumber, color: driver.vehicleColor, year: driver.vehicleYear },
     documents: driver.documents.map((d: any) => ({ id: d.id, type: d.documentType, url: d.documentUrl, name: d.documentName, size: d.documentSize, is_verified: d.isVerified, verified_at: d.verifiedAt, verified_by: d.verifiedBy, rejection_reason: d.rejectionReason, uploaded_at: d.uploadedAt })),
-    documents_summary: { total: driver.documents.length, verified: driver.documents.filter((d: any) => d.isVerified).length, pending: pendingDocs.length, rejected: rejectedDocs.length, all_verified: allDocsVerified },
+    documents_summary: { total: driver.documents.length, verified: driver.documents.filter((d: any) => d.isVerified).length, pending: pendingDocs.length, rejected: rejectedDocs.length, all_verified: allDocsVerified, required: [...REQUIRED_DOCUMENTS] },
     submitted_at: driver.documentsSubmittedAt,
     verified_at: driver.documentsVerifiedAt,
     preferred_language: driver.preferredLanguage,
     service_types: driver.serviceTypes,
     verification_notes: driver.verificationNotes,
     is_verified: driver.isVerified,
+    is_active: driver.isActive,
     is_online: driver.isOnline,
+    can_start_rides: canDriverStartRides(driver),
     rating: driver.rating,
     total_trips: driver.totalRides,
   };
@@ -265,6 +268,164 @@ app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireAdmin, 
   });
   res.json({ success: true, message: approved ? 'All documents approved successfully' : 'All documents rejected', data: { driver_id: driverId, documents_updated: driver.documents.length, onboarding_status: newStatus, is_verified: approved, can_start_rides: approved, verification_notes: verificationNotes } });
 }));
+
+/**
+ * POST /api/admin/driver/:id/verify
+ * 
+ * Admin endpoint to verify a driver.
+ * Sets isVerified=true, onboardingStatus=COMPLETED, and verifies all documents.
+ */
+app.post(
+  '/api/admin/driver/:id/verify',
+  authenticate,
+  requireAdmin,
+  [body('notes').optional().isString()],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+    
+    const { id: driverId } = req.params;
+    const { notes } = req.body;
+    const now = new Date();
+    
+    const driver = await prisma.driver.findUnique({ 
+      where: { id: driverId }, 
+      include: { documents: true, user: { select: { firstName: true, lastName: true, email: true } } } 
+    });
+    
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+    
+    // Verify all documents
+    await prisma.driverDocument.updateMany({
+      where: { driverId },
+      data: { 
+        isVerified: true, 
+        verifiedAt: now, 
+        verifiedBy: req.user!.id, 
+        rejectionReason: null,
+      },
+    });
+    
+    // Update driver status
+    const verificationNotes = notes || 'All documents verified. You can now start accepting rides!';
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: { 
+        onboardingStatus: OnboardingStatus.COMPLETED, 
+        isVerified: true, 
+        isActive: true,
+        documentsVerifiedAt: now, 
+        verificationNotes,
+      },
+    });
+    
+    logger.info(`[ADMIN] Driver ${driverId} verified by admin ${req.user!.id}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Driver verified successfully',
+      data: { 
+        driver_id: driverId, 
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        email: driver.user.email,
+        documents_verified: driver.documents.length,
+        onboarding_status: COMPLETED_ONBOARDING_STATUS,
+        is_verified: true,
+        is_active: true,
+        can_start_rides: true,
+        verified_at: now,
+        verified_by: req.user!.id,
+        verification_notes: verificationNotes,
+      },
+    });
+  })
+);
+
+/**
+ * POST /api/admin/driver/:id/reject
+ * 
+ * Admin endpoint to reject a driver's verification.
+ * Sets isVerified=false, onboardingStatus=REJECTED, and marks all documents as rejected.
+ */
+app.post(
+  '/api/admin/driver/:id/reject',
+  authenticate,
+  requireAdmin,
+  [
+    body('reason').isString().notEmpty().withMessage('Rejection reason is required'),
+    body('notes').optional().isString(),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+    
+    const { id: driverId } = req.params;
+    const { reason, notes } = req.body;
+    const now = new Date();
+    
+    const driver = await prisma.driver.findUnique({ 
+      where: { id: driverId }, 
+      include: { documents: true, user: { select: { firstName: true, lastName: true, email: true } } } 
+    });
+    
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+    
+    // Mark all documents as rejected
+    await prisma.driverDocument.updateMany({
+      where: { driverId },
+      data: { 
+        isVerified: false, 
+        verifiedAt: now, 
+        verifiedBy: req.user!.id, 
+        rejectionReason: reason,
+      },
+    });
+    
+    // Update driver status
+    const verificationNotes = notes || `Verification rejected: ${reason}. Please re-upload valid documents.`;
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: { 
+        onboardingStatus: OnboardingStatus.REJECTED, 
+        isVerified: false, 
+        documentsVerifiedAt: null, 
+        verificationNotes,
+      },
+    });
+    
+    logger.info(`[ADMIN] Driver ${driverId} rejected by admin ${req.user!.id}: ${reason}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Driver verification rejected',
+      data: { 
+        driver_id: driverId, 
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        email: driver.user.email,
+        documents_rejected: driver.documents.length,
+        onboarding_status: OnboardingStatus.REJECTED,
+        is_verified: false,
+        can_start_rides: false,
+        rejected_at: now,
+        rejected_by: req.user!.id,
+        rejection_reason: reason,
+        verification_notes: verificationNotes,
+      },
+    });
+  })
+);
 
 app.get('/api/admin/statistics', authenticate, requireAdmin, asyncHandler(async (req: AuthRequest, res) => {
   const [totalDrivers, verifiedDrivers, pendingVerification, rejectedDrivers, totalDocuments, pendingDocuments, verifiedDocuments] = await Promise.all([

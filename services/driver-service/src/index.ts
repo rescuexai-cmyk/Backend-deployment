@@ -2,14 +2,15 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import multer from 'multer';
 import { body, query, validationResult } from 'express-validator';
 import { connectDatabase, authenticate, authenticateDriver, AuthRequest } from '@raahi/shared';
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger, latLngToH3 } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
+import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments } from '@raahi/shared';
 import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
 import * as DigiLocker from './digilocker';
+import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured } from './storage';
 
 // Helper function to get platform config with error handling
 async function getPlatformConfig(key: string, defaultValue: string): Promise<string> {
@@ -46,24 +47,18 @@ const logger = createLogger('driver-service');
 const app = express();
 const PORT = process.env.PORT || 5003;
 
+// Local uploads directory (for fallback or serving existing local files)
 const uploadDir = path.join(process.cwd(), 'uploads', 'driver-documents');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => cb(null, file.fieldname + '-' + Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(file.originalname)),
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = /jpeg|jpg|png|pdf/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase()) && allowed.test(file.mimetype)) cb(null, true);
-    else cb(new Error('Only .png, .jpg, .jpeg and .pdf allowed'));
-  },
-});
+// Document upload middleware (uses DO Spaces if configured, else local disk)
+const upload = createUploadMiddleware();
+
+// Log storage configuration on startup
+const storageConfig = getStorageConfig();
+logger.info(`[STORAGE] Using ${storageConfig.type} storage${storageConfig.bucket ? ` (bucket: ${storageConfig.bucket})` : ''}`);
 
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
@@ -112,7 +107,7 @@ app.get('/api/driver/profile', authenticateDriver, asyncHandler(async (req: Auth
       license_number: driver.licenseNumber,
       vehicle_info: { make: driver.vehicleModel?.split(' ')[0] || 'Unknown', model: driver.vehicleModel, year: driver.vehicleYear, license_plate: driver.vehicleNumber, color: driver.vehicleColor },
       documents: { license_verified: driver.documents.some((d) => d.documentType === 'LICENSE' && d.isVerified), insurance_verified: driver.documents.some((d) => d.documentType === 'INSURANCE' && d.isVerified), vehicle_registration_verified: driver.documents.some((d) => d.documentType === 'RC' && d.isVerified), all_verified: allDocsVerified, pending_count: driver.documents.filter((d) => !d.isVerified).length },
-      onboarding: { status: driver.onboardingStatus, is_verified: driver.isVerified, documents_submitted: driver.documentsSubmittedAt != null, documents_verified: allDocsVerified, can_start_rides: driver.isVerified && allDocsVerified, verification_notes: driver.verificationNotes },
+      onboarding: { status: driver.onboardingStatus, is_verified: driver.isVerified, documents_submitted: driver.documentsSubmittedAt != null, documents_verified: allDocsVerified, can_start_rides: canDriverStartRides(driver), verification_notes: driver.verificationNotes },
       status: driver.isActive ? 'active' : 'inactive',
       rating: driver.rating,
       rating_count: driver.ratingCount,
@@ -143,6 +138,23 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
   const previousOnlineStatus = driver.isOnline;
   const newOnlineStatus = req.body.online;
   const statusChangeTimestamp = new Date();
+  
+  // CRITICAL: When driver tries to go ONLINE, enforce verification
+  if (newOnlineStatus) {
+    if (!canDriverStartRides(driver)) {
+      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} not verified (isActive=${driver.isActive}, isVerified=${driver.isVerified}, onboardingStatus=${driver.onboardingStatus})`);
+      res.status(403).json({
+        success: false,
+        ...DRIVER_NOT_VERIFIED_ERROR,
+        verificationState: {
+          isActive: driver.isActive,
+          isVerified: driver.isVerified,
+          onboardingStatus: driver.onboardingStatus,
+        },
+      });
+      return;
+    }
+  }
   
   // When driver tries to go ONLINE: block if they have unpaid "Stop Riding" penalty
   if (newOnlineStatus) {
@@ -1045,20 +1057,39 @@ app.post('/api/driver/onboarding/document/upload', authenticate, upload.single('
     res.status(404).json({ success: false, message: 'Driver profile not found' });
     return;
   }
+  
+  // Get document URL (works for both DO Spaces and local storage)
+  const documentUrl = getDocumentUrl(req.file as Express.Multer.File & { key?: string; location?: string });
+  
   const document = await prisma.driverDocument.create({
     data: {
       driverId: driver.id,
       documentType: req.body.documentType.toUpperCase(),
-      documentUrl: `/uploads/driver-documents/${req.file.filename}`,
+      documentUrl,
       documentName: req.file.originalname,
       documentSize: req.file.size,
     },
   });
+  
   let newStatus = driver.onboardingStatus;
   if (req.body.documentType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
   else if (req.body.documentType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
   await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: newStatus } });
-  res.status(201).json({ success: true, message: 'Document uploaded successfully', data: { document_id: document.id, document_type: document.documentType, document_url: document.documentUrl, uploaded_at: document.uploadedAt, next_step: newStatus } });
+  
+  logger.info(`[DOCUMENT] Uploaded ${req.body.documentType} for driver ${driver.id}, storage: ${getStorageConfig().type}`);
+  
+  res.status(201).json({ 
+    success: true, 
+    message: 'Document uploaded successfully', 
+    data: { 
+      document_id: document.id, 
+      document_type: document.documentType, 
+      document_url: document.documentUrl, 
+      uploaded_at: document.uploadedAt, 
+      next_step: newStatus,
+      storage_type: getStorageConfig().type,
+    } 
+  });
 }));
 
 app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(async (req: AuthRequest, res) => {
@@ -1067,11 +1098,10 @@ app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(a
     res.status(404).json({ success: false, message: 'Driver profile not found' });
     return;
   }
-  const required = ['LICENSE', 'PAN_CARD', 'RC', 'AADHAAR_CARD', 'PROFILE_PHOTO'];
   const uploaded = driver.documents.map((d) => d.documentType);
-  const missing = required.filter((r) => !uploaded.includes(r as any));
-  if (missing.length > 0) {
-    res.status(400).json({ success: false, message: 'Missing required documents', data: { missing_documents: missing } });
+  const docCheck = checkRequiredDocuments(uploaded);
+  if (!docCheck.isComplete) {
+    res.status(400).json({ success: false, message: 'Missing required documents', data: { missing_documents: docCheck.missing, required_documents: [...REQUIRED_DOCUMENTS] } });
     return;
   }
   await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: OnboardingStatus.DOCUMENT_VERIFICATION, documentsSubmittedAt: new Date() } });
@@ -1092,8 +1122,8 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   const pendingDocs = driver.documents.filter((d) => !d.isVerified);
   const verifiedDocs = driver.documents.filter((d) => d.isVerified);
   
-  // Calculate verification progress percentage
-  const requiredDocs = ['LICENSE', 'RC', 'INSURANCE', 'PAN_CARD', 'AADHAAR_CARD', 'PROFILE_PHOTO'];
+  // Calculate verification progress percentage using shared constants
+  const requiredDocs = [...REQUIRED_DOCUMENTS];
   const uploadedDocTypes = driver.documents.map(d => d.documentType);
   const verifiedDocTypes = verifiedDocs.map(d => d.documentType);
   
@@ -1163,7 +1193,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
       documents_verified: allDocsVerified,
       documents_verified_at: driver.documentsVerifiedAt,
       verification_progress: verificationProgress,
-      can_start_rides: driver.isVerified && allDocsVerified,
+      can_start_rides: canDriverStartRides(driver),
       verification_notes: driver.verificationNotes,
       
       // Timestamps

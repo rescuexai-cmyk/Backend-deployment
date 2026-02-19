@@ -4,6 +4,7 @@ import { body, query, validationResult } from 'express-validator';
 import { authenticate, AuthRequest } from '@raahi/shared';
 import { asyncHandler } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
+import { canDriverStartRides, DRIVER_NOT_VERIFIED_RIDE_ERROR } from '@raahi/shared';
 import * as rideService from '../rideService';
 import { broadcastRideChatMessage } from '../httpClients';
 
@@ -194,7 +195,7 @@ router.post('/:id/accept', authenticate, asyncHandler(async (req: AuthRequest, r
   // Get driver profile for the authenticated user
   const driver = await prisma.driver.findUnique({ 
     where: { userId },
-    select: { id: true, isVerified: true, isOnline: true, isActive: true }
+    select: { id: true, isVerified: true, isOnline: true, isActive: true, onboardingStatus: true }
   });
   
   if (!driver) {
@@ -204,18 +205,20 @@ router.post('/:id/accept', authenticate, asyncHandler(async (req: AuthRequest, r
   }
   
   console.log(`[RIDE_ACCEPT] Driver ID: ${driver.id}`);
-  console.log(`[RIDE_ACCEPT] Driver state: isVerified=${driver.isVerified}, isOnline=${driver.isOnline}, isActive=${driver.isActive}`);
+  console.log(`[RIDE_ACCEPT] Driver state: isVerified=${driver.isVerified}, isOnline=${driver.isOnline}, isActive=${driver.isActive}, onboardingStatus=${driver.onboardingStatus}`);
   
-  // Check if driver is verified and can accept rides
-  if (!driver.isVerified) {
-    console.log(`[RIDE_ACCEPT] ❌ REJECTED: Driver ${driver.id} not verified`);
-    res.status(403).json({ success: false, message: 'Driver not verified', code: 'DRIVER_NOT_VERIFIED' });
-    return;
-  }
-  
-  if (!driver.isActive) {
-    console.log(`[RIDE_ACCEPT] ❌ REJECTED: Driver ${driver.id} not active`);
-    res.status(403).json({ success: false, message: 'Driver account not active', code: 'DRIVER_NOT_ACTIVE' });
+  // CRITICAL: Check if driver can start rides using unified verification check
+  if (!canDriverStartRides(driver)) {
+    console.log(`[RIDE_ACCEPT] ❌ REJECTED: Driver ${driver.id} not verified (isActive=${driver.isActive}, isVerified=${driver.isVerified}, onboardingStatus=${driver.onboardingStatus})`);
+    res.status(403).json({ 
+      success: false, 
+      ...DRIVER_NOT_VERIFIED_RIDE_ERROR,
+      verificationState: {
+        isActive: driver.isActive,
+        isVerified: driver.isVerified,
+        onboardingStatus: driver.onboardingStatus,
+      },
+    });
     return;
   }
   

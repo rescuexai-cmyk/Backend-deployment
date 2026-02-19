@@ -126,6 +126,12 @@ services:
       DIGILOCKER_CLIENT_ID: ${DIGILOCKER_CLIENT_ID}
       DIGILOCKER_CLIENT_SECRET: ${DIGILOCKER_CLIENT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # DigitalOcean Spaces for document storage
+      DO_SPACES_ENDPOINT: ${DO_SPACES_ENDPOINT}
+      DO_SPACES_BUCKET: ${DO_SPACES_BUCKET}
+      DO_SPACES_KEY: ${DO_SPACES_KEY}
+      DO_SPACES_SECRET: ${DO_SPACES_SECRET}
+      DO_SPACES_CDN_ENDPOINT: ${DO_SPACES_CDN_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy

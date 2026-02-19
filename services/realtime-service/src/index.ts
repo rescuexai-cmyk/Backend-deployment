@@ -6,6 +6,7 @@ import { body, query, validationResult } from 'express-validator';
 import { connectDatabase, optionalAuth, authenticate, AuthRequest, errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
+import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
 import {
   setIo,
   setDriverMaps,
@@ -161,7 +162,7 @@ io.on('connection', (socket) => {
     // CRITICAL: Verify driver is actually online in DB
     const dbDriver = await prisma.driver.findUnique({
       where: { id: driverId },
-      select: { id: true, userId: true, isOnline: true, isActive: true, isVerified: true, currentLatitude: true, currentLongitude: true },
+      select: { id: true, userId: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true, currentLatitude: true, currentLongitude: true },
     });
     
     if (!dbDriver) {
@@ -175,8 +176,26 @@ io.on('connection', (socket) => {
     }
     
     // Log DB state for debugging
-    logger.info(`[SOCKET] DB State: isOnline=${dbDriver.isOnline}, isActive=${dbDriver.isActive}, isVerified=${dbDriver.isVerified}`);
+    logger.info(`[SOCKET] DB State: isOnline=${dbDriver.isOnline}, isActive=${dbDriver.isActive}, isVerified=${dbDriver.isVerified}, onboardingStatus=${dbDriver.onboardingStatus}`);
     logger.info(`[SOCKET] DB Location: (${dbDriver.currentLatitude}, ${dbDriver.currentLongitude})`);
+    
+    // CRITICAL: Enforce driver verification before allowing socket registration
+    if (!canDriverStartRides(dbDriver)) {
+      logger.error(`[SOCKET] ❌ Driver ${driverId} NOT VERIFIED - blocking socket registration (isActive=${dbDriver.isActive}, isVerified=${dbDriver.isVerified}, onboardingStatus=${dbDriver.onboardingStatus})`);
+      socket.emit('registration-error', { 
+        message: 'Driver not verified',
+        code: 'DRIVER_NOT_VERIFIED',
+        driverId,
+        eventName,
+        verificationState: {
+          isActive: dbDriver.isActive,
+          isVerified: dbDriver.isVerified,
+          onboardingStatus: dbDriver.onboardingStatus,
+        },
+      });
+      socket.disconnect(true);
+      return null;
+    }
     
     // CRITICAL: Check for DB/Socket state mismatch
     if (!dbDriver.isOnline) {
@@ -189,16 +208,6 @@ io.on('connection', (socket) => {
         dbIsOnline: false,
         recommendation: 'Call PATCH /api/driver/status with online=true',
       });
-    }
-    
-    if (!dbDriver.isActive) {
-      logger.error(`[SOCKET] ❌ Driver ${driverId} is NOT ACTIVE - cannot receive rides`);
-      socket.emit('registration-error', { 
-        message: 'Driver account is not active',
-        driverId,
-        eventName,
-      });
-      return null;
     }
     
     // Store current driver ID for this socket

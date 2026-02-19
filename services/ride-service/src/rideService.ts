@@ -1,6 +1,6 @@
 import { getDistance } from 'geolib';
 import { prisma } from '@raahi/shared';
-import { createLogger } from '@raahi/shared';
+import { createLogger, canDriverStartRides } from '@raahi/shared';
 import {
   calculateFare as httpCalculateFare,
   getNearbyDrivers as httpGetNearbyDrivers,
@@ -481,19 +481,20 @@ export async function assignDriver(rideId: string, driverId: string) {
     // Check if driver exists and is available
     const driver = await tx.driver.findUnique({
       where: { id: driverId },
-      select: { id: true, isOnline: true, isActive: true },
+      select: { id: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true },
     });
 
     if (!driver) {
       throw new Error('Driver not found');
     }
 
-    if (!driver.isOnline) {
-      throw new Error('Driver is not online');
+    // CRITICAL: Enforce driver verification inside transaction
+    if (!canDriverStartRides(driver)) {
+      throw new Error('Driver is not verified to start rides');
     }
 
-    if (!driver.isActive) {
-      throw new Error('Driver account is not active');
+    if (!driver.isOnline) {
+      throw new Error('Driver is not online');
     }
 
     // Perform the atomic update with WHERE clause to ensure no concurrent modification
