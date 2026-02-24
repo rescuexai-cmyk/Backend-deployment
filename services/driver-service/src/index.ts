@@ -1174,6 +1174,9 @@ app.post(
     
     const documentUrl = getDocumentUrl(req.file as Express.Multer.File & { key?: string; location?: string }, docType);
     
+    // For PROFILE_PHOTO: auto-verify immediately (no OCR needed)
+    const isProfilePhoto = docType === 'PROFILE_PHOTO';
+    
     const document = await prisma.driverDocument.create({
       data: {
         driverId,
@@ -1181,7 +1184,10 @@ app.post(
         documentUrl,
         documentName: req.file.originalname,
         documentSize: req.file.size,
-        verificationStatus: 'pending',
+        verificationStatus: isProfilePhoto ? 'verified' : 'pending',
+        isVerified: isProfilePhoto,
+        verifiedAt: isProfilePhoto ? new Date() : null,
+        verifiedBy: isProfilePhoto ? 'AUTO_APPROVED' : null,
       },
     });
     
@@ -1190,6 +1196,37 @@ app.post(
     if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
     else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
     await prisma.driver.update({ where: { id: driverId }, data: { onboardingStatus: newStatus } });
+    
+    // For PROFILE_PHOTO: also update the user's profileImage field
+    if (isProfilePhoto && driver?.userId) {
+      await prisma.user.update({
+        where: { id: driver.userId },
+        data: { profileImage: documentUrl },
+      });
+      logger.info(`[UPLOAD] Updated user profile image for driver ${driverId}`);
+      
+      // Check if all documents are now verified (profile photo was the last one)
+      const allDocs = await prisma.driverDocument.findMany({
+        where: { driverId },
+        select: { documentType: true, isVerified: true },
+      });
+      const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType));
+      const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
+      
+      if (docCheck.isComplete && allVerified) {
+        await prisma.driver.update({
+          where: { id: driverId },
+          data: {
+            onboardingStatus: OnboardingStatus.COMPLETED,
+            isVerified: true,
+            documentsVerifiedAt: new Date(),
+            verificationNotes: 'All documents verified. Profile photo auto-approved.',
+          },
+        });
+        newStatus = OnboardingStatus.COMPLETED;
+        logger.info(`[UPLOAD] Driver ${driverId} auto-completed - all documents verified`);
+      }
+    }
     
     logger.info(`[DOCUMENT] Uploaded ${docType} for driver ${driverId}, file: ${documentUrl}, storage: ${getStorageConfig().type}`);
     
