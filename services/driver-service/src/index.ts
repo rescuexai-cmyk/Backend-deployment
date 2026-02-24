@@ -8,7 +8,7 @@ import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger, latLngToH3 } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments } from '@raahi/shared';
-import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
+import { OnboardingStatus, PenaltyStatus, DocumentType } from '@prisma/client';
 import * as DigiLocker from './digilocker';
 import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument } from './storage';
 import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
@@ -1126,7 +1126,7 @@ app.post(
     const document = await prisma.driverDocument.create({
       data: {
         driverId,
-        documentType: docType,
+        documentType: docType as DocumentType,
         documentUrl,
         documentName: req.file.originalname,
         documentSize: req.file.size,

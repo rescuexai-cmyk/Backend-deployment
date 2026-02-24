@@ -109,7 +109,7 @@ export const createUploadMiddleware = () => {
         bucket: DO_SPACES_BUCKET!,
         acl: 'private', // Documents are private by default
         contentType: multerS3.AUTO_CONTENT_TYPE,
-        key: (req, file, cb) => {
+        key: (req: any, file, cb) => {
           const driverId = req.driverInfo?.id || 'unknown';
           const documentType = req.driverInfo?.documentType || req.body?.documentType || 'DOCUMENT';
           const key = generateStorageKey(driverId, documentType, file.originalname);
@@ -117,7 +117,7 @@ export const createUploadMiddleware = () => {
           logger.info(`[STORAGE] Uploading to Spaces: ${key}`);
           cb(null, key);
         },
-        metadata: (req, file, cb) => {
+        metadata: (req: any, file, cb) => {
           cb(null, {
             originalName: file.originalname,
             driverId: req.driverInfo?.id || 'unknown',
@@ -135,7 +135,7 @@ export const createUploadMiddleware = () => {
     
     return multer({
       storage: multer.diskStorage({
-        destination: (req, _file, cb) => {
+        destination: (req: any, _file, cb) => {
           const documentType = (req.driverInfo?.documentType || req.body?.documentType || 'DOCUMENT').toUpperCase();
           const uploadDir = path.join(baseUploadDir, documentType);
           
@@ -144,7 +144,7 @@ export const createUploadMiddleware = () => {
           }
           cb(null, uploadDir);
         },
-        filename: (req, file, cb) => {
+        filename: (req: any, file, cb) => {
           const driverId = req.driverInfo?.id || 'unknown';
           const documentType = req.driverInfo?.documentType || req.body?.documentType || 'DOCUMENT';
           const filename = generateDriverDocFilename(driverId, documentType, file.originalname);
