@@ -9,7 +9,7 @@ import { Worker, Job } from 'bullmq';
 import { createLogger, prisma } from '@raahi/shared';
 import { OnboardingStatus } from '@prisma/client';
 import { getConnectionOptions, VerificationJobData } from './queues';
-import { validateDocument, isVisionConfigured, DocumentType, DriverContext } from './visionService';
+import { validateDocument, isVisionConfigured, DocumentType, DriverContext, crossVerifyDocuments } from './visionService';
 import { checkRequiredDocuments } from '@raahi/shared';
 
 const logger = createLogger('driver-service:worker');
@@ -144,6 +144,7 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
       documentType: true,
       isVerified: true,
       verificationStatus: true,
+      aiExtractedData: true,
     },
   });
   
@@ -151,17 +152,48 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
   const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
   
   if (docCheck.isComplete && allVerified) {
+    // Perform cross-document verification to ensure all docs belong to same person
+    const crossVerification = await crossVerifyDocuments(
+      allDocs.map((d) => ({
+        documentType: d.documentType,
+        aiExtractedData: d.aiExtractedData as any,
+      }))
+    );
+    
+    if (!crossVerification.isConsistent) {
+      // Names don't match across documents - flag for manual review
+      logger.warn(`[WORKER] Cross-verification FAILED for driver ${driverId}`, {
+        mismatchDetails: crossVerification.mismatchDetails,
+        extractedNames: crossVerification.extractedNames,
+      });
+      
+      await prisma.driver.update({
+        where: { id: driverId },
+        data: {
+          onboardingStatus: OnboardingStatus.DOCUMENT_VERIFICATION,
+          isVerified: false,
+          verificationNotes: `Cross-verification failed: ${crossVerification.mismatchDetails}. Manual review required.`,
+        },
+      });
+      
+      return;
+    }
+    
+    // All checks passed - complete onboarding
     await prisma.driver.update({
       where: { id: driverId },
       data: {
         onboardingStatus: OnboardingStatus.COMPLETED,
         isVerified: true,
         documentsVerifiedAt: new Date(),
-        verificationNotes: 'All documents auto-verified by AI Vision.',
+        verificationNotes: `All documents auto-verified by AI Vision. Cross-verification passed (${(crossVerification.confidence * 100).toFixed(0)}% name match confidence).`,
       },
     });
     
-    logger.info(`[WORKER] Driver ${driverId} auto-verified - all documents passed`);
+    logger.info(`[WORKER] Driver ${driverId} auto-verified - all documents passed, cross-verification OK`, {
+      extractedNames: crossVerification.extractedNames,
+      confidence: crossVerification.confidence,
+    });
   }
 }
 

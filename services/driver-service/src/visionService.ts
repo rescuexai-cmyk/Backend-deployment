@@ -108,6 +108,130 @@ const AADHAAR_REGEX = /\b\d{4}\s?\d{4}\s?\d{4}\b/;
 const VEHICLE_REG_REGEX = /[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}/i;
 const DL_NUMBER_REGEX = /[A-Z]{2}\d{2}\s?\d{4}\s?\d{7}/;
 
+// Name extraction patterns
+const NAME_PATTERNS = {
+  // PAN Card: Name appears after "Name" label
+  PAN: [
+    /name[:\s]+([A-Z][A-Z\s]+)/i,
+    /([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\s*(?:father|dob|date)/i,
+  ],
+  // Aadhaar: Name is usually one of the first lines in caps
+  AADHAAR: [
+    /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*$/m,
+    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*(?:dob|date of birth|\d{2}\/\d{2}\/\d{4})/i,
+  ],
+  // License: Name after "Name" or "NAME"
+  LICENSE: [
+    /name[:\s]+([A-Z][A-Za-z\s]+?)(?:\n|s\/o|d\/o|w\/o|father|address)/i,
+    /([A-Z][A-Z\s]+)\s*s\/o/i,
+  ],
+  // RC: Owner name
+  RC: [
+    /owner['\s]*(?:name)?[:\s]+([A-Z][A-Za-z\s]+?)(?:\n|s\/o|d\/o|w\/o|address)/i,
+    /registered\s+owner[:\s]+([A-Z][A-Za-z\s]+)/i,
+  ],
+  // Insurance: Insured name
+  INSURANCE: [
+    /insured['\s]*(?:name)?[:\s]+([A-Z][A-Za-z\s]+?)(?:\n|address|policy)/i,
+    /name\s+of\s+(?:the\s+)?insured[:\s]+([A-Z][A-Za-z\s]+)/i,
+  ],
+};
+
+/**
+ * Extract name from OCR text based on document type patterns
+ */
+function extractName(text: string, docType: keyof typeof NAME_PATTERNS): string | null {
+  const patterns = NAME_PATTERNS[docType];
+  if (!patterns) return null;
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      // Clean up the extracted name
+      let name = match[1].trim();
+      // Remove extra whitespace
+      name = name.replace(/\s+/g, ' ');
+      // Remove common suffixes that might be captured
+      name = name.replace(/\s*(s\/o|d\/o|w\/o|father|mother|dob|date|address).*$/i, '').trim();
+      // Only return if it looks like a valid name (2-50 chars, at least 2 words or single word with 3+ chars)
+      if (name.length >= 3 && name.length <= 50) {
+        return name;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize name for comparison (lowercase, remove extra spaces, common variations)
+ */
+export function normalizeName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\./g, '')
+    .trim();
+}
+
+/**
+ * Calculate similarity between two names (0-1 score)
+ * Handles common variations: order swaps, middle name presence/absence
+ */
+export function calculateNameSimilarity(name1: string, name2: string): number {
+  const n1 = normalizeName(name1);
+  const n2 = normalizeName(name2);
+  
+  // Exact match
+  if (n1 === n2) return 1.0;
+  
+  // Split into parts
+  const parts1 = n1.split(' ').filter(p => p.length > 1);
+  const parts2 = n2.split(' ').filter(p => p.length > 1);
+  
+  // Check if all parts of shorter name exist in longer name
+  const shorter = parts1.length <= parts2.length ? parts1 : parts2;
+  const longer = parts1.length <= parts2.length ? parts2 : parts1;
+  
+  let matchedParts = 0;
+  for (const part of shorter) {
+    if (longer.some(p => p === part || levenshteinDistance(p, part) <= 1)) {
+      matchedParts++;
+    }
+  }
+  
+  // Calculate score based on matched parts
+  const score = matchedParts / Math.max(shorter.length, 1);
+  
+  // Bonus if first name matches exactly
+  if (parts1[0] === parts2[0]) {
+    return Math.min(score + 0.2, 1.0);
+  }
+  
+  return score;
+}
+
+/**
+ * Levenshtein distance for fuzzy matching
+ */
+function levenshteinDistance(s1: string, s2: string): number {
+  const m = s1.length, n = s2.length;
+  const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+  
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (s1[i - 1] === s2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+}
+
 const DOCUMENT_KEYWORDS: Record<string, { keywords: string[]; threshold: number }> = {
   PAN_CARD: {
     keywords: ['income tax', 'permanent account number', 'govt of india', 'government of india', 'pan', 'date of birth'],
@@ -183,7 +307,7 @@ export async function extractText(imageUrl: string): Promise<string> {
 }
 
 /**
- * Validate PAN Card - extract PAN number and cross-validate
+ * Validate PAN Card - extract PAN number, name, and cross-validate
  */
 export async function validatePanCard(imageUrl: string, expectedPan?: string | null): Promise<ValidationResult> {
   const text = await extractText(imageUrl);
@@ -197,6 +321,13 @@ export async function validatePanCard(imageUrl: string, expectedPan?: string | n
       extractedData,
       mismatchReason: 'Could not read text from document. Please upload a clearer image.',
     };
+  }
+
+  // Extract name for cross-verification
+  const extractedName = extractName(text, 'PAN');
+  if (extractedName) {
+    extractedData.extractedName = extractedName;
+    logger.info(`[VISION] PAN Card name extracted: ${extractedName}`);
   }
 
   const kwMatch = countKeywordMatches(text, DOCUMENT_KEYWORDS.PAN_CARD.keywords);
@@ -249,7 +380,7 @@ export async function validatePanCard(imageUrl: string, expectedPan?: string | n
 }
 
 /**
- * Validate Aadhaar Card - extract Aadhaar number and cross-validate
+ * Validate Aadhaar Card - extract Aadhaar number, name, and cross-validate
  */
 export async function validateAadhaar(imageUrl: string, expectedAadhaar?: string | null): Promise<ValidationResult> {
   const text = await extractText(imageUrl);
@@ -263,6 +394,13 @@ export async function validateAadhaar(imageUrl: string, expectedAadhaar?: string
       extractedData,
       mismatchReason: 'Could not read text from document. Please upload a clearer image.',
     };
+  }
+
+  // Extract name for cross-verification
+  const extractedName = extractName(text, 'AADHAAR');
+  if (extractedName) {
+    extractedData.extractedName = extractedName;
+    logger.info(`[VISION] Aadhaar name extracted: ${extractedName}`);
   }
 
   const kwMatch = countKeywordMatches(text, DOCUMENT_KEYWORDS.AADHAAR_CARD.keywords);
@@ -315,7 +453,7 @@ export async function validateAadhaar(imageUrl: string, expectedAadhaar?: string
 }
 
 /**
- * Validate Driving License - extract DL number and expiry
+ * Validate Driving License - extract DL number, name, and expiry
  */
 export async function validateLicense(imageUrl: string): Promise<ValidationResult> {
   const text = await extractText(imageUrl);
@@ -329,6 +467,13 @@ export async function validateLicense(imageUrl: string): Promise<ValidationResul
       extractedData,
       mismatchReason: 'Could not read text from document. Please upload a clearer image.',
     };
+  }
+
+  // Extract name for cross-verification
+  const extractedName = extractName(text, 'LICENSE');
+  if (extractedName) {
+    extractedData.extractedName = extractedName;
+    logger.info(`[VISION] License name extracted: ${extractedName}`);
   }
 
   const kwMatch = countKeywordMatches(text, DOCUMENT_KEYWORDS.LICENSE.keywords);
@@ -371,7 +516,7 @@ export async function validateLicense(imageUrl: string): Promise<ValidationResul
 }
 
 /**
- * Validate Registration Certificate - extract vehicle number and cross-validate
+ * Validate Registration Certificate - extract vehicle number, owner name, and cross-validate
  */
 export async function validateRC(imageUrl: string, expectedVehicleNumber?: string | null): Promise<ValidationResult> {
   const text = await extractText(imageUrl);
@@ -385,6 +530,13 @@ export async function validateRC(imageUrl: string, expectedVehicleNumber?: strin
       extractedData,
       mismatchReason: 'Could not read text from document. Please upload a clearer image.',
     };
+  }
+
+  // Extract owner name for cross-verification
+  const extractedName = extractName(text, 'RC');
+  if (extractedName) {
+    extractedData.extractedName = extractedName;
+    logger.info(`[VISION] RC owner name extracted: ${extractedName}`);
   }
 
   const kwMatch = countKeywordMatches(text, DOCUMENT_KEYWORDS.RC.keywords);
@@ -439,7 +591,7 @@ export async function validateRC(imageUrl: string, expectedVehicleNumber?: strin
 }
 
 /**
- * Validate Insurance document - extract policy number and expiry
+ * Validate Insurance document - extract policy number, insured name, and expiry
  */
 export async function validateInsurance(imageUrl: string): Promise<ValidationResult> {
   const text = await extractText(imageUrl);
@@ -453,6 +605,13 @@ export async function validateInsurance(imageUrl: string): Promise<ValidationRes
       extractedData,
       mismatchReason: 'Could not read text from document. Please upload a clearer image.',
     };
+  }
+
+  // Extract insured name for cross-verification
+  const extractedName = extractName(text, 'INSURANCE');
+  if (extractedName) {
+    extractedData.extractedName = extractedName;
+    logger.info(`[VISION] Insurance holder name extracted: ${extractedName}`);
   }
 
   const kwMatch = countKeywordMatches(text, DOCUMENT_KEYWORDS.INSURANCE.keywords);
@@ -531,4 +690,108 @@ export async function validateDocument(
         mismatchReason: `Unsupported document type: ${documentType}`,
       };
   }
+}
+
+/**
+ * Cross-verify that all documents belong to the same person
+ * by comparing extracted names across documents
+ */
+export interface CrossVerificationResult {
+  isConsistent: boolean;
+  confidence: number;
+  extractedNames: Record<string, string>;
+  mismatchDetails: string | null;
+  comparisonMatrix: Array<{
+    doc1: string;
+    doc2: string;
+    similarity: number;
+  }>;
+}
+
+export async function crossVerifyDocuments(
+  documents: Array<{ documentType: string; aiExtractedData: any }>
+): Promise<CrossVerificationResult> {
+  const extractedNames: Record<string, string> = {};
+  
+  // Collect names from all documents
+  for (const doc of documents) {
+    if (doc.aiExtractedData?.extractedName) {
+      extractedNames[doc.documentType] = doc.aiExtractedData.extractedName;
+    }
+  }
+  
+  const docTypes = Object.keys(extractedNames);
+  
+  // If we have fewer than 2 documents with names, we can't cross-verify
+  if (docTypes.length < 2) {
+    logger.warn('[VISION] Cross-verification skipped: insufficient names extracted', {
+      documentsWithNames: docTypes.length,
+      totalDocuments: documents.length,
+    });
+    return {
+      isConsistent: true, // Assume consistent if we can't verify
+      confidence: 0.5,
+      extractedNames,
+      mismatchDetails: docTypes.length === 0 
+        ? 'No names could be extracted from documents' 
+        : 'Only one document had extractable name',
+      comparisonMatrix: [],
+    };
+  }
+  
+  // Compare all pairs of documents
+  const comparisonMatrix: Array<{ doc1: string; doc2: string; similarity: number }> = [];
+  let totalSimilarity = 0;
+  let comparisons = 0;
+  let minSimilarity = 1.0;
+  let mismatchPair: { doc1: string; doc2: string; similarity: number } | null = null;
+  
+  for (let i = 0; i < docTypes.length; i++) {
+    for (let j = i + 1; j < docTypes.length; j++) {
+      const doc1 = docTypes[i];
+      const doc2 = docTypes[j];
+      const name1 = extractedNames[doc1];
+      const name2 = extractedNames[doc2];
+      
+      const similarity = calculateNameSimilarity(name1, name2);
+      comparisonMatrix.push({ doc1, doc2, similarity });
+      
+      totalSimilarity += similarity;
+      comparisons++;
+      
+      if (similarity < minSimilarity) {
+        minSimilarity = similarity;
+        mismatchPair = { doc1, doc2, similarity };
+      }
+      
+      logger.info(`[VISION] Name comparison: ${doc1}="${name1}" vs ${doc2}="${name2}" => ${(similarity * 100).toFixed(1)}%`);
+    }
+  }
+  
+  const avgSimilarity = totalSimilarity / comparisons;
+  const NAME_MATCH_THRESHOLD = 0.6; // 60% similarity required
+  
+  const isConsistent = minSimilarity >= NAME_MATCH_THRESHOLD;
+  
+  let mismatchDetails: string | null = null;
+  if (!isConsistent && mismatchPair) {
+    mismatchDetails = `Name mismatch detected: "${extractedNames[mismatchPair.doc1]}" on ${mismatchPair.doc1} ` +
+      `vs "${extractedNames[mismatchPair.doc2]}" on ${mismatchPair.doc2} ` +
+      `(${(mismatchPair.similarity * 100).toFixed(1)}% similarity, threshold: ${NAME_MATCH_THRESHOLD * 100}%)`;
+  }
+  
+  logger.info('[VISION] Cross-verification complete', {
+    isConsistent,
+    avgSimilarity: avgSimilarity.toFixed(2),
+    minSimilarity: minSimilarity.toFixed(2),
+    documentsCompared: docTypes.length,
+  });
+  
+  return {
+    isConsistent,
+    confidence: avgSimilarity,
+    extractedNames,
+    mismatchDetails,
+    comparisonMatrix,
+  };
 }
