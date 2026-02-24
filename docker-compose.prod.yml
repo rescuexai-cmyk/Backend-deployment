@@ -18,6 +18,18 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: raahi-redis
+    restart: always
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   gateway:
     build:
       context: .
@@ -132,8 +144,13 @@ services:
       DO_SPACES_KEY: ${DO_SPACES_KEY}
       DO_SPACES_SECRET: ${DO_SPACES_SECRET}
       DO_SPACES_CDN_ENDPOINT: ${DO_SPACES_CDN_ENDPOINT}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY}
+      VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5003/health"]
@@ -289,3 +306,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

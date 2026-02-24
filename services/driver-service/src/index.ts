@@ -10,7 +10,7 @@ import { prisma } from '@raahi/shared';
 import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments } from '@raahi/shared';
 import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
 import * as DigiLocker from './digilocker';
-import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured } from './storage';
+import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument } from './storage';
 import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
 import { startVerificationWorker, stopVerificationWorker } from './documentVerificationWorker';
 import { isVisionConfigured } from './visionService';
@@ -51,9 +51,17 @@ const app = express();
 const PORT = process.env.PORT || 5003;
 
 // Local uploads directory (for fallback or serving existing local files)
-const uploadDir = path.join(process.cwd(), 'uploads', 'driver-documents');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const uploadsBaseDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsBaseDir)) {
+  fs.mkdirSync(uploadsBaseDir, { recursive: true });
+}
+
+// Create folders for each document type
+for (const docType of REQUIRED_DOCUMENTS) {
+  const docDir = path.join(uploadsBaseDir, docType);
+  if (!fs.existsSync(docDir)) {
+    fs.mkdirSync(docDir, { recursive: true });
+  }
 }
 
 // Document upload middleware (uses DO Spaces if configured, else local disk)
@@ -65,7 +73,7 @@ logger.info(`[STORAGE] Using ${storageConfig.type} storage${storageConfig.bucket
 
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
-app.use('/uploads', express.static(uploadDir));
+app.use('/uploads', express.static(uploadsBaseDir));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'driver-service', timestamp: new Date().toISOString() });
@@ -1046,71 +1054,125 @@ app.put(
   })
 );
 
-app.post('/api/driver/onboarding/document/upload', authenticate, upload.single('document'), asyncHandler(async (req: AuthRequest, res) => {
-  if (!req.file) {
-    res.status(400).json({ success: false, message: 'No file uploaded' });
+/**
+ * Pre-upload middleware: validates documentType and fetches driver info
+ * Sets req.driverInfo so multer can use it for file naming
+ * 
+ * URL format: /api/driver/onboarding/document/upload?documentType=LICENSE
+ */
+const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => {
+  // Get documentType from query params (preferred) or body
+  const documentType = (req.query.documentType as string) || req.body?.documentType;
+  
+  if (!documentType) {
+    res.status(400).json({ 
+      success: false, 
+      message: 'Document type is required. Pass as query param: ?documentType=LICENSE',
+      validTypes: REQUIRED_DOCUMENTS,
+    });
     return;
   }
-  if (!req.body.documentType) {
-    res.status(400).json({ success: false, message: 'Document type is required' });
+  
+  const docType = documentType.toUpperCase();
+  if (!REQUIRED_DOCUMENTS.includes(docType as any)) {
+    res.status(400).json({ 
+      success: false, 
+      message: `Invalid document type: ${docType}`,
+      validTypes: REQUIRED_DOCUMENTS,
+    });
     return;
   }
+  
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
     res.status(404).json({ success: false, message: 'Driver profile not found' });
     return;
   }
   
-  const documentUrl = getDocumentUrl(req.file as Express.Multer.File & { key?: string; location?: string });
-  const docType = req.body.documentType.toUpperCase();
+  // Delete old document if re-uploading
+  await deleteOldDocument(driver.id, docType);
   
-  const document = await prisma.driverDocument.create({
-    data: {
-      driverId: driver.id,
-      documentType: docType,
-      documentUrl,
-      documentName: req.file.originalname,
-      documentSize: req.file.size,
-      verificationStatus: 'pending',
-    },
+  // Also delete from database if re-uploading
+  await prisma.driverDocument.deleteMany({
+    where: { driverId: driver.id, documentType: docType },
   });
   
-  let newStatus = driver.onboardingStatus;
-  if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
-  else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
-  await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: newStatus } });
+  // Set driver info for multer to use in file naming
+  req.driverInfo = {
+    id: driver.id,
+    documentType: docType,
+  };
   
-  logger.info(`[DOCUMENT] Uploaded ${docType} for driver ${driver.id}, storage: ${getStorageConfig().type}`);
-  
-  // Queue async verification if Vision API and Redis are available
-  let verificationQueued = false;
-  const supportedTypes = ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'RC', 'INSURANCE'];
-  
-  if (isVisionConfigured() && isQueueAvailable() && supportedTypes.includes(docType)) {
-    try {
-      await addVerificationJob(document.id, driver.id, docType, documentUrl);
-      verificationQueued = true;
-      logger.info(`[QUEUE] Verification job queued for ${docType} (document ${document.id})`);
-    } catch (err: any) {
-      logger.error(`[QUEUE] Failed to queue verification job`, { error: err.message || err });
-    }
-  }
+  logger.info(`[UPLOAD] Pre-upload: driver=${driver.id}, type=${docType}`);
+  next();
+});
 
-  res.status(201).json({ 
-    success: true, 
-    message: 'Document uploaded successfully', 
-    data: { 
-      document_id: document.id, 
-      document_type: document.documentType, 
-      document_url: document.documentUrl, 
-      uploaded_at: document.uploadedAt, 
-      next_step: newStatus,
-      storage_type: getStorageConfig().type,
-      verification_status: 'pending',
-      verification_queued: verificationQueued,
-    } 
-  });
-}));
+app.post(
+  '/api/driver/onboarding/document/upload',
+  authenticate,
+  preUploadMiddleware,
+  upload.single('document'),
+  asyncHandler(async (req: AuthRequest, res) => {
+    if (!req.file) {
+      res.status(400).json({ success: false, message: 'No file uploaded' });
+      return;
+    }
+    
+    const driverId = req.driverInfo!.id;
+    const docType = req.driverInfo!.documentType;
+    
+    const documentUrl = getDocumentUrl(req.file as Express.Multer.File & { key?: string; location?: string }, docType);
+    
+    const document = await prisma.driverDocument.create({
+      data: {
+        driverId,
+        documentType: docType,
+        documentUrl,
+        documentName: req.file.originalname,
+        documentSize: req.file.size,
+        verificationStatus: 'pending',
+      },
+    });
+    
+    const driver = await prisma.driver.findUnique({ where: { id: driverId } });
+    let newStatus = driver!.onboardingStatus;
+    if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
+    else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
+    await prisma.driver.update({ where: { id: driverId }, data: { onboardingStatus: newStatus } });
+    
+    logger.info(`[DOCUMENT] Uploaded ${docType} for driver ${driverId}, file: ${documentUrl}, storage: ${getStorageConfig().type}`);
+    
+    // Queue async verification if Vision API and Redis are available
+    let verificationQueued = false;
+    const supportedTypes = ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'RC', 'INSURANCE'];
+    
+    if (isVisionConfigured() && isQueueAvailable() && supportedTypes.includes(docType)) {
+      try {
+        await addVerificationJob(document.id, driverId, docType, documentUrl);
+        verificationQueued = true;
+        logger.info(`[QUEUE] Verification job queued for ${docType} (document ${document.id})`);
+      } catch (err: any) {
+        logger.error(`[QUEUE] Failed to queue verification job`, { error: err.message || err });
+      }
+    }
+
+    res.status(201).json({ 
+      success: true, 
+      message: 'Document uploaded successfully', 
+      data: { 
+        document_id: document.id, 
+        document_type: document.documentType, 
+        document_url: document.documentUrl, 
+        file_name: `${driverId}_${docType}${path.extname(req.file.originalname).toLowerCase()}`,
+        uploaded_at: document.uploadedAt, 
+        next_step: newStatus,
+        storage_type: getStorageConfig().type,
+        verification_status: 'pending',
+        verification_queued: verificationQueued,
+      } 
+    });
+  })
+);
 
 app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id }, include: { documents: true } });
