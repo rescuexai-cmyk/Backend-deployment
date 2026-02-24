@@ -5,7 +5,8 @@
  * Falls back to local disk storage if Spaces is not configured.
  */
 
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import multer from 'multer';
 import multerS3 from 'multer-s3';
 import path from 'path';
@@ -158,3 +159,71 @@ export const getStorageConfig = () => ({
   endpoint: isSpacesConfigured() ? DO_SPACES_ENDPOINT : null,
   cdnEndpoint: DO_SPACES_CDN_ENDPOINT || null,
 });
+
+/**
+ * Generate a presigned URL for temporary access to a private document.
+ * Used by Vision API to download private documents for verification.
+ * 
+ * @param documentUrl - The stored document URL
+ * @param expiresIn - URL validity in seconds (default: 5 minutes)
+ * @returns Presigned URL or original URL if not using Spaces
+ */
+export const getPresignedUrl = async (documentUrl: string, expiresIn: number = 300): Promise<string> => {
+  if (!isSpacesConfigured() || !s3Client || !documentUrl.includes(DO_SPACES_ENDPOINT!)) {
+    return documentUrl;
+  }
+
+  try {
+    const urlParts = new URL(documentUrl);
+    const key = urlParts.pathname.substring(1);
+
+    const command = new GetObjectCommand({
+      Bucket: DO_SPACES_BUCKET!,
+      Key: key,
+    });
+
+    const presignedUrl = await getSignedUrl(s3Client, command, { expiresIn });
+    logger.info(`[STORAGE] Generated presigned URL for: ${key}`);
+    return presignedUrl;
+  } catch (error) {
+    logger.error('[STORAGE] Failed to generate presigned URL', { error, documentUrl });
+    return documentUrl;
+  }
+};
+
+/**
+ * Download document content directly from storage.
+ * Used when presigned URLs are not suitable.
+ * 
+ * @param documentUrl - The stored document URL
+ * @returns Buffer containing the document data
+ */
+export const downloadDocument = async (documentUrl: string): Promise<Buffer> => {
+  if (!isSpacesConfigured() || !s3Client || !documentUrl.includes(DO_SPACES_ENDPOINT!)) {
+    const localPath = path.join(process.cwd(), documentUrl);
+    return fs.promises.readFile(localPath);
+  }
+
+  try {
+    const urlParts = new URL(documentUrl);
+    const key = urlParts.pathname.substring(1);
+
+    const command = new GetObjectCommand({
+      Bucket: DO_SPACES_BUCKET!,
+      Key: key,
+    });
+
+    const response = await s3Client.send(command);
+    const bodyContents = await response.Body?.transformToByteArray();
+    
+    if (!bodyContents) {
+      throw new Error('Empty response body');
+    }
+
+    logger.info(`[STORAGE] Downloaded document: ${key}`);
+    return Buffer.from(bodyContents);
+  } catch (error) {
+    logger.error('[STORAGE] Failed to download document', { error, documentUrl });
+    throw error;
+  }
+};

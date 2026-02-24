@@ -16,6 +16,7 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { createLogger } from '@raahi/shared';
+import { downloadDocument, isSpacesConfigured } from './storage';
 
 const logger = createLogger('driver-service:vision');
 
@@ -131,10 +132,19 @@ const DOCUMENT_KEYWORDS: Record<string, { keywords: string[]; threshold: number 
 };
 
 async function fetchImageBuffer(documentUrl: string): Promise<Buffer> {
+  // Use storage module to download from DigitalOcean Spaces (handles private files)
+  if (isSpacesConfigured() && documentUrl.includes('digitaloceanspaces.com')) {
+    logger.info(`[VISION] Downloading from DO Spaces: ${documentUrl}`);
+    return downloadDocument(documentUrl);
+  }
+  
+  // Public HTTP(S) URLs - direct download
   if (documentUrl.startsWith('http://') || documentUrl.startsWith('https://')) {
     const response = await axios.get(documentUrl, { responseType: 'arraybuffer' });
     return Buffer.from(response.data);
   }
+  
+  // Local file
   const localPath = path.join(process.cwd(), documentUrl);
   return fs.promises.readFile(localPath);
 }

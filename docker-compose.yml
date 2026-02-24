@@ -142,10 +142,16 @@ services:
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
       PENALTY_STOP_RIDING_AMOUNT: ${PENALTY_STOP_RIDING_AMOUNT:-10}
       REDIS_URL: redis://redis:6379
+      # Google Cloud Vision API
       GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY:-}
       GOOGLE_VISION_KEY_FILE: ${GOOGLE_VISION_KEY_FILE:-}
       GOOGLE_VISION_CREDENTIALS: ${GOOGLE_VISION_CREDENTIALS:-}
       VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
+      # DigitalOcean Spaces (for downloading private documents)
+      DO_SPACES_ENDPOINT: ${DO_SPACES_ENDPOINT:-}
+      DO_SPACES_BUCKET: ${DO_SPACES_BUCKET:-}
+      DO_SPACES_KEY: ${DO_SPACES_KEY:-}
+      DO_SPACES_SECRET: ${DO_SPACES_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
