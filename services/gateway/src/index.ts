@@ -59,15 +59,28 @@ app.use('*/internal/*', (req, res) => {
   });
 });
 
-// Body parsing MUST happen before proxy so fixRequestBody can re-stream it
-app.use(express.json({ limit: '10mb' }));
+// Body parsing - SKIP for multipart/form-data (file uploads)
+// Multipart requests should pass through raw to the backend
+app.use((req, res, next) => {
+  const contentType = req.headers['content-type'] || '';
+  if (contentType.includes('multipart/form-data')) {
+    // Skip body parsing for file uploads
+    return next();
+  }
+  express.json({ limit: '10mb' })(req, res, next);
+});
 
 const proxyOptions = {
   changeOrigin: true,
+  timeout: 120000, // 2 minute timeout for slow connections
+  proxyTimeout: 120000,
   onProxyReq: (proxyReq: any, req: express.Request) => {
-    // Fix body streaming — express.json() consumed the body, re-stream it for the proxy
-    fixRequestBody(proxyReq, req);
-    // Only set auth header if not already set and headers are writable
+    const contentType = req.headers['content-type'] || '';
+    // Only fix body for JSON requests, NOT multipart
+    if (!contentType.includes('multipart/form-data')) {
+      fixRequestBody(proxyReq, req);
+    }
+    // Set auth header if present
     if (req.headers.authorization && !proxyReq.headersSent) {
       try {
         proxyReq.setHeader('Authorization', req.headers.authorization);
@@ -77,9 +90,33 @@ const proxyOptions = {
     }
   },
   onError: (err: Error, req: express.Request, res: express.Response) => {
-    logger.error('Proxy error', { error: err.message, path: req.path });
+    logger.error('Proxy error', { error: err.message, path: req.path, method: req.method });
     if (!res.headersSent) {
       res.status(502).json({ success: false, message: 'Service temporarily unavailable' });
+    }
+  },
+};
+
+// Special proxy options for file uploads - no body manipulation
+const uploadProxyOptions = {
+  target: DRIVER_SERVICE,
+  changeOrigin: true,
+  timeout: 120000,
+  proxyTimeout: 120000,
+  onProxyReq: (proxyReq: any, req: express.Request) => {
+    // Just forward authorization, don't touch the body
+    if (req.headers.authorization && !proxyReq.headersSent) {
+      try {
+        proxyReq.setHeader('Authorization', req.headers.authorization);
+      } catch (e) {
+        // Ignore
+      }
+    }
+  },
+  onError: (err: Error, req: express.Request, res: express.Response) => {
+    logger.error('Upload proxy error', { error: err.message, path: req.path });
+    if (!res.headersSent) {
+      res.status(502).json({ success: false, message: 'Upload service temporarily unavailable' });
     }
   },
 };
@@ -135,6 +172,8 @@ const mqttWsProxyOptions = {
 
 app.use('/api/auth', createProxyMiddleware({ target: AUTH_SERVICE, ...proxyOptions }));
 app.use('/api/user', createProxyMiddleware({ target: USER_SERVICE, ...proxyOptions }));
+// File upload endpoint - must come before general /api/driver route
+app.use('/api/driver/onboarding/document/upload', createProxyMiddleware(uploadProxyOptions));
 app.use('/api/driver', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));

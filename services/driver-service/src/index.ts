@@ -76,7 +76,18 @@ app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(uploadsBaseDir));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', service: 'driver-service', timestamp: new Date().toISOString() });
+  const storage = getStorageConfig();
+  res.json({ 
+    status: 'OK', 
+    service: 'driver-service', 
+    timestamp: new Date().toISOString(),
+    storage: {
+      type: storage.type,
+      configured: storage.type === 'digitalocean-spaces',
+      bucket: storage.bucket,
+      endpoint: storage.endpoint,
+    },
+  });
 });
 
 // Driver profile & status
@@ -1090,12 +1101,22 @@ const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => 
   }
   
   // Delete old document if re-uploading
-  await deleteOldDocument(driver.id, docType);
+  try {
+    await deleteOldDocument(driver.id, docType);
+  } catch (err: any) {
+    logger.warn(`[UPLOAD] Failed to delete old document from storage: ${err.message}`);
+    // Continue anyway - old file might not exist
+  }
   
   // Also delete from database if re-uploading
-  await prisma.driverDocument.deleteMany({
-    where: { driverId: driver.id, documentType: docType },
-  });
+  try {
+    await prisma.driverDocument.deleteMany({
+      where: { driverId: driver.id, documentType: docType as DocumentType },
+    });
+  } catch (err: any) {
+    logger.warn(`[UPLOAD] Failed to delete old document from DB: ${err.message}`);
+    // Continue anyway
+  }
   
   // Set driver info for multer to use in file naming
   req.driverInfo = {
@@ -1107,16 +1128,46 @@ const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => 
   next();
 });
 
+// Wrapper to handle multer errors
+const handleMulterUpload = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
+  upload.single('document')(req, res, (err: any) => {
+    if (err) {
+      logger.error(`[UPLOAD] Multer error: ${err.message}`, { 
+        code: err.code, 
+        field: err.field,
+        storageType: getStorageConfig().type,
+      });
+      
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ success: false, message: 'File too large. Maximum size is 10MB.' });
+      }
+      if (err.message?.includes('Only .png, .jpg')) {
+        return res.status(400).json({ success: false, message: err.message });
+      }
+      
+      return res.status(500).json({ 
+        success: false, 
+        message: 'File upload failed',
+        error: process.env.NODE_ENV !== 'production' ? err.message : undefined,
+      });
+    }
+    next();
+  });
+};
+
 app.post(
   '/api/driver/onboarding/document/upload',
   authenticate,
   preUploadMiddleware,
-  upload.single('document'),
+  handleMulterUpload,
   asyncHandler(async (req: AuthRequest, res) => {
     if (!req.file) {
+      logger.error('[UPLOAD] No file in request after multer processing');
       res.status(400).json({ success: false, message: 'No file uploaded' });
       return;
     }
+    
+    logger.info(`[UPLOAD] File received: ${req.file.originalname}, size: ${req.file.size}, mimetype: ${req.file.mimetype}`);
     
     const driverId = req.driverInfo!.id;
     const docType = req.driverInfo!.documentType;
