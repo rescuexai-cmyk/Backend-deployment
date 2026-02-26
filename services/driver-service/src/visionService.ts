@@ -693,8 +693,17 @@ export async function validateDocument(
 }
 
 /**
- * Cross-verify that all documents belong to the same person
- * by comparing extracted names across documents
+ * Cross-verify that IDENTITY documents (DL, PAN, Aadhaar) belong to the same person.
+ * 
+ * IMPORTANT: RC and Insurance owner names are EXCLUDED from cross-verification
+ * because in India it's common for drivers to use vehicles owned by:
+ * - Family members (father's bike, spouse's car)
+ * - Fleet owners / companies
+ * - Rental/leased vehicles
+ * 
+ * This follows the Rapido/Uber/Ola model where:
+ * - Identity docs (DL, PAN, Aadhaar) must match the driver
+ * - Vehicle docs (RC, Insurance) just need to be valid for that vehicle
  */
 export interface CrossVerificationResult {
   isConsistent: boolean;
@@ -706,50 +715,74 @@ export interface CrossVerificationResult {
     doc2: string;
     similarity: number;
   }>;
+  vehicleOwnerInfo?: {
+    rcOwner: string | null;
+    insuranceHolder: string | null;
+    ownerMatchesDriver: boolean;
+  };
 }
+
+// Documents that must have matching names (identity verification)
+const IDENTITY_DOCUMENTS = ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD'];
+
+// Documents where owner name can differ from driver (vehicle can be owned by someone else)
+const VEHICLE_DOCUMENTS = ['RC', 'INSURANCE'];
 
 export async function crossVerifyDocuments(
   documents: Array<{ documentType: string; aiExtractedData: any }>
 ): Promise<CrossVerificationResult> {
   const extractedNames: Record<string, string> = {};
+  const vehicleOwnerNames: Record<string, string> = {};
   
-  // Collect names from all documents
+  // Separate identity docs from vehicle docs
   for (const doc of documents) {
     if (doc.aiExtractedData?.extractedName) {
-      extractedNames[doc.documentType] = doc.aiExtractedData.extractedName;
+      if (IDENTITY_DOCUMENTS.includes(doc.documentType)) {
+        extractedNames[doc.documentType] = doc.aiExtractedData.extractedName;
+      } else if (VEHICLE_DOCUMENTS.includes(doc.documentType)) {
+        vehicleOwnerNames[doc.documentType] = doc.aiExtractedData.extractedName;
+      }
     }
   }
   
-  const docTypes = Object.keys(extractedNames);
+  const identityDocTypes = Object.keys(extractedNames);
   
-  // If we have fewer than 2 documents with names, we can't cross-verify
-  if (docTypes.length < 2) {
-    logger.warn('[VISION] Cross-verification skipped: insufficient names extracted', {
-      documentsWithNames: docTypes.length,
+  // If we have fewer than 2 identity documents with names, we can't cross-verify
+  if (identityDocTypes.length < 2) {
+    logger.info('[VISION] Cross-verification: insufficient identity docs for comparison', {
+      identityDocsWithNames: identityDocTypes.length,
+      vehicleDocsWithNames: Object.keys(vehicleOwnerNames).length,
       totalDocuments: documents.length,
     });
+    
+    // Still pass - we just can't do cross-verification
     return {
-      isConsistent: true, // Assume consistent if we can't verify
+      isConsistent: true,
       confidence: 0.5,
-      extractedNames,
-      mismatchDetails: docTypes.length === 0 
-        ? 'No names could be extracted from documents' 
-        : 'Only one document had extractable name',
+      extractedNames: { ...extractedNames, ...vehicleOwnerNames },
+      mismatchDetails: identityDocTypes.length === 0 
+        ? 'No names extracted from identity documents (DL, PAN, Aadhaar)' 
+        : 'Only one identity document had extractable name',
       comparisonMatrix: [],
+      vehicleOwnerInfo: {
+        rcOwner: vehicleOwnerNames['RC'] || null,
+        insuranceHolder: vehicleOwnerNames['INSURANCE'] || null,
+        ownerMatchesDriver: false, // Unknown
+      },
     };
   }
   
-  // Compare all pairs of documents
+  // Compare only IDENTITY documents (DL, PAN, Aadhaar)
   const comparisonMatrix: Array<{ doc1: string; doc2: string; similarity: number }> = [];
   let totalSimilarity = 0;
   let comparisons = 0;
   let minSimilarity = 1.0;
   let mismatchPair: { doc1: string; doc2: string; similarity: number } | null = null;
   
-  for (let i = 0; i < docTypes.length; i++) {
-    for (let j = i + 1; j < docTypes.length; j++) {
-      const doc1 = docTypes[i];
-      const doc2 = docTypes[j];
+  for (let i = 0; i < identityDocTypes.length; i++) {
+    for (let j = i + 1; j < identityDocTypes.length; j++) {
+      const doc1 = identityDocTypes[i];
+      const doc2 = identityDocTypes[j];
       const name1 = extractedNames[doc1];
       const name2 = extractedNames[doc2];
       
@@ -764,18 +797,36 @@ export async function crossVerifyDocuments(
         mismatchPair = { doc1, doc2, similarity };
       }
       
-      logger.info(`[VISION] Name comparison: ${doc1}="${name1}" vs ${doc2}="${name2}" => ${(similarity * 100).toFixed(1)}%`);
+      logger.info(`[VISION] Identity doc comparison: ${doc1}="${name1}" vs ${doc2}="${name2}" => ${(similarity * 100).toFixed(1)}%`);
     }
   }
   
   const avgSimilarity = totalSimilarity / comparisons;
-  const NAME_MATCH_THRESHOLD = 0.6; // 60% similarity required
+  const NAME_MATCH_THRESHOLD = 0.6; // 60% similarity required for identity docs
   
   const isConsistent = minSimilarity >= NAME_MATCH_THRESHOLD;
   
+  // Check if vehicle owner matches driver (informational only, doesn't affect approval)
+  let ownerMatchesDriver = false;
+  const driverName = extractedNames['LICENSE'] || extractedNames['PAN_CARD'] || extractedNames['AADHAAR_CARD'];
+  const rcOwner = vehicleOwnerNames['RC'];
+  
+  if (driverName && rcOwner) {
+    const ownerSimilarity = calculateNameSimilarity(driverName, rcOwner);
+    ownerMatchesDriver = ownerSimilarity >= 0.6;
+    
+    if (!ownerMatchesDriver) {
+      logger.info(`[VISION] RC owner differs from driver (this is allowed)`, {
+        driverName,
+        rcOwner,
+        similarity: (ownerSimilarity * 100).toFixed(1) + '%',
+      });
+    }
+  }
+  
   let mismatchDetails: string | null = null;
   if (!isConsistent && mismatchPair) {
-    mismatchDetails = `Name mismatch detected: "${extractedNames[mismatchPair.doc1]}" on ${mismatchPair.doc1} ` +
+    mismatchDetails = `Identity document mismatch: "${extractedNames[mismatchPair.doc1]}" on ${mismatchPair.doc1} ` +
       `vs "${extractedNames[mismatchPair.doc2]}" on ${mismatchPair.doc2} ` +
       `(${(mismatchPair.similarity * 100).toFixed(1)}% similarity, threshold: ${NAME_MATCH_THRESHOLD * 100}%)`;
   }
@@ -784,14 +835,20 @@ export async function crossVerifyDocuments(
     isConsistent,
     avgSimilarity: avgSimilarity.toFixed(2),
     minSimilarity: minSimilarity.toFixed(2),
-    documentsCompared: docTypes.length,
+    identityDocsCompared: identityDocTypes.length,
+    vehicleOwnerMatchesDriver: ownerMatchesDriver,
   });
   
   return {
     isConsistent,
     confidence: avgSimilarity,
-    extractedNames,
+    extractedNames: { ...extractedNames, ...vehicleOwnerNames },
     mismatchDetails,
     comparisonMatrix,
+    vehicleOwnerInfo: {
+      rcOwner: vehicleOwnerNames['RC'] || null,
+      insuranceHolder: vehicleOwnerNames['INSURANCE'] || null,
+      ownerMatchesDriver,
+    },
   };
 }

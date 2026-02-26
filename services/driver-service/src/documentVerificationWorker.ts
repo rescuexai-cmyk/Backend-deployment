@@ -161,7 +161,7 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
     );
     
     if (!crossVerification.isConsistent) {
-      // Names don't match across documents - flag for manual review
+      // Identity document names don't match (DL vs PAN vs Aadhaar) - flag for manual review
       logger.warn(`[WORKER] Cross-verification FAILED for driver ${driverId}`, {
         mismatchDetails: crossVerification.mismatchDetails,
         extractedNames: crossVerification.extractedNames,
@@ -179,6 +179,21 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
       return;
     }
     
+    // Build verification notes with vehicle owner info
+    let verificationNotes = `All documents auto-verified by AI Vision. Identity cross-verification passed (${(crossVerification.confidence * 100).toFixed(0)}% confidence).`;
+    
+    // Add vehicle owner info if RC owner differs from driver (common in India)
+    if (crossVerification.vehicleOwnerInfo && !crossVerification.vehicleOwnerInfo.ownerMatchesDriver) {
+      const rcOwner = crossVerification.vehicleOwnerInfo.rcOwner;
+      if (rcOwner) {
+        verificationNotes += ` Note: Vehicle registered to "${rcOwner}" (different from driver - this is allowed).`;
+        logger.info(`[WORKER] Driver ${driverId} using vehicle owned by someone else`, {
+          rcOwner,
+          driverName: crossVerification.extractedNames['LICENSE'] || crossVerification.extractedNames['PAN_CARD'],
+        });
+      }
+    }
+    
     // All checks passed - complete onboarding
     await prisma.driver.update({
       where: { id: driverId },
@@ -186,13 +201,14 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
         onboardingStatus: OnboardingStatus.COMPLETED,
         isVerified: true,
         documentsVerifiedAt: new Date(),
-        verificationNotes: `All documents auto-verified by AI Vision. Cross-verification passed (${(crossVerification.confidence * 100).toFixed(0)}% name match confidence).`,
+        verificationNotes,
       },
     });
     
-    logger.info(`[WORKER] Driver ${driverId} auto-verified - all documents passed, cross-verification OK`, {
+    logger.info(`[WORKER] Driver ${driverId} auto-verified - all documents passed`, {
       extractedNames: crossVerification.extractedNames,
       confidence: crossVerification.confidence,
+      vehicleOwnerInfo: crossVerification.vehicleOwnerInfo,
     });
   }
 }
