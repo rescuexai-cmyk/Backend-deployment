@@ -297,9 +297,6 @@ services:
     depends_on:
       - gateway
       - realtime-service
-      - grafana
-      - prometheus
-      - alertmanager
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
       interval: 30s
@@ -308,13 +305,15 @@ services:
       start_period: 30s
 
   # ============================================
-  # MONITORING STACK
+  # MONITORING STACK (Optimized for 1GB RAM)
   # ============================================
 
   prometheus:
     image: prom/prometheus:v2.48.0
     container_name: raahi-prometheus
-    restart: always
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
@@ -322,10 +321,12 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=15d'
+      - '--storage.tsdb.retention.time=7d'
+      - '--storage.tsdb.retention.size=500MB'
       - '--web.enable-lifecycle'
-      - '--web.enable-admin-api'
-      - '--web.external-url=http://localhost/prometheus/'
+      - '--query.max-concurrency=5'
+    mem_limit: 256m
+    memswap_limit: 256m
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
@@ -335,19 +336,34 @@ services:
   grafana:
     image: grafana/grafana:10.2.0
     container_name: raahi-grafana
-    restart: always
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-raahi_grafana_2024}
+      GF_SECURITY_ADMIN_USER: raahi_admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-R44h1_Gr4f4n4_2024_S3cur3!}
+      GF_SECURITY_SECRET_KEY: ${GRAFANA_SECRET_KEY:-SW2YcwTIb9zpOOhoPsMm}
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ALLOW_EMBEDDING: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+      GF_ALERTING_ENABLED: "false"
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+      GF_LIVE_MAX_CONNECTIONS: "10"
+      GF_LOG_MODE: "console"
+      GF_LOG_LEVEL: "warn"
+      GF_INSTALL_PLUGINS: ""
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    mem_limit: 256m
+    memswap_limit: 256m
     depends_on:
       - prometheus
     healthcheck:
@@ -359,7 +375,7 @@ services:
   node-exporter:
     image: prom/node-exporter:v1.7.0
     container_name: raahi-node-exporter
-    restart: always
+    restart: unless-stopped
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -369,13 +385,15 @@ services:
       - '--path.sysfs=/host/sys'
       - '--path.rootfs=/rootfs'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    mem_limit: 64m
 
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: raahi-postgres-exporter
-    restart: always
+    restart: unless-stopped
     environment:
       DATA_SOURCE_NAME: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi?sslmode=disable
+    mem_limit: 64m
     depends_on:
       postgres:
         condition: service_healthy
@@ -383,45 +401,27 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:v1.55.0
     container_name: raahi-redis-exporter
-    restart: always
+    restart: unless-stopped
     environment:
       REDIS_ADDR: redis://redis:6379
+    mem_limit: 32m
     depends_on:
       redis:
         condition: service_healthy
 
-  blackbox-exporter:
-    image: prom/blackbox-exporter:v0.24.0
-    container_name: raahi-blackbox-exporter
-    restart: always
-    volumes:
-      - ./monitoring/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
-    command:
-      - '--config.file=/etc/blackbox_exporter/config.yml'
-
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.47.2
-    container_name: raahi-cadvisor
-    restart: always
-    privileged: true
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-
   alertmanager:
     image: prom/alertmanager:v0.26.0
     container_name: raahi-alertmanager
-    restart: always
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9093:9093"
     volumes:
       - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
-      - '--web.external-url=http://localhost/alertmanager/'
+    mem_limit: 64m
 
 volumes:
   pgdata:
