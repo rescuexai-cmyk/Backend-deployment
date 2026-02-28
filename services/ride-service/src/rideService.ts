@@ -542,22 +542,22 @@ export async function assignDriver(rideId: string, driverId: string) {
     logger.error('Broadcast driver assigned failed', { error: e });
   }
 
-  // Get passenger info for notification
+  // Get passenger info + OTP for notification
   const passengerRide = await prisma.ride.findUnique({
     where: { id: rideId },
-    select: { passengerId: true, pickupAddress: true },
+    select: { passengerId: true, pickupAddress: true, rideOtp: true },
   });
 
-  // CRITICAL: Send notification to passenger that driver is assigned
+  // CRITICAL: Send notification to passenger that driver is assigned — include OTP immediately
   if (passengerRide) {
     const driverName = ride.driver?.user ? `${ride.driver.user.firstName} ${ride.driver.user.lastName || ''}`.trim() : 'Your driver';
     const vehicleInfo = `${ride.driver?.vehicleModel || 'Vehicle'} (${ride.driver?.vehicleNumber || ''})`;
     
-    // Send database notification
+    // Send database notification with OTP so user sees it right away
     await createNotification({
       userId: passengerRide.passengerId,
       title: 'Driver Assigned',
-      message: `${driverName} is on the way to pick you up. ${vehicleInfo}`,
+      message: `${driverName} is on the way! Your ride PIN: ${passengerRide.rideOtp}. Share it with the driver when they arrive.`,
       type: 'RIDE_UPDATE',
       data: {
         rideId,
@@ -566,14 +566,16 @@ export async function assignDriver(rideId: string, driverId: string) {
         vehicleNumber: ride.driver?.vehicleNumber,
         vehicleModel: ride.driver?.vehicleModel,
         event: 'DRIVER_ASSIGNED',
+        otp: passengerRide.rideOtp,
       },
     });
     
-    // Send rich push notification with template
+    // Send rich push notification with OTP
     sendRidePushNotification(passengerRide.passengerId, 'DRIVER_ASSIGNED', rideId, {
       driverName,
       vehicleInfo,
       eta: 5, // TODO: Calculate actual ETA based on distance
+      otp: passengerRide.rideOtp,
     });
   }
 
@@ -778,15 +780,15 @@ export async function updateRideStatus(
           break;
 
         case 'DRIVER_ARRIVED':
-          // Notify passenger that driver has arrived - include OTP!
+          // Notify passenger that driver has arrived — remind them to share the PIN
           await createNotification({
             userId: rideDetails.passengerId,
             title: 'Driver Arrived',
-            message: `${driverName} has arrived at your pickup location. Share OTP: ${rideDetails.rideOtp} to start the ride.`,
+            message: `${driverName} has arrived at your pickup location. Share your ride PIN to start the trip.`,
             type: 'RIDE_UPDATE',
             data: { rideId, event: 'DRIVER_ARRIVED', otp: rideDetails.rideOtp },
           });
-          // Send rich push notification with OTP
+          // Send rich push notification (OTP included for redundancy)
           sendRidePushNotification(rideDetails.passengerId, 'DRIVER_ARRIVED', rideId, {
             driverName,
             otp: rideDetails.rideOtp,

@@ -317,15 +317,18 @@ export function buildDriverAssignedNotification(
   driverName: string,
   vehicleInfo: string,
   eta?: number,
-  rideId?: string
+  rideId?: string,
+  otp?: string
 ): PushNotificationPayload {
+  const otpText = otp ? ` Your ride PIN: ${otp}` : '';
   return {
     title: '🚗 Driver Assigned!',
-    body: `${driverName} is on the way in a ${vehicleInfo}${eta ? `. ETA: ${eta} min` : ''}`,
+    body: `${driverName} is on the way in a ${vehicleInfo}${eta ? `. ETA: ${eta} min` : ''}.${otpText}`,
     data: {
       type: 'RIDE_UPDATE',
       event: 'DRIVER_ASSIGNED',
       rideId: rideId || '',
+      ...(otp ? { otp } : {}),
     },
     android: {
       channelId: 'raahi_rides',
@@ -375,7 +378,7 @@ export function buildDriverArrivedNotification(
 ): PushNotificationPayload {
   return {
     title: '✅ Driver Has Arrived!',
-    body: `${driverName} has arrived. Share OTP: ${otp} to start your ride.`,
+    body: `${driverName} has arrived. Share your ride PIN with the driver to start your trip.`,
     data: {
       type: 'RIDE_UPDATE',
       event: 'DRIVER_ARRIVED',

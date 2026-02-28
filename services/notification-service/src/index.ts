@@ -593,7 +593,8 @@ app.post(
           eventData.driverName,
           eventData.vehicleInfo,
           eventData.eta,
-          rideId
+          rideId,
+          eventData.otp
         );
         break;
       case 'DRIVER_ARRIVING':
