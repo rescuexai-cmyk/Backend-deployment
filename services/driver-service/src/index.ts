@@ -1378,8 +1378,9 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   }
   
   const allDocsVerified = driver.documents.length > 0 && driver.documents.every((d) => d.isVerified);
-  const pendingDocs = driver.documents.filter((d) => !d.isVerified);
   const verifiedDocs = driver.documents.filter((d) => d.isVerified);
+  const flaggedDocs = driver.documents.filter((d) => !d.isVerified && (d.verificationStatus === 'flagged' || d.verificationStatus === 'failed'));
+  const pendingDocs = driver.documents.filter((d) => !d.isVerified && d.verificationStatus !== 'flagged' && d.verificationStatus !== 'failed');
   
   // Calculate verification progress percentage using shared constants
   const requiredDocs = [...REQUIRED_DOCUMENTS];
@@ -1436,6 +1437,19 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
           type: d.documentType,
           uploaded_at: d.uploadedAt,
           rejection_reason: d.rejectionReason,
+          verification_status: d.verificationStatus,
+          ai_verified: d.aiVerified,
+          ai_confidence: d.aiConfidence,
+          ai_mismatch_reason: d.aiMismatchReason,
+        })),
+        flagged: flaggedDocs.map((d) => ({
+          type: d.documentType,
+          uploaded_at: d.uploadedAt,
+          rejection_reason: d.rejectionReason,
+          verification_status: d.verificationStatus,
+          ai_verified: d.aiVerified,
+          ai_confidence: d.aiConfidence,
+          ai_mismatch_reason: d.aiMismatchReason,
         })),
         details: driver.documents.map(d => ({
           type: d.documentType,
@@ -1443,6 +1457,10 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
           is_verified: d.isVerified,
           verified_at: d.verifiedAt,
           rejection_reason: d.rejectionReason,
+          verification_status: d.verificationStatus,
+          ai_verified: d.aiVerified,
+          ai_confidence: d.aiConfidence,
+          ai_mismatch_reason: d.aiMismatchReason,
         })),
       },
       
