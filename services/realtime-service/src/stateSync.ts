@@ -63,7 +63,7 @@ export async function initializeStateSync(): Promise<void> {
       },
     });
 
-    driverStateStore.hydrateFromDb(activeDrivers);
+    await driverStateStore.hydrateFromDb(activeDrivers);
     logger.info(`[STATE-SYNC] Hydrated ${activeDrivers.length} drivers into RAMEN`);
   } catch (error) {
     logger.error('[STATE-SYNC] Failed to hydrate drivers', { error });
@@ -100,17 +100,20 @@ export async function initializeStateSync(): Promise<void> {
       },
     });
 
-    rideStateStore.hydrateFromDb(activeRides as any);
+    await rideStateStore.hydrateFromDb(activeRides as any);
     logger.info(`[STATE-SYNC] Hydrated ${activeRides.length} active rides into Fireball`);
   } catch (error) {
     logger.error('[STATE-SYNC] Failed to hydrate rides', { error });
   }
 
   const elapsed = Date.now() - startTime;
+  const rideMetrics = await rideStateStore.getMetrics();
+  const driverMetrics = await driverStateStore.getMetrics();
+  
   logger.info('[STATE-SYNC] ═══════════════════════════════════════════════════');
   logger.info(`[STATE-SYNC] State Sync initialized in ${elapsed}ms`);
-  logger.info(`[STATE-SYNC] Fireball: ${rideStateStore.getMetrics().ridesInMemory} rides`);
-  logger.info(`[STATE-SYNC] RAMEN:    ${driverStateStore.getMetrics().totalDrivers} drivers (${driverStateStore.getMetrics().onlineDrivers} online)`);
+  logger.info(`[STATE-SYNC] Fireball: ${rideMetrics.ridesInMemory} rides`);
+  logger.info(`[STATE-SYNC] RAMEN:    ${driverMetrics.totalDrivers} drivers (${driverMetrics.onlineDrivers} online)`);
   logger.info('[STATE-SYNC] ═══════════════════════════════════════════════════');
 }
 

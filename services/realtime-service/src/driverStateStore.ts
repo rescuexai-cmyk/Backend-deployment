@@ -1,32 +1,33 @@
 /**
- * DriverStateStore — In-Memory Driver State & Geospatial Index (Uber RAMEN equivalent)
+ * DriverStateStore — Redis-backed Driver State & Geospatial Index
  * 
- * Uber's RAMEN (Realtime Asynchronous MEssaging Network) manages driver state
- * and location entirely in memory for sub-millisecond lookups. The database
- * is treated as a persistence layer, not a query source.
+ * Migrated from in-memory Map to Redis for horizontal scaling.
+ * All instances of realtime-service now share driver state.
  * 
- * Key capability: findNearbyDrivers() queries MEMORY (not DB).
+ * Redis Data Structures:
+ *   drivers:{driverId}     → Hash with driver state
+ *   user:driver:{userId}   → String mapping userId to driverId
+ *   h3:{h3Index}           → Set of driverIds in that cell
+ *   online:drivers         → Set of online driver IDs
  * 
- * Before (DB query):
- *   findNearbyDrivers() → prisma.driver.findMany({h3Index IN [...]})
- *   Latency: 20-100ms per query
- * 
- * After (RAMEN):
- *   findNearbyDrivers() → h3CellIndex.get(cell) → Map lookup
- *   Latency: 0.01-0.1ms per query (1000x faster)
- * 
- * Data Structures:
- *   drivers:      Map<driverId, DriverState>        — O(1) by ID
- *   userToDriver:  Map<userId, driverId>            — O(1) user→driver
- *   h3CellIndex:  Map<h3Index, Set<driverId>>       — O(1) geospatial lookup
- *   onlineDrivers: Set<driverId>                    — O(1) online check
+ * Falls back to in-memory if Redis is unavailable (single-instance mode).
  */
 
-import { createLogger } from '@raahi/shared';
+import { createLogger, getRedisClient, isRedisAvailable } from '@raahi/shared';
 import { latLngToH3, getKRing, getH3Config } from '@raahi/shared';
 import { eventBus, CHANNELS } from './eventBus';
 
 const logger = createLogger('driver-state-store');
+
+// ─── Redis Keys ───────────────────────────────────────────────────────────────
+
+const KEYS = {
+  driver: (id: string) => `driver:${id}`,
+  userToDriver: (userId: string) => `user:driver:${userId}`,
+  h3Cell: (h3Index: string) => `h3:${h3Index}`,
+  onlineDrivers: 'online:drivers',
+  metrics: 'metrics:drivers',
+};
 
 // ─── Driver State Types ───────────────────────────────────────────────────────
 
@@ -34,12 +35,10 @@ export interface DriverState {
   id: string;
   userId: string;
   
-  // Status
   isOnline: boolean;
   isActive: boolean;
   isVerified: boolean;
   
-  // Location (updated in real-time, no DB writes)
   lat: number | null;
   lng: number | null;
   h3Index: string | null;
@@ -47,7 +46,6 @@ export interface DriverState {
   speed: number | null;
   lastLocationAt: number | null;
   
-  // Profile (cached, loaded on connect)
   firstName: string;
   lastName: string | null;
   phone: string | null;
@@ -59,14 +57,17 @@ export interface DriverState {
   ratingCount: number;
   totalRides: number;
   
-  // Connection state
-  connectedTransports: Set<string>;  // e.g., {'sse', 'socketio', 'mqtt'}
+  connectedTransports: Set<string>;
   lastActiveAt: number;
   
-  // Dirty tracking for async DB sync
   _locationDirty: boolean;
   _statusDirty: boolean;
   _lastDbSyncAt: number;
+}
+
+// Serializable version for Redis (Sets become arrays)
+interface DriverStateRedis extends Omit<DriverState, 'connectedTransports'> {
+  connectedTransports: string[];
 }
 
 // ─── DB Write Queue ───────────────────────────────────────────────────────────
@@ -79,58 +80,80 @@ export interface DriverDbWrite {
   retries: number;
 }
 
+// ─── Serialization Helpers ────────────────────────────────────────────────────
+
+function serializeState(state: DriverState): string {
+  const serializable: DriverStateRedis = {
+    ...state,
+    connectedTransports: Array.from(state.connectedTransports),
+  };
+  return JSON.stringify(serializable);
+}
+
+function deserializeState(json: string): DriverState {
+  const parsed: DriverStateRedis = JSON.parse(json);
+  return {
+    ...parsed,
+    connectedTransports: new Set(parsed.connectedTransports || []),
+  };
+}
+
 // ─── DriverStateStore Implementation ──────────────────────────────────────────
 
 class DriverStateStoreImpl {
-  /** All known drivers keyed by driverId */
-  private drivers = new Map<string, DriverState>();
+  // Fallback in-memory storage (used when Redis unavailable)
+  private localDrivers = new Map<string, DriverState>();
+  private localUserToDriver = new Map<string, string>();
+  private localH3CellIndex = new Map<string, Set<string>>();
+  private localOnlineDrivers = new Set<string>();
   
-  /** userId → driverId mapping for fast lookups */
-  private userToDriver = new Map<string, string>();
-  
-  /** H3 cell → Set of driverIds (GEOSPATIAL INDEX) */
-  private h3CellIndex = new Map<string, Set<string>>();
-  
-  /** Set of currently online driver IDs */
-  private onlineDrivers = new Set<string>();
-  
-  /** Queue of pending DB writes */
   private writeQueue: DriverDbWrite[] = [];
-  
-  /** DB sync callback */
   private dbSyncCallback: ((write: DriverDbWrite) => Promise<void>) | null = null;
   
-  /** Flush intervals */
   private locationFlushInterval: NodeJS.Timeout | null = null;
   private statusFlushInterval: NodeJS.Timeout | null = null;
   
-  // Configuration
-  private readonly LOCATION_FLUSH_MS = 2000;    // Batch location writes every 2s
-  private readonly STATUS_FLUSH_MS = 500;       // Batch status writes every 500ms
-  private readonly STALE_DRIVER_MS = 5 * 60 * 1000;  // Mark stale after 5 min
+  private readonly LOCATION_FLUSH_MS = 2000;
+  private readonly STATUS_FLUSH_MS = 500;
+  private readonly STALE_DRIVER_MS = 5 * 60 * 1000;
   private readonly MAX_RETRIES = 3;
+  private readonly DRIVER_TTL_SECONDS = 24 * 60 * 60; // 24 hours
 
   private metrics = {
     locationUpdates: 0,
     nearbyDriverQueries: 0,
-    avgNearbyLatencyUs: 0,  // Microseconds
+    avgNearbyLatencyUs: 0,
     h3CellsTracked: 0,
     totalDbWrites: 0,
     dbWriteFailures: 0,
   };
 
+  private redisEnabled = false;
+
   constructor() {
+    this.initRedis();
     this.startFlushLoops();
     logger.info('[RAMEN] DriverStateStore initialized');
   }
 
+  private async initRedis(): Promise<void> {
+    const client = getRedisClient();
+    if (client) {
+      this.redisEnabled = true;
+      logger.info('[RAMEN] Redis mode enabled - horizontal scaling supported');
+    } else {
+      this.redisEnabled = false;
+      logger.warn('[RAMEN] Redis unavailable - falling back to in-memory (single instance only)');
+    }
+  }
+
+  private useRedis(): boolean {
+    return this.redisEnabled && isRedisAvailable();
+  }
+
   // ─── Driver Registration ─────────────────────────────────────────────────
 
-  /**
-   * Register a driver in the in-memory store.
-   * Called when driver goes online or on service hydration from DB.
-   */
-  registerDriver(driver: {
+  async registerDriver(driver: {
     id: string;
     userId: string;
     isOnline: boolean;
@@ -149,8 +172,8 @@ class DriverStateStoreImpl {
     rating: number;
     ratingCount: number;
     totalRides: number;
-  }): DriverState {
-    const existing = this.drivers.get(driver.id);
+  }): Promise<DriverState> {
+    const existing = await this.getDriver(driver.id);
     
     const state: DriverState = {
       id: driver.id,
@@ -181,45 +204,58 @@ class DriverStateStoreImpl {
       _lastDbSyncAt: Date.now(),
     };
 
-    this.drivers.set(driver.id, state);
-    this.userToDriver.set(driver.userId, driver.id);
-
-    if (driver.isOnline) {
-      this.onlineDrivers.add(driver.id);
-    }
-
-    // Add to H3 geospatial index
-    if (driver.h3Index) {
-      this.addToH3Index(driver.id, driver.h3Index);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      pipeline.setex(KEYS.driver(driver.id), this.DRIVER_TTL_SECONDS, serializeState(state));
+      pipeline.set(KEYS.userToDriver(driver.userId), driver.id);
+      
+      if (driver.isOnline) {
+        pipeline.sadd(KEYS.onlineDrivers, driver.id);
+      }
+      
+      if (driver.h3Index) {
+        pipeline.sadd(KEYS.h3Cell(driver.h3Index), driver.id);
+      }
+      
+      await pipeline.exec();
+    } else {
+      this.localDrivers.set(driver.id, state);
+      this.localUserToDriver.set(driver.userId, driver.id);
+      
+      if (driver.isOnline) {
+        this.localOnlineDrivers.add(driver.id);
+      }
+      
+      if (driver.h3Index) {
+        if (!this.localH3CellIndex.has(driver.h3Index)) {
+          this.localH3CellIndex.set(driver.h3Index, new Set());
+        }
+        this.localH3CellIndex.get(driver.h3Index)!.add(driver.id);
+      }
     }
 
     logger.debug(`[RAMEN] Driver registered: ${driver.id} (online=${driver.isOnline}, h3=${driver.h3Index})`);
     return state;
   }
 
-  // ─── Location Updates (IN-MEMORY, NO DB) ─────────────────────────────────
+  // ─── Location Updates (IN-MEMORY + REDIS, NO DB) ─────────────────────────
 
-  /**
-   * Update driver location entirely in memory.
-   * This is called at high frequency (every 3-5 seconds per driver).
-   * ZERO database writes — location is flushed to DB in batches.
-   * 
-   * Performance: ~0.05ms per call (vs 20-50ms for DB write)
-   */
-  updateLocation(
+  async updateLocation(
     driverId: string,
     lat: number,
     lng: number,
     heading?: number,
     speed?: number,
-  ): { h3Changed: boolean; newH3: string } | null {
-    const state = this.drivers.get(driverId);
+  ): Promise<{ h3Changed: boolean; newH3: string } | null> {
+    const state = await this.getDriver(driverId);
     if (!state) return null;
 
     const newH3 = latLngToH3(lat, lng);
     const h3Changed = state.h3Index !== newH3;
+    const oldH3 = state.h3Index;
 
-    // Update in-memory state
     state.lat = lat;
     state.lng = lng;
     state.heading = heading ?? null;
@@ -228,20 +264,46 @@ class DriverStateStoreImpl {
     state.lastActiveAt = Date.now();
     state._locationDirty = true;
 
-    // Update H3 geospatial index if cell changed
-    if (h3Changed) {
-      if (state.h3Index) {
-        this.removeFromH3Index(driverId, state.h3Index);
-      }
-      state.h3Index = newH3;
-      this.addToH3Index(driverId, newH3);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
       
-      logger.debug(`[RAMEN] Driver ${driverId} H3 cell changed: ${state.h3Index} → ${newH3}`);
+      pipeline.setex(KEYS.driver(driverId), this.DRIVER_TTL_SECONDS, serializeState(state));
+      
+      if (h3Changed) {
+        if (oldH3) {
+          pipeline.srem(KEYS.h3Cell(oldH3), driverId);
+        }
+        pipeline.sadd(KEYS.h3Cell(newH3), driverId);
+        state.h3Index = newH3;
+      }
+      
+      await pipeline.exec();
+    } else {
+      this.localDrivers.set(driverId, state);
+      
+      if (h3Changed) {
+        if (oldH3) {
+          const oldCell = this.localH3CellIndex.get(oldH3);
+          if (oldCell) {
+            oldCell.delete(driverId);
+            if (oldCell.size === 0) {
+              this.localH3CellIndex.delete(oldH3);
+            }
+          }
+        }
+        state.h3Index = newH3;
+        if (!this.localH3CellIndex.has(newH3)) {
+          this.localH3CellIndex.set(newH3, new Set());
+        }
+        this.localH3CellIndex.get(newH3)!.add(driverId);
+        
+        logger.debug(`[RAMEN] Driver ${driverId} H3 cell changed: ${oldH3} → ${newH3}`);
+      }
     }
 
     this.metrics.locationUpdates++;
 
-    // Instant event push (location broadcast to subscribers)
     eventBus.publish(CHANNELS.driverLocations, {
       type: 'driver-location',
       driverId,
@@ -258,11 +320,8 @@ class DriverStateStoreImpl {
 
   // ─── Status Changes ──────────────────────────────────────────────────────
 
-  /**
-   * Set driver online/offline status. In-memory first, async DB write.
-   */
-  setOnlineStatus(driverId: string, isOnline: boolean): boolean {
-    const state = this.drivers.get(driverId);
+  async setOnlineStatus(driverId: string, isOnline: boolean): Promise<boolean> {
+    const state = await this.getDriver(driverId);
     if (!state) return false;
 
     const wasOnline = state.isOnline;
@@ -270,15 +329,33 @@ class DriverStateStoreImpl {
     state.lastActiveAt = Date.now();
     state._statusDirty = true;
 
-    if (isOnline && !wasOnline) {
-      this.onlineDrivers.add(driverId);
-      logger.info(`[RAMEN] Driver ${driverId} went ONLINE`);
-    } else if (!isOnline && wasOnline) {
-      this.onlineDrivers.delete(driverId);
-      logger.info(`[RAMEN] Driver ${driverId} went OFFLINE`);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      pipeline.setex(KEYS.driver(driverId), this.DRIVER_TTL_SECONDS, serializeState(state));
+      
+      if (isOnline && !wasOnline) {
+        pipeline.sadd(KEYS.onlineDrivers, driverId);
+        logger.info(`[RAMEN] Driver ${driverId} went ONLINE`);
+      } else if (!isOnline && wasOnline) {
+        pipeline.srem(KEYS.onlineDrivers, driverId);
+        logger.info(`[RAMEN] Driver ${driverId} went OFFLINE`);
+      }
+      
+      await pipeline.exec();
+    } else {
+      this.localDrivers.set(driverId, state);
+      
+      if (isOnline && !wasOnline) {
+        this.localOnlineDrivers.add(driverId);
+        logger.info(`[RAMEN] Driver ${driverId} went ONLINE`);
+      } else if (!isOnline && wasOnline) {
+        this.localOnlineDrivers.delete(driverId);
+        logger.info(`[RAMEN] Driver ${driverId} went OFFLINE`);
+      }
     }
 
-    // Queue DB write
     this.writeQueue.push({
       driverId,
       operation: 'status_change',
@@ -290,72 +367,106 @@ class DriverStateStoreImpl {
     return true;
   }
 
-  /**
-   * Track which transport protocols a driver is connected on.
-   */
-  addTransport(driverId: string, transport: string): void {
-    const state = this.drivers.get(driverId);
+  async addTransport(driverId: string, transport: string): Promise<void> {
+    const state = await this.getDriver(driverId);
     if (state) {
       state.connectedTransports.add(transport);
       state.lastActiveAt = Date.now();
+      
+      if (this.useRedis()) {
+        await getRedisClient().setex(KEYS.driver(driverId), this.DRIVER_TTL_SECONDS, serializeState(state));
+      } else {
+        this.localDrivers.set(driverId, state);
+      }
     }
   }
 
-  removeTransport(driverId: string, transport: string): void {
-    const state = this.drivers.get(driverId);
+  async removeTransport(driverId: string, transport: string): Promise<void> {
+    const state = await this.getDriver(driverId);
     if (state) {
       state.connectedTransports.delete(transport);
+      
+      if (this.useRedis()) {
+        await getRedisClient().setex(KEYS.driver(driverId), this.DRIVER_TTL_SECONDS, serializeState(state));
+      } else {
+        this.localDrivers.set(driverId, state);
+      }
     }
   }
 
-  // ─── Geospatial Queries (IN-MEMORY, NO DB) ──────────────────────────────
+  // ─── Geospatial Queries (IN-MEMORY or REDIS) ──────────────────────────────
 
-  /**
-   * Find nearby online drivers using the in-memory H3 geospatial index.
-   * 
-   * THIS IS THE KEY REPLACEMENT for prisma.driver.findMany({h3Index: {in: cells}}).
-   * 
-   * Performance comparison:
-   *   DB query:     20-100ms (network + query + deserialization)
-   *   In-memory:    0.01-0.1ms (Map lookup + Set iteration)
-   *   Improvement:  1000x faster
-   * 
-   * @returns Array of nearby driver states, sorted by distance
-   */
-  findNearbyDrivers(
+  async findNearbyDrivers(
     lat: number,
     lng: number,
     maxRadiusKm: number = 10,
     vehicleType?: string,
-  ): DriverState[] {
+  ): Promise<DriverState[]> {
     const startTime = performance.now();
     const config = getH3Config();
     const centerH3 = latLngToH3(lat, lng);
     
     const candidateIds = new Set<string>();
 
-    // Progressive kRing expansion (same logic as DB query, but in-memory)
     for (let k = 1; k <= config.maxKRing; k++) {
       const cells = getKRing(centerH3, k);
       
-      for (const cell of cells) {
-        const driversInCell = this.h3CellIndex.get(cell);
-        if (driversInCell) {
-          for (const driverId of driversInCell) {
-            candidateIds.add(driverId);
+      if (this.useRedis()) {
+        const client = getRedisClient();
+        const pipeline = client.pipeline();
+        
+        for (const cell of cells) {
+          pipeline.smembers(KEYS.h3Cell(cell));
+        }
+        
+        const results = await pipeline.exec();
+        for (const [err, members] of results || []) {
+          if (!err && members) {
+            for (const driverId of members as string[]) {
+              candidateIds.add(driverId);
+            }
+          }
+        }
+      } else {
+        for (const cell of cells) {
+          const driversInCell = this.localH3CellIndex.get(cell);
+          if (driversInCell) {
+            for (const driverId of driversInCell) {
+              candidateIds.add(driverId);
+            }
           }
         }
       }
 
-      // Check if we found enough candidates at this ring level
       if (candidateIds.size > 0) break;
     }
 
-    // Filter and calculate distances
     const heartbeatThreshold = Date.now() - this.STALE_DRIVER_MS;
+    const candidates: DriverState[] = [];
     
-    const results = Array.from(candidateIds)
-      .map(id => this.drivers.get(id))
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      for (const id of candidateIds) {
+        pipeline.get(KEYS.driver(id));
+      }
+      
+      const results = await pipeline.exec();
+      for (const [err, data] of results || []) {
+        if (!err && data) {
+          const driver = deserializeState(data as string);
+          candidates.push(driver);
+        }
+      }
+    } else {
+      for (const id of candidateIds) {
+        const driver = this.localDrivers.get(id);
+        if (driver) candidates.push(driver);
+      }
+    }
+    
+    const results = candidates
       .filter((d): d is DriverState => {
         if (!d) return false;
         if (!d.isOnline || !d.isActive) return false;
@@ -383,90 +494,113 @@ class DriverStateStoreImpl {
     return results;
   }
 
-  /**
-   * Get count of online drivers in a specific H3 cell and adjacent cells.
-   */
-  getDriverCountInArea(lat: number, lng: number, kRing: number = 1): number {
+  async getDriverCountInArea(lat: number, lng: number, kRing: number = 1): Promise<number> {
     const centerH3 = latLngToH3(lat, lng);
     const cells = getKRing(centerH3, kRing);
     let count = 0;
     
-    for (const cell of cells) {
-      const drivers = this.h3CellIndex.get(cell);
-      if (drivers) {
-        for (const driverId of drivers) {
-          const state = this.drivers.get(driverId);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      for (const cell of cells) {
+        pipeline.smembers(KEYS.h3Cell(cell));
+      }
+      
+      const results = await pipeline.exec();
+      const driverIds = new Set<string>();
+      
+      for (const [err, members] of results || []) {
+        if (!err && members) {
+          for (const id of members as string[]) {
+            driverIds.add(id);
+          }
+        }
+      }
+      
+      const statePipeline = client.pipeline();
+      for (const id of driverIds) {
+        statePipeline.get(KEYS.driver(id));
+      }
+      
+      const stateResults = await statePipeline.exec();
+      for (const [err, data] of stateResults || []) {
+        if (!err && data) {
+          const state = deserializeState(data as string);
           if (state?.isOnline && state?.isActive) count++;
         }
       }
+    } else {
+      for (const cell of cells) {
+        const drivers = this.localH3CellIndex.get(cell);
+        if (drivers) {
+          for (const driverId of drivers) {
+            const state = this.localDrivers.get(driverId);
+            if (state?.isOnline && state?.isActive) count++;
+          }
+        }
+      }
     }
+    
     return count;
   }
 
-  // ─── Lookups (O(1), No DB) ───────────────────────────────────────────────
+  // ─── Lookups (O(1)) ───────────────────────────────────────────────────────
 
-  /** Get driver by driverId */
-  getDriver(driverId: string): DriverState | null {
-    return this.drivers.get(driverId) || null;
+  async getDriver(driverId: string): Promise<DriverState | null> {
+    if (this.useRedis()) {
+      const data = await getRedisClient().get(KEYS.driver(driverId));
+      return data ? deserializeState(data) : null;
+    }
+    return this.localDrivers.get(driverId) || null;
   }
 
-  /** Get driver by userId (resolves userId→driverId) */
-  getDriverByUserId(userId: string): DriverState | null {
-    const driverId = this.userToDriver.get(userId);
+  async getDriverByUserId(userId: string): Promise<DriverState | null> {
+    if (this.useRedis()) {
+      const driverId = await getRedisClient().get(KEYS.userToDriver(userId));
+      if (!driverId) return null;
+      return this.getDriver(driverId);
+    }
+    const driverId = this.localUserToDriver.get(userId);
     if (!driverId) return null;
-    return this.drivers.get(driverId) || null;
+    return this.localDrivers.get(driverId) || null;
   }
 
-  /** Resolve userId to driverId */
-  resolveDriverId(inputId: string): string | null {
-    // Check if it's already a driverId
-    if (this.drivers.has(inputId)) return inputId;
-    // Check if it's a userId
-    return this.userToDriver.get(inputId) || null;
-  }
-
-  /** Check if a driver is online (O(1) Set lookup) */
-  isDriverOnline(driverId: string): boolean {
-    return this.onlineDrivers.has(driverId);
-  }
-
-  /** Get count of online drivers */
-  getOnlineDriverCount(): number {
-    return this.onlineDrivers.size;
-  }
-
-  /** Get all online driver IDs */
-  getOnlineDriverIds(): string[] {
-    return Array.from(this.onlineDrivers);
-  }
-
-  // ─── H3 Index Management ────────────────────────────────────────────────
-
-  private addToH3Index(driverId: string, h3Index: string): void {
-    if (!this.h3CellIndex.has(h3Index)) {
-      this.h3CellIndex.set(h3Index, new Set());
+  async resolveDriverId(inputId: string): Promise<string | null> {
+    if (this.useRedis()) {
+      const exists = await getRedisClient().exists(KEYS.driver(inputId));
+      if (exists) return inputId;
+      const driverId = await getRedisClient().get(KEYS.userToDriver(inputId));
+      return driverId || null;
     }
-    this.h3CellIndex.get(h3Index)!.add(driverId);
-    this.metrics.h3CellsTracked = this.h3CellIndex.size;
+    if (this.localDrivers.has(inputId)) return inputId;
+    return this.localUserToDriver.get(inputId) || null;
   }
 
-  private removeFromH3Index(driverId: string, h3Index: string): void {
-    const cell = this.h3CellIndex.get(h3Index);
-    if (cell) {
-      cell.delete(driverId);
-      if (cell.size === 0) {
-        this.h3CellIndex.delete(h3Index);
-      }
+  async isDriverOnline(driverId: string): Promise<boolean> {
+    if (this.useRedis()) {
+      return (await getRedisClient().sismember(KEYS.onlineDrivers, driverId)) === 1;
     }
-    this.metrics.h3CellsTracked = this.h3CellIndex.size;
+    return this.localOnlineDrivers.has(driverId);
+  }
+
+  async getOnlineDriverCount(): Promise<number> {
+    if (this.useRedis()) {
+      return await getRedisClient().scard(KEYS.onlineDrivers);
+    }
+    return this.localOnlineDrivers.size;
+  }
+
+  async getOnlineDriverIds(): Promise<string[]> {
+    if (this.useRedis()) {
+      return await getRedisClient().smembers(KEYS.onlineDrivers);
+    }
+    return Array.from(this.localOnlineDrivers);
   }
 
   // ─── DB Hydration ────────────────────────────────────────────────────────
 
-  /**
-   * Load all active/online drivers from DB into memory on startup.
-   */
-  hydrateFromDb(drivers: Array<{
+  async hydrateFromDb(drivers: Array<{
     id: string;
     userId: string;
     isOnline: boolean;
@@ -488,11 +622,11 @@ class DriverStateStoreImpl {
       phone: string | null;
       profileImage: string | null;
     };
-  }>): void {
+  }>): Promise<void> {
     const startTime = Date.now();
     
     for (const d of drivers) {
-      this.registerDriver({
+      await this.registerDriver({
         id: d.id,
         userId: d.userId,
         isOnline: d.isOnline,
@@ -515,7 +649,8 @@ class DriverStateStoreImpl {
     }
 
     const elapsed = Date.now() - startTime;
-    logger.info(`[RAMEN] Hydrated ${drivers.length} drivers from DB in ${elapsed}ms (${this.onlineDrivers.size} online, ${this.h3CellIndex.size} H3 cells)`);
+    const onlineCount = await this.getOnlineDriverCount();
+    logger.info(`[RAMEN] Hydrated ${drivers.length} drivers from DB in ${elapsed}ms (${onlineCount} online, redis=${this.useRedis()})`);
   }
 
   // ─── Async DB Persistence ────────────────────────────────────────────────
@@ -525,14 +660,36 @@ class DriverStateStoreImpl {
   }
 
   private startFlushLoops(): void {
-    // Location flush — batched every 2s
     this.locationFlushInterval = setInterval(async () => {
       const locationWrites: DriverDbWrite[] = [];
       
-      for (const [driverId, state] of this.drivers) {
+      let drivers: DriverState[] = [];
+      
+      if (this.useRedis()) {
+        const client = getRedisClient();
+        const onlineIds = await client.smembers(KEYS.onlineDrivers);
+        
+        if (onlineIds.length > 0) {
+          const pipeline = client.pipeline();
+          for (const id of onlineIds) {
+            pipeline.get(KEYS.driver(id));
+          }
+          
+          const results = await pipeline.exec();
+          for (const [err, data] of results || []) {
+            if (!err && data) {
+              drivers.push(deserializeState(data as string));
+            }
+          }
+        }
+      } else {
+        drivers = Array.from(this.localDrivers.values());
+      }
+      
+      for (const state of drivers) {
         if (state._locationDirty && state.lat !== null && state.lng !== null) {
           locationWrites.push({
-            driverId,
+            driverId: state.id,
             operation: 'location_update',
             data: {
               currentLatitude: state.lat,
@@ -545,6 +702,10 @@ class DriverStateStoreImpl {
           });
           state._locationDirty = false;
           state._lastDbSyncAt = Date.now();
+          
+          if (this.useRedis()) {
+            await getRedisClient().setex(KEYS.driver(state.id), this.DRIVER_TTL_SECONDS, serializeState(state));
+          }
         }
       }
 
@@ -561,7 +722,6 @@ class DriverStateStoreImpl {
       }
     }, this.LOCATION_FLUSH_MS);
 
-    // Status flush — batched every 500ms
     this.statusFlushInterval = setInterval(async () => {
       const batch = this.writeQueue.splice(0, this.writeQueue.length);
       
@@ -584,9 +744,6 @@ class DriverStateStoreImpl {
 
   // ─── Utility ─────────────────────────────────────────────────────────────
 
-  /**
-   * Haversine distance in km (fast in-memory calculation)
-   */
   private haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -599,17 +756,18 @@ class DriverStateStoreImpl {
 
   // ─── Metrics ─────────────────────────────────────────────────────────────
 
-  getMetrics() {
+  async getMetrics() {
+    const onlineCount = await this.getOnlineDriverCount();
+    
     return {
       ...this.metrics,
-      totalDrivers: this.drivers.size,
-      onlineDrivers: this.onlineDrivers.size,
-      h3CellsTracked: this.h3CellIndex.size,
+      totalDrivers: this.useRedis() ? 'redis' : this.localDrivers.size,
+      onlineDrivers: onlineCount,
+      redisEnabled: this.useRedis(),
       writeQueueSize: this.writeQueue.length,
     };
   }
 
-  /** Graceful shutdown */
   async shutdown(): Promise<void> {
     if (this.locationFlushInterval) clearInterval(this.locationFlushInterval);
     if (this.statusFlushInterval) clearInterval(this.statusFlushInterval);
@@ -617,5 +775,4 @@ class DriverStateStoreImpl {
   }
 }
 
-// Singleton
 export const driverStateStore = new DriverStateStoreImpl();

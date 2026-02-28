@@ -246,8 +246,11 @@ services:
       NODE_ENV: development
       PORT: 5007
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
+      REDIS_URL: redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]

@@ -248,11 +248,11 @@ io.on('connection', (socket) => {
     }
     
     // Register driver transport in RAMEN
-    driverStateStore.addTransport(driverId, 'socketio');
+    await driverStateStore.addTransport(driverId, 'socketio');
     
     // Ensure driver is registered in RAMEN (if not already from hydration)
-    if (!driverStateStore.getDriver(driverId)) {
-      driverStateStore.registerDriver({
+    if (!(await driverStateStore.getDriver(driverId))) {
+      await driverStateStore.registerDriver({
         id: driverId,
         userId: dbDriver.userId,
         isOnline: dbDriver.isOnline,
@@ -417,17 +417,17 @@ io.on('connection', (socket) => {
   });
   
   // Driver location update during ride — uses RAMEN + Fireball (no DB writes)
-  socket.on('location-update', (data: { rideId: string; lat: number; lng: number; heading?: number; speed?: number }) => {
+  socket.on('location-update', async (data: { rideId: string; lat: number; lng: number; heading?: number; speed?: number }) => {
     if (!data.rideId || typeof data.rideId !== 'string') return;
     if (typeof data.lat !== 'number' || typeof data.lng !== 'number') return;
     updateActivity();
     
     // Update ride location in Fireball (in-memory, instant push to ride subscribers)
-    rideStateStore.updateRideLocation(data.rideId, data.lat, data.lng, data.heading, data.speed);
+    await rideStateStore.updateRideLocation(data.rideId, data.lat, data.lng, data.heading, data.speed);
     
     // Update driver location in RAMEN (in-memory H3 index, async DB write)
     if (currentDriverId) {
-      driverStateStore.updateLocation(currentDriverId, data.lat, data.lng, data.heading, data.speed);
+      await driverStateStore.updateLocation(currentDriverId, data.lat, data.lng, data.heading, data.speed);
     }
     
     // Legacy Socket.io broadcast (backward compatibility)
@@ -437,7 +437,7 @@ io.on('connection', (socket) => {
     });
   });
   
-  socket.on('disconnect', (reason) => {
+  socket.on('disconnect', async (reason) => {
     const driverId = connectedDrivers.get(socket.id);
     if (driverId) {
       connectedDrivers.delete(socket.id);
@@ -449,7 +449,7 @@ io.on('connection', (socket) => {
         if (sockets.size === 0) {
           driverSockets.delete(driverId);
           // Remove Socket.io transport from RAMEN
-          driverStateStore.removeTransport(driverId, 'socketio');
+          await driverStateStore.removeTransport(driverId, 'socketio');
           logger.warn(`[SOCKET] ⚠️ Driver ${driverId} FULLY DISCONNECTED (no remaining sockets) - reason: ${reason}`);
         } else {
           logger.info(`[SOCKET] Driver ${driverId} disconnected one socket, ${sockets.size} remaining (socket: ${socket.id}, reason: ${reason})`);
@@ -950,7 +950,7 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
     return;
   }
 
-  const drivers = driverStateStore.findNearbyDrivers(lat, lng, radius, vehicleType);
+  const drivers = await driverStateStore.findNearbyDrivers(lat, lng, radius, vehicleType);
   
   res.json({
     success: true,
@@ -983,14 +983,14 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
  */
 app.get('/internal/driver-state/:driverId', authenticateInternal, asyncHandler(async (req, res) => {
   const inputId = req.params.driverId;
-  const driverId = driverStateStore.resolveDriverId(inputId);
+  const driverId = await driverStateStore.resolveDriverId(inputId);
   
   if (!driverId) {
     res.status(404).json({ success: false, message: 'Driver not found in memory' });
     return;
   }
 
-  const state = driverStateStore.getDriver(driverId);
+  const state = await driverStateStore.getDriver(driverId);
   if (!state) {
     res.status(404).json({ success: false, message: 'Driver state not found' });
     return;
@@ -1032,7 +1032,7 @@ app.post('/internal/driver-location', authenticateInternal, asyncHandler(async (
     return;
   }
 
-  const result = driverStateStore.updateLocation(driverId, lat, lng, heading, speed);
+  const result = await driverStateStore.updateLocation(driverId, lat, lng, heading, speed);
   if (!result) {
     // Driver not in memory — register them first
     res.status(404).json({ success: false, message: 'Driver not registered in RAMEN. Call POST /internal/register-driver first.' });
@@ -1061,7 +1061,7 @@ app.post('/internal/register-driver', authenticateInternal, asyncHandler(async (
     return;
   }
 
-  driverStateStore.registerDriver(driver);
+  await driverStateStore.registerDriver(driver);
   res.json({ success: true, message: 'Driver registered in RAMEN' });
 }));
 
@@ -1075,7 +1075,7 @@ app.post('/internal/driver-status', authenticateInternal, asyncHandler(async (re
     return;
   }
 
-  const result = driverStateStore.setOnlineStatus(driverId, isOnline);
+  const result = await driverStateStore.setOnlineStatus(driverId, isOnline);
   res.json({ success: result });
 }));
 
@@ -1084,7 +1084,7 @@ app.post('/internal/driver-status', authenticateInternal, asyncHandler(async (re
  * Replaces: prisma.ride.findUnique() for real-time state checks
  */
 app.get('/internal/ride-state/:rideId', authenticateInternal, asyncHandler(async (req, res) => {
-  const state = rideStateStore.getRide(req.params.rideId);
+  const state = await rideStateStore.getRide(req.params.rideId);
   if (!state) {
     res.status(404).json({ success: false, message: 'Ride not found in memory' });
     return;
@@ -1108,7 +1108,7 @@ app.post('/internal/register-ride', authenticateInternal, asyncHandler(async (re
     return;
   }
 
-  rideStateStore.createRide(ride);
+  await rideStateStore.createRide(ride);
   res.json({ success: true, message: 'Ride registered in Fireball' });
 }));
 
@@ -1122,7 +1122,7 @@ app.post('/internal/ride-transition', authenticateInternal, asyncHandler(async (
     return;
   }
 
-  const state = rideStateStore.transitionStatus(rideId, newStatus, triggeredBy || 'system', additionalData);
+  const state = await rideStateStore.transitionStatus(rideId, newStatus, triggeredBy || 'system', additionalData);
   if (!state) {
     res.status(400).json({ success: false, message: 'Invalid transition or ride not found' });
     return;
@@ -1141,7 +1141,7 @@ app.post('/internal/verify-otp', authenticateInternal, asyncHandler(async (req, 
     return;
   }
 
-  const result = rideStateStore.verifyOtp(rideId, otp);
+  const result = await rideStateStore.verifyOtp(rideId, otp);
   res.json({ success: result.valid, error: result.error });
 }));
 
@@ -1155,7 +1155,7 @@ app.post('/internal/ride-location', authenticateInternal, asyncHandler(async (re
     return;
   }
 
-  const result = rideStateStore.updateRideLocation(rideId, lat, lng, heading, speed);
+  const result = await rideStateStore.updateRideLocation(rideId, lat, lng, heading, speed);
   res.json({ success: result });
 }));
 
@@ -1163,7 +1163,7 @@ app.post('/internal/ride-location', authenticateInternal, asyncHandler(async (re
  * Fireball: Get pending rides from memory (for driver polling fallback).
  */
 app.get('/internal/pending-rides', authenticateInternal, asyncHandler(async (req, res) => {
-  const rides = rideStateStore.getPendingRides();
+  const rides = await rideStateStore.getPendingRides();
   res.json({
     success: true,
     data: { rides: rides.map(r => rideStateStore.toPublicState(r)), count: rides.length },
@@ -1178,8 +1178,8 @@ app.get('/internal/state-metrics', authenticateInternal, asyncHandler(async (req
   res.json({
     success: true,
     data: {
-      fireball: rideStateStore.getMetrics(),
-      ramen: driverStateStore.getMetrics(),
+      fireball: await rideStateStore.getMetrics(),
+      ramen: await driverStateStore.getMetrics(),
       eventBus: eventBus.getMetrics(),
       sse: sseManager.getStats(),
       mqtt: mqttBroker.getStats(),
@@ -1340,7 +1340,10 @@ const start = async () => {
   }
 
   // ── Start HTTP + Socket.io Server ──────────────────────────────────────────
-  server.listen(PORT, () => {
+  server.listen(PORT, async () => {
+    const rideMetrics = await rideStateStore.getMetrics();
+    const driverMetrics = await driverStateStore.getMetrics();
+    
     logger.info(`════════════════════════════════════════════════════════════════`);
     logger.info(`  Raahi Realtime Service - Hybrid Transport Architecture`);
     logger.info(`════════════════════════════════════════════════════════════════`);
@@ -1359,9 +1362,8 @@ const start = async () => {
     logger.info(`  Event Bus: ${eventBus.getMetrics().transports.join(', ')}`);
     logger.info(`────────────────────────────────────────────────────────────────`);
     logger.info(`  In-Memory State (Uber-style):`);
-    logger.info(`    Fireball → Ride state machine (${rideStateStore.getMetrics().ridesInMemory} rides)`);
-    logger.info(`    RAMEN    → Driver state/location (${driverStateStore.getMetrics().totalDrivers} drivers, ${driverStateStore.getMetrics().onlineDrivers} online)`);
-    logger.info(`    H3 Cells → ${driverStateStore.getMetrics().h3CellsTracked} tracked cells`);
+    logger.info(`    Fireball → Ride state machine (${rideMetrics.ridesInMemory} rides)`);
+    logger.info(`    RAMEN    → Driver state/location (${driverMetrics.totalDrivers} drivers, ${driverMetrics.onlineDrivers} online, redis=${driverMetrics.redisEnabled})`);
     logger.info(`════════════════════════════════════════════════════════════════`);
   });
 };

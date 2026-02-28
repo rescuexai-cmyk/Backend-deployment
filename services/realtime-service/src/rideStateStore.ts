@@ -1,35 +1,31 @@
 /**
- * RideStateStore — In-Memory Ride State Machine (Uber Fireball equivalent)
+ * RideStateStore — Redis-backed Ride State Machine
  * 
- * Uber's Fireball is their real-time dispatch system that manages ride state
- * entirely in memory, broadcasting state transitions instantly without 
- * waiting for database writes.
+ * Migrated from in-memory Map to Redis for horizontal scaling.
+ * All instances of realtime-service now share ride state.
  * 
- * How it works:
- *   1. State changes happen in-memory FIRST (microseconds)
- *   2. Events are pushed to all subscribers INSTANTLY via EventBus
- *   3. Database persistence happens ASYNCHRONOUSLY (eventual consistency)
- *   4. On restart, state is hydrated from the database
+ * Redis Data Structures:
+ *   ride:{rideId}              → Hash with ride state
+ *   passenger:ride:{passId}    → String mapping passengerId to active rideId
+ *   driver:ride:{driverId}     → String mapping driverId to active rideId
+ *   pending:rides              → Set of pending ride IDs
  * 
- * Before (DB-polling):
- *   Client → REST → DB Write (50-200ms) → DB Read → Push → Client
- *   Total latency: 200-500ms + clients polling every 2-5s
- * 
- * After (Fireball):
- *   Client → REST → Memory Write (0.01ms) → Instant Push → Client
- *                                          → Async DB Write (background)
- *   Total latency: 1-5ms (100x faster)
- * 
- * State Machine:
- *   PENDING → DRIVER_ASSIGNED → CONFIRMED → DRIVER_ARRIVED → RIDE_STARTED → RIDE_COMPLETED
- *          ↓                  ↓           ↓                ↓
- *       CANCELLED          CANCELLED    CANCELLED        CANCELLED
+ * Falls back to in-memory if Redis is unavailable (single-instance mode).
  */
 
-import { createLogger } from '@raahi/shared';
+import { createLogger, getRedisClient, isRedisAvailable } from '@raahi/shared';
 import { eventBus, CHANNELS } from './eventBus';
 
 const logger = createLogger('ride-state-store');
+
+// ─── Redis Keys ───────────────────────────────────────────────────────────────
+
+const KEYS = {
+  ride: (id: string) => `ride:${id}`,
+  passengerRide: (passengerId: string) => `passenger:ride:${passengerId}`,
+  driverRide: (driverId: string) => `driver:ride:${driverId}`,
+  pendingRides: 'pending:rides',
+};
 
 // ─── Ride State Types ─────────────────────────────────────────────────────────
 
@@ -48,7 +44,6 @@ export interface RideState {
   passengerId: string;
   driverId: string | null;
   
-  // Location data
   pickupLat: number;
   pickupLng: number;
   dropLat: number;
@@ -57,7 +52,6 @@ export interface RideState {
   dropAddress: string;
   pickupH3: string;
   
-  // Fare data
   totalFare: number;
   baseFare: number;
   distanceFare: number;
@@ -66,19 +60,16 @@ export interface RideState {
   distance: number;
   duration: number;
   
-  // Verification
   rideOtp: string;
   paymentMethod: string;
   vehicleType: string;
   
-  // Live tracking
   driverLat: number | null;
   driverLng: number | null;
   driverHeading: number | null;
   driverSpeed: number | null;
   
-  // Timestamps
-  createdAt: number;   // Unix ms
+  createdAt: number;
   assignedAt: number | null;
   confirmedAt: number | null;
   arrivedAt: number | null;
@@ -88,7 +79,6 @@ export interface RideState {
   cancelledBy: string | null;
   cancellationReason: string | null;
   
-  // Metadata
   passengerName: string;
   driverName: string | null;
   driverPhone: string | null;
@@ -97,13 +87,11 @@ export interface RideState {
   driverRating: number | null;
   driverProfileImage: string | null;
   
-  // Dirty flag for async DB sync
   _dirty: boolean;
   _lastSyncedAt: number;
-  _version: number;  // Optimistic concurrency control
+  _version: number;
 }
 
-// Valid state transitions
 const VALID_TRANSITIONS: Record<RideStatus, RideStatus[]> = {
   'PENDING': ['DRIVER_ASSIGNED', 'CANCELLED'],
   'DRIVER_ASSIGNED': ['CONFIRMED', 'CANCELLED'],
@@ -135,38 +123,36 @@ export interface PendingDbWrite {
   retries: number;
 }
 
+// ─── Serialization ────────────────────────────────────────────────────────────
+
+function serializeState(state: RideState): string {
+  return JSON.stringify(state);
+}
+
+function deserializeState(json: string): RideState {
+  return JSON.parse(json);
+}
+
 // ─── RideStateStore Implementation ────────────────────────────────────────────
 
 class RideStateStoreImpl {
-  /** Active ride states keyed by rideId */
-  private rides = new Map<string, RideState>();
+  // Fallback in-memory storage
+  private localRides = new Map<string, RideState>();
+  private localPassengerRides = new Map<string, string>();
+  private localDriverRides = new Map<string, string>();
+  private localPendingRides = new Set<string>();
   
-  /** Passenger to active ride mapping (passengerId → rideId) */
-  private passengerRides = new Map<string, string>();
-  
-  /** Driver to active ride mapping (driverId → rideId) */
-  private driverRides = new Map<string, string>();
-  
-  /** Pending rides (PENDING status) for driver matching */
-  private pendingRides = new Set<string>();
-  
-  /** Queue of DB writes to flush asynchronously */
   private writeQueue: PendingDbWrite[] = [];
-  
-  /** Callback for async DB persistence */
   private dbSyncCallback: ((write: PendingDbWrite) => Promise<void>) | null = null;
   
-  /** Flush interval for batched DB writes */
   private flushInterval: NodeJS.Timeout | null = null;
-  
-  /** TTL cleanup interval for completed/cancelled rides */
   private cleanupInterval: NodeJS.Timeout | null = null;
   
-  // Configuration
-  private readonly FLUSH_INTERVAL_MS = 500;   // Flush DB writes every 500ms
-  private readonly COMPLETED_TTL_MS = 5 * 60 * 1000;  // Keep completed rides 5 min
-  private readonly CLEANUP_INTERVAL_MS = 60 * 1000;    // Cleanup every 60s
+  private readonly FLUSH_INTERVAL_MS = 500;
+  private readonly COMPLETED_TTL_MS = 5 * 60 * 1000;
+  private readonly CLEANUP_INTERVAL_MS = 60 * 1000;
   private readonly MAX_WRITE_RETRIES = 3;
+  private readonly RIDE_TTL_SECONDS = 24 * 60 * 60; // 24 hours
 
   private metrics = {
     totalStateChanges: 0,
@@ -176,19 +162,33 @@ class RideStateStoreImpl {
     lastFlushAt: null as string | null,
   };
 
+  private redisEnabled = false;
+
   constructor() {
+    this.initRedis();
     this.startFlushLoop();
     this.startCleanupLoop();
     logger.info('[FIREBALL] RideStateStore initialized');
   }
 
+  private async initRedis(): Promise<void> {
+    const client = getRedisClient();
+    if (client) {
+      this.redisEnabled = true;
+      logger.info('[FIREBALL] Redis mode enabled - horizontal scaling supported');
+    } else {
+      this.redisEnabled = false;
+      logger.warn('[FIREBALL] Redis unavailable - falling back to in-memory (single instance only)');
+    }
+  }
+
+  private useRedis(): boolean {
+    return this.redisEnabled && isRedisAvailable();
+  }
+
   // ─── Core State Operations ───────────────────────────────────────────────
 
-  /**
-   * Create a new ride in memory and queue DB write.
-   * Returns instantly — DB write happens in background.
-   */
-  createRide(ride: Omit<RideState, '_dirty' | '_lastSyncedAt' | '_version'>): RideState {
+  async createRide(ride: Omit<RideState, '_dirty' | '_lastSyncedAt' | '_version'>): Promise<RideState> {
     const now = Date.now();
     const state: RideState = {
       ...ride,
@@ -197,16 +197,29 @@ class RideStateStoreImpl {
       _version: 1,
     };
 
-    this.rides.set(ride.id, state);
-    this.passengerRides.set(ride.passengerId, ride.id);
-    
-    if (ride.status === 'PENDING') {
-      this.pendingRides.add(ride.id);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      pipeline.setex(KEYS.ride(ride.id), this.RIDE_TTL_SECONDS, serializeState(state));
+      pipeline.set(KEYS.passengerRide(ride.passengerId), ride.id);
+      
+      if (ride.status === 'PENDING') {
+        pipeline.sadd(KEYS.pendingRides, ride.id);
+      }
+      
+      await pipeline.exec();
+    } else {
+      this.localRides.set(ride.id, state);
+      this.localPassengerRides.set(ride.passengerId, ride.id);
+      
+      if (ride.status === 'PENDING') {
+        this.localPendingRides.add(ride.id);
+      }
     }
 
     logger.info(`[FIREBALL] Ride created in memory: ${ride.id} (status: ${ride.status})`);
 
-    // Instant event push
     eventBus.publish(CHANNELS.ride(ride.id), {
       type: 'ride-status-update',
       rideId: ride.id,
@@ -215,7 +228,6 @@ class RideStateStoreImpl {
       timestamp: new Date().toISOString(),
     });
 
-    // Queue async DB write
     this.queueDbWrite({
       rideId: ride.id,
       operation: 'create',
@@ -228,27 +240,20 @@ class RideStateStoreImpl {
     return state;
   }
 
-  /**
-   * Transition ride to a new status.
-   * Happens in memory instantly, pushes event, queues DB write.
-   * 
-   * @returns Updated state or null if transition invalid
-   */
-  transitionStatus(
+  async transitionStatus(
     rideId: string,
     newStatus: RideStatus,
     triggeredBy: string,
     additionalData?: Partial<RideState>,
-  ): RideState | null {
+  ): Promise<RideState | null> {
     const startTime = performance.now();
-    const state = this.rides.get(rideId);
+    const state = await this.getRide(rideId);
     
     if (!state) {
       logger.warn(`[FIREBALL] Cannot transition: ride ${rideId} not found in memory`);
       return null;
     }
 
-    // Validate transition
     const allowed = VALID_TRANSITIONS[state.status];
     if (!allowed.includes(newStatus)) {
       logger.warn(`[FIREBALL] Invalid transition: ${state.status} → ${newStatus} for ride ${rideId}`);
@@ -258,12 +263,10 @@ class RideStateStoreImpl {
     const previousStatus = state.status;
     const now = Date.now();
 
-    // Apply state change IN MEMORY (microseconds)
     state.status = newStatus;
     state._dirty = true;
     state._version++;
 
-    // Apply timestamps
     switch (newStatus) {
       case 'DRIVER_ASSIGNED':
         state.assignedAt = now;
@@ -279,32 +282,52 @@ class RideStateStoreImpl {
         break;
       case 'RIDE_COMPLETED':
         state.completedAt = now;
-        this.pendingRides.delete(rideId);
         break;
       case 'CANCELLED':
         state.cancelledAt = now;
         state.cancelledBy = additionalData?.cancelledBy || triggeredBy;
         state.cancellationReason = additionalData?.cancellationReason || null;
-        this.pendingRides.delete(rideId);
         break;
     }
 
-    // Apply additional data (driver info, etc.)
     if (additionalData) {
       Object.assign(state, additionalData);
-      // Reset dirty fields
       state._dirty = true;
     }
 
-    // Update index mappings
-    if (newStatus === 'DRIVER_ASSIGNED' && state.driverId) {
-      this.driverRides.set(state.driverId, rideId);
-    }
-    if (newStatus === 'RIDE_COMPLETED' || newStatus === 'CANCELLED') {
-      if (state.driverId) {
-        this.driverRides.delete(state.driverId);
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const pipeline = client.pipeline();
+      
+      pipeline.setex(KEYS.ride(rideId), this.RIDE_TTL_SECONDS, serializeState(state));
+      
+      if (newStatus === 'DRIVER_ASSIGNED' && state.driverId) {
+        pipeline.set(KEYS.driverRide(state.driverId), rideId);
+        pipeline.srem(KEYS.pendingRides, rideId);
       }
-      // Don't delete from passengerRides yet — passenger might need to rate
+      
+      if (newStatus === 'RIDE_COMPLETED' || newStatus === 'CANCELLED') {
+        pipeline.srem(KEYS.pendingRides, rideId);
+        if (state.driverId) {
+          pipeline.del(KEYS.driverRide(state.driverId));
+        }
+      }
+      
+      await pipeline.exec();
+    } else {
+      this.localRides.set(rideId, state);
+      
+      if (newStatus === 'DRIVER_ASSIGNED' && state.driverId) {
+        this.localDriverRides.set(state.driverId, rideId);
+        this.localPendingRides.delete(rideId);
+      }
+      
+      if (newStatus === 'RIDE_COMPLETED' || newStatus === 'CANCELLED') {
+        this.localPendingRides.delete(rideId);
+        if (state.driverId) {
+          this.localDriverRides.delete(state.driverId);
+        }
+      }
     }
 
     const latencyMs = performance.now() - startTime;
@@ -315,7 +338,6 @@ class RideStateStoreImpl {
 
     logger.info(`[FIREBALL] State transition: ${rideId} ${previousStatus} → ${newStatus} (${latencyMs.toFixed(3)}ms in-memory)`);
 
-    // ── INSTANT EVENT PUSH (0ms latency to clients) ────────────────────────
     const timestamp = new Date().toISOString();
 
     eventBus.publish(CHANNELS.ride(rideId), {
@@ -330,7 +352,6 @@ class RideStateStoreImpl {
       timestamp,
     });
 
-    // Special events for specific transitions
     if (newStatus === 'DRIVER_ASSIGNED' && state.driverId) {
       eventBus.publish(CHANNELS.ride(rideId), {
         type: 'driver-assigned',
@@ -347,7 +368,6 @@ class RideStateStoreImpl {
         timestamp,
       });
 
-      // Notify available drivers that this ride is taken
       eventBus.publish(CHANNELS.availableDrivers, {
         type: 'ride-status-update',
         rideId,
@@ -367,7 +387,6 @@ class RideStateStoreImpl {
       });
     }
 
-    // ── Queue async DB write ───────────────────────────────────────────────
     this.queueDbWrite({
       rideId,
       operation: 'status_change',
@@ -391,13 +410,8 @@ class RideStateStoreImpl {
     return state;
   }
 
-  /**
-   * Update driver location for an active ride — ZERO DB writes.
-   * Location is stored in memory, pushed to clients instantly.
-   * DB sync happens in the batched flush loop.
-   */
-  updateRideLocation(rideId: string, lat: number, lng: number, heading?: number, speed?: number): boolean {
-    const state = this.rides.get(rideId);
+  async updateRideLocation(rideId: string, lat: number, lng: number, heading?: number, speed?: number): Promise<boolean> {
+    const state = await this.getRide(rideId);
     if (!state) return false;
 
     state.driverLat = lat;
@@ -405,7 +419,12 @@ class RideStateStoreImpl {
     state.driverHeading = heading ?? null;
     state.driverSpeed = speed ?? null;
 
-    // Instant push to ride subscribers (passenger sees driver move in real-time)
+    if (this.useRedis()) {
+      await getRedisClient().setex(KEYS.ride(rideId), this.RIDE_TTL_SECONDS, serializeState(state));
+    } else {
+      this.localRides.set(rideId, state);
+    }
+
     eventBus.publish(CHANNELS.ride(rideId), {
       type: 'driver-location',
       driverId: state.driverId || '',
@@ -417,16 +436,11 @@ class RideStateStoreImpl {
       timestamp: new Date().toISOString(),
     });
 
-    // NO DB WRITE for location updates during ride
-    // Driver's global location is handled by DriverStateStore
     return true;
   }
 
-  /**
-   * Verify OTP from in-memory state (no DB read needed).
-   */
-  verifyOtp(rideId: string, providedOtp: string): { valid: boolean; error?: string } {
-    const state = this.rides.get(rideId);
+  async verifyOtp(rideId: string, providedOtp: string): Promise<{ valid: boolean; error?: string }> {
+    const state = await this.getRide(rideId);
     
     if (!state) {
       return { valid: false, error: 'Ride not found' };
@@ -441,68 +455,126 @@ class RideStateStoreImpl {
     return { valid: true };
   }
 
-  // ─── Query Methods (In-Memory, No DB) ────────────────────────────────────
+  // ─── Query Methods ────────────────────────────────────────────────────────
 
-  /** Get ride state from memory */
-  getRide(rideId: string): RideState | null {
-    return this.rides.get(rideId) || null;
+  async getRide(rideId: string): Promise<RideState | null> {
+    if (this.useRedis()) {
+      const data = await getRedisClient().get(KEYS.ride(rideId));
+      return data ? deserializeState(data) : null;
+    }
+    return this.localRides.get(rideId) || null;
   }
 
-  /** Get active ride for a passenger */
-  getPassengerActiveRide(passengerId: string): RideState | null {
-    const rideId = this.passengerRides.get(passengerId);
+  async getPassengerActiveRide(passengerId: string): Promise<RideState | null> {
+    let rideId: string | null = null;
+    
+    if (this.useRedis()) {
+      rideId = await getRedisClient().get(KEYS.passengerRide(passengerId));
+    } else {
+      rideId = this.localPassengerRides.get(passengerId) || null;
+    }
+    
     if (!rideId) return null;
     
-    const state = this.rides.get(rideId);
+    const state = await this.getRide(rideId);
     if (!state) return null;
     
-    // Only return if ride is actually active
     if (['RIDE_COMPLETED', 'CANCELLED'].includes(state.status)) return null;
     return state;
   }
 
-  /** Get active ride for a driver */
-  getDriverActiveRide(driverId: string): RideState | null {
-    const rideId = this.driverRides.get(driverId);
+  async getDriverActiveRide(driverId: string): Promise<RideState | null> {
+    let rideId: string | null = null;
+    
+    if (this.useRedis()) {
+      rideId = await getRedisClient().get(KEYS.driverRide(driverId));
+    } else {
+      rideId = this.localDriverRides.get(driverId) || null;
+    }
+    
     if (!rideId) return null;
-    return this.rides.get(rideId) || null;
+    return this.getRide(rideId);
   }
 
-  /** Get all pending rides (for ride request broadcast) */
-  getPendingRides(): RideState[] {
+  async getPendingRides(): Promise<RideState[]> {
     const result: RideState[] = [];
-    for (const rideId of this.pendingRides) {
-      const state = this.rides.get(rideId);
-      if (state && state.status === 'PENDING') {
-        result.push(state);
+    let pendingIds: string[] = [];
+    
+    if (this.useRedis()) {
+      pendingIds = await getRedisClient().smembers(KEYS.pendingRides);
+      
+      if (pendingIds.length > 0) {
+        const pipeline = getRedisClient().pipeline();
+        for (const id of pendingIds) {
+          pipeline.get(KEYS.ride(id));
+        }
+        
+        const results = await pipeline.exec();
+        for (const [err, data] of results || []) {
+          if (!err && data) {
+            const state = deserializeState(data as string);
+            if (state.status === 'PENDING') {
+              result.push(state);
+            }
+          }
+        }
+      }
+    } else {
+      for (const rideId of this.localPendingRides) {
+        const state = this.localRides.get(rideId);
+        if (state && state.status === 'PENDING') {
+          result.push(state);
+        }
       }
     }
+    
     return result;
   }
 
-  /** Get all active rides */
-  getActiveRides(): RideState[] {
+  async getActiveRides(): Promise<RideState[]> {
     const active: RideState[] = [];
-    for (const state of this.rides.values()) {
-      if (!['RIDE_COMPLETED', 'CANCELLED'].includes(state.status)) {
-        active.push(state);
+    
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const keys = await client.keys('ride:*');
+      
+      if (keys.length > 0) {
+        const pipeline = client.pipeline();
+        for (const key of keys) {
+          pipeline.get(key);
+        }
+        
+        const results = await pipeline.exec();
+        for (const [err, data] of results || []) {
+          if (!err && data) {
+            const state = deserializeState(data as string);
+            if (!['RIDE_COMPLETED', 'CANCELLED'].includes(state.status)) {
+              active.push(state);
+            }
+          }
+        }
+      }
+    } else {
+      for (const state of this.localRides.values()) {
+        if (!['RIDE_COMPLETED', 'CANCELLED'].includes(state.status)) {
+          active.push(state);
+        }
       }
     }
+    
     return active;
   }
 
-  /** Check if a ride exists in memory */
-  hasRide(rideId: string): boolean {
-    return this.rides.has(rideId);
+  async hasRide(rideId: string): Promise<boolean> {
+    if (this.useRedis()) {
+      return (await getRedisClient().exists(KEYS.ride(rideId))) === 1;
+    }
+    return this.localRides.has(rideId);
   }
 
-  // ─── Hydration (Load from DB on startup) ─────────────────────────────────
+  // ─── Hydration ─────────────────────────────────────────────────────────────
 
-  /**
-   * Hydrate in-memory state from database on service startup.
-   * Only loads active rides (not completed/cancelled).
-   */
-  hydrateFromDb(rides: Array<{
+  async hydrateFromDb(rides: Array<{
     id: string;
     status: string;
     passengerId: string;
@@ -531,12 +603,11 @@ class RideStateStoreImpl {
     cancellationReason: string | null;
     driver?: any;
     passenger?: any;
-  }>): void {
+  }>): Promise<void> {
     const startTime = Date.now();
+    const { latLngToH3 } = require('@raahi/shared');
     
     for (const ride of rides) {
-      const { latLngToH3 } = require('@raahi/shared');
-      
       const state: RideState = {
         id: ride.id,
         status: ride.status as RideStatus,
@@ -588,24 +659,40 @@ class RideStateStoreImpl {
         _version: 1,
       };
 
-      this.rides.set(ride.id, state);
-      this.passengerRides.set(ride.passengerId, ride.id);
-      
-      if (ride.driverId) {
-        this.driverRides.set(ride.driverId, ride.id);
-      }
-      if (ride.status === 'PENDING') {
-        this.pendingRides.add(ride.id);
+      if (this.useRedis()) {
+        const client = getRedisClient();
+        const pipeline = client.pipeline();
+        
+        pipeline.setex(KEYS.ride(ride.id), this.RIDE_TTL_SECONDS, serializeState(state));
+        pipeline.set(KEYS.passengerRide(ride.passengerId), ride.id);
+        
+        if (ride.driverId) {
+          pipeline.set(KEYS.driverRide(ride.driverId), ride.id);
+        }
+        if (ride.status === 'PENDING') {
+          pipeline.sadd(KEYS.pendingRides, ride.id);
+        }
+        
+        await pipeline.exec();
+      } else {
+        this.localRides.set(ride.id, state);
+        this.localPassengerRides.set(ride.passengerId, ride.id);
+        
+        if (ride.driverId) {
+          this.localDriverRides.set(ride.driverId, ride.id);
+        }
+        if (ride.status === 'PENDING') {
+          this.localPendingRides.add(ride.id);
+        }
       }
     }
 
     const elapsed = Date.now() - startTime;
-    logger.info(`[FIREBALL] Hydrated ${rides.length} active rides from DB in ${elapsed}ms`);
+    logger.info(`[FIREBALL] Hydrated ${rides.length} active rides from DB in ${elapsed}ms (redis=${this.useRedis()})`);
   }
 
   // ─── Async DB Persistence ────────────────────────────────────────────────
 
-  /** Register callback for async DB writes */
   onDbSync(callback: (write: PendingDbWrite) => Promise<void>): void {
     this.dbSyncCallback = callback;
   }
@@ -627,11 +714,14 @@ class RideStateStoreImpl {
             await this.dbSyncCallback(write);
             this.metrics.totalDbWrites++;
             
-            // Mark as synced
-            const state = this.rides.get(write.rideId);
+            const state = await this.getRide(write.rideId);
             if (state) {
               state._dirty = false;
               state._lastSyncedAt = Date.now();
+              
+              if (this.useRedis()) {
+                await getRedisClient().setex(KEYS.ride(write.rideId), this.RIDE_TTL_SECONDS, serializeState(state));
+              }
             }
           }
         } catch (error) {
@@ -639,7 +729,7 @@ class RideStateStoreImpl {
           write.retries++;
           
           if (write.retries < this.MAX_WRITE_RETRIES) {
-            this.writeQueue.push(write); // Re-queue
+            this.writeQueue.push(write);
             logger.warn(`[FIREBALL] DB write retry ${write.retries}/${this.MAX_WRITE_RETRIES} for ride ${write.rideId}`, { error });
           } else {
             logger.error(`[FIREBALL] DB write FAILED after ${this.MAX_WRITE_RETRIES} retries for ride ${write.rideId}`, { error });
@@ -649,29 +739,69 @@ class RideStateStoreImpl {
     }, this.FLUSH_INTERVAL_MS);
   }
 
-  // ─── Cleanup ─────────────────────────────────────────────────────────────
-
   private startCleanupLoop(): void {
-    this.cleanupInterval = setInterval(() => {
+    this.cleanupInterval = setInterval(async () => {
       const now = Date.now();
       const toDelete: string[] = [];
 
-      for (const [rideId, state] of this.rides) {
-        const isTerminal = state.status === 'RIDE_COMPLETED' || state.status === 'CANCELLED';
-        const terminalTime = state.completedAt || state.cancelledAt || 0;
+      if (this.useRedis()) {
+        const client = getRedisClient();
+        const keys = await client.keys('ride:*');
         
-        if (isTerminal && (now - terminalTime) > this.COMPLETED_TTL_MS && !state._dirty) {
-          toDelete.push(rideId);
+        if (keys.length > 0) {
+          const pipeline = client.pipeline();
+          for (const key of keys) {
+            pipeline.get(key);
+          }
+          
+          const results = await pipeline.exec();
+          for (let i = 0; i < (results?.length || 0); i++) {
+            const [err, data] = results![i];
+            if (!err && data) {
+              const state = deserializeState(data as string);
+              const isTerminal = state.status === 'RIDE_COMPLETED' || state.status === 'CANCELLED';
+              const terminalTime = state.completedAt || state.cancelledAt || 0;
+              
+              if (isTerminal && (now - terminalTime) > this.COMPLETED_TTL_MS && !state._dirty) {
+                toDelete.push(state.id);
+              }
+            }
+          }
         }
-      }
 
-      for (const rideId of toDelete) {
-        const state = this.rides.get(rideId);
-        if (state) {
-          this.passengerRides.delete(state.passengerId);
-          if (state.driverId) this.driverRides.delete(state.driverId);
-          this.pendingRides.delete(rideId);
-          this.rides.delete(rideId);
+        if (toDelete.length > 0) {
+          const delPipeline = client.pipeline();
+          for (const rideId of toDelete) {
+            const state = await this.getRide(rideId);
+            if (state) {
+              delPipeline.del(KEYS.ride(rideId));
+              delPipeline.del(KEYS.passengerRide(state.passengerId));
+              if (state.driverId) {
+                delPipeline.del(KEYS.driverRide(state.driverId));
+              }
+              delPipeline.srem(KEYS.pendingRides, rideId);
+            }
+          }
+          await delPipeline.exec();
+        }
+      } else {
+        for (const [rideId, state] of this.localRides) {
+          const isTerminal = state.status === 'RIDE_COMPLETED' || state.status === 'CANCELLED';
+          const terminalTime = state.completedAt || state.cancelledAt || 0;
+          
+          if (isTerminal && (now - terminalTime) > this.COMPLETED_TTL_MS && !state._dirty) {
+            toDelete.push(rideId);
+          }
+        }
+
+        for (const rideId of toDelete) {
+          const state = this.localRides.get(rideId);
+          if (state) {
+            this.localPassengerRides.delete(state.passengerId);
+            if (state.driverId) this.localDriverRides.delete(state.driverId);
+            this.localPendingRides.delete(rideId);
+            this.localRides.delete(rideId);
+          }
         }
       }
 
@@ -683,19 +813,16 @@ class RideStateStoreImpl {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
-  /** Convert state to public-facing format (no internal fields) */
   toPublicState(state: RideState): Record<string, any> {
     const { _dirty, _lastSyncedAt, _version, rideOtp, ...publicFields } = state;
     return publicFields;
   }
 
-  /** Convert state to public format WITH OTP (for passenger) */
   toPublicStateWithOtp(state: RideState): Record<string, any> {
     const { _dirty, _lastSyncedAt, _version, ...publicFields } = state;
     return publicFields;
   }
 
-  /** Convert state to DB-compatible data */
   private toDbData(state: RideState): Record<string, any> {
     return {
       id: state.id,
@@ -723,24 +850,33 @@ class RideStateStoreImpl {
 
   // ─── Metrics ─────────────────────────────────────────────────────────────
 
-  getMetrics() {
+  async getMetrics() {
+    let ridesCount = 0;
+    let pendingCount = 0;
+    
+    if (this.useRedis()) {
+      const client = getRedisClient();
+      const keys = await client.keys('ride:*');
+      ridesCount = keys.length;
+      pendingCount = await client.scard(KEYS.pendingRides);
+    } else {
+      ridesCount = this.localRides.size;
+      pendingCount = this.localPendingRides.size;
+    }
+    
     return {
       ...this.metrics,
-      ridesInMemory: this.rides.size,
-      pendingRides: this.pendingRides.size,
-      activePassengers: this.passengerRides.size,
-      activeDrivers: this.driverRides.size,
+      ridesInMemory: ridesCount,
+      pendingRides: pendingCount,
+      redisEnabled: this.useRedis(),
       writeQueueSize: this.writeQueue.length,
-      dirtyRides: Array.from(this.rides.values()).filter(r => r._dirty).length,
     };
   }
 
-  /** Shutdown gracefully — flush remaining writes */
   async shutdown(): Promise<void> {
     if (this.flushInterval) clearInterval(this.flushInterval);
     if (this.cleanupInterval) clearInterval(this.cleanupInterval);
 
-    // Flush remaining writes
     if (this.writeQueue.length > 0 && this.dbSyncCallback) {
       logger.info(`[FIREBALL] Flushing ${this.writeQueue.length} pending DB writes on shutdown...`);
       for (const write of this.writeQueue) {
@@ -756,5 +892,4 @@ class RideStateStoreImpl {
   }
 }
 
-// Singleton
 export const rideStateStore = new RideStateStoreImpl();
