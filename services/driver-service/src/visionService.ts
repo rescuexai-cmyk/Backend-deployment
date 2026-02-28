@@ -246,7 +246,15 @@ const DOCUMENT_KEYWORDS: Record<string, { keywords: string[]; threshold: number 
     threshold: 2,
   },
   RC: {
-    keywords: ['registration certificate', 'registering authority', 'vehicle', 'chassis', 'engine', 'owner'],
+    keywords: [
+      'registration certificate', 'registering authority', 'vehicle', 'chassis', 'engine', 'owner',
+      // Digital RC / Parivahan / DigiLocker abbreviated labels
+      'vehicle registration', 'reg no', 'regd upto', 'regd dt', 'ch no',
+      'e sno', 'o sno', 'vhe cl', 'mfr', 'fuel', 'seating',
+      'wheel base', 'cu cap', 'model', 'color', 'colour',
+      // Common RTO terms
+      'rto', 'registering', 'registration of vehicles', 'form 23',
+    ],
     threshold: 2,
   },
   INSURANCE: {
