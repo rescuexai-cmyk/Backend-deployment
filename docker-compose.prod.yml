@@ -297,6 +297,9 @@ services:
     depends_on:
       - gateway
       - realtime-service
+      - grafana
+      - prometheus
+      - alertmanager
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
       interval: 30s
@@ -312,8 +315,6 @@ services:
     image: prom/prometheus:v2.48.0
     container_name: raahi-prometheus
     restart: always
-    ports:
-      - "9090:9090"
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
@@ -324,6 +325,7 @@ services:
       - '--storage.tsdb.retention.time=15d'
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
+      - '--web.external-url=http://localhost/prometheus/'
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
@@ -334,13 +336,12 @@ services:
     image: grafana/grafana:10.2.0
     container_name: raahi-grafana
     restart: always
-    ports:
-      - "3001:3000"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-raahi_grafana_2024}
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3001}
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
     volumes:
       - grafana_data:/var/lib/grafana
@@ -414,14 +415,13 @@ services:
     image: prom/alertmanager:v0.26.0
     container_name: raahi-alertmanager
     restart: always
-    ports:
-      - "9093:9093"
     volumes:
       - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost/alertmanager/'
 
 volumes:
   pgdata:
