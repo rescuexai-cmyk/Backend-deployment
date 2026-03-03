@@ -201,7 +201,7 @@ function formatRide(ride: any, includeOtp: boolean = false) {
     status: ride.status,
     paymentMethod: ride.paymentMethod,
     paymentStatus: ride.paymentStatus,
-    // Only include OTP for passenger (they need to share it with driver)
+    vehicleType: ride.vehicleType,
     rideOtp: includeOtp ? ride.rideOtp : undefined,
     scheduledAt: ride.scheduledAt,
     startedAt: ride.startedAt,
@@ -269,8 +269,9 @@ export async function createRide(req: CreateRideRequest) {
       surgeMultiplier: pricing.surgeMultiplier,
       totalFare: pricing.totalFare,
       paymentMethod: req.paymentMethod,
+      vehicleType: req.vehicleType || null,
       scheduledAt: req.scheduledTime,
-      rideOtp, // Store OTP in database
+      rideOtp,
     },
   });
 
@@ -330,13 +331,18 @@ export async function createRide(req: CreateRideRequest) {
     logger.info(`[RIDE] Pickup: ${req.pickupAddress} (${req.pickupLat}, ${req.pickupLng})`);
     logger.info(`[RIDE] Fare: ₹${pricing.totalFare}`);
     
+    // Map ride's vehicle type to the driver-registration vehicle type for filtering
+    const driverVehicleTypes = req.vehicleType ? getCompatibleDriverVehicleTypes(req.vehicleType) : undefined;
+    const driverVehicleType = driverVehicleTypes?.length === 1 ? driverVehicleTypes[0] : undefined;
+    
     // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
     logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
-    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, req.vehicleType);
+    logger.info(`[RIDE] Ride vehicleType: ${req.vehicleType}, mapped to driver types: ${JSON.stringify(driverVehicleTypes)}`);
+    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, driverVehicleType);
     
     if (!nearbyDrivers) {
       logger.info(`[RIDE] RAMEN unavailable, falling back to DB query...`);
-      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10);
+      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, driverVehicleType);
     } else {
       logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
     }
@@ -461,7 +467,7 @@ export async function assignDriver(rideId: string, driverId: string) {
     // First, check the current state of the ride
     const currentRide = await tx.ride.findUnique({
       where: { id: rideId },
-      select: { id: true, status: true, driverId: true, updatedAt: true },
+      select: { id: true, status: true, driverId: true, vehicleType: true, updatedAt: true },
     });
 
     if (!currentRide) {
@@ -481,7 +487,7 @@ export async function assignDriver(rideId: string, driverId: string) {
     // Check if driver exists and is available
     const driver = await tx.driver.findUnique({
       where: { id: driverId },
-      select: { id: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true },
+      select: { id: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true, vehicleType: true },
     });
 
     if (!driver) {
@@ -495,6 +501,16 @@ export async function assignDriver(rideId: string, driverId: string) {
 
     if (!driver.isOnline) {
       throw new Error('Driver is not online');
+    }
+
+    // Validate vehicle type compatibility
+    if (currentRide.vehicleType && driver.vehicleType) {
+      const compatible = getCompatibleDriverVehicleTypes(currentRide.vehicleType);
+      if (!compatible.includes(driver.vehicleType)) {
+        throw new Error(
+          `Vehicle type mismatch: ride requires ${currentRide.vehicleType} but driver has ${driver.vehicleType}`
+        );
+      }
     }
 
     // Perform the atomic update with WHERE clause to ensure no concurrent modification
@@ -978,7 +994,35 @@ export async function cancelRide(rideId: string, cancelledBy: 'passenger' | 'dri
   return formatRide(ride);
 }
 
+/**
+ * Map a ride's vehicleType to compatible driver vehicleType values.
+ * Passengers pick: bike_rescue, auto, cab_mini, cab_xl, cab_premium, personal_driver
+ * Drivers register as: motorbike, auto, commercial_car
+ */
+function getCompatibleDriverVehicleTypes(rideVehicleType: string | null): string[] {
+  switch (rideVehicleType) {
+    case 'bike_rescue':
+      return ['motorbike'];
+    case 'auto':
+      return ['auto'];
+    case 'cab_mini':
+    case 'cab_xl':
+    case 'cab_premium':
+    case 'personal_driver':
+      return ['commercial_car'];
+    default:
+      return ['motorbike', 'auto', 'commercial_car'];
+  }
+}
+
 export async function getAvailableRidesForDriver(lat: number, lng: number, radiusKm: number, _driverId: string) {
+  // Fetch driver's vehicle type to only show compatible rides
+  const driverRecord = await prisma.driver.findUnique({
+    where: { id: _driverId },
+    select: { vehicleType: true },
+  });
+  const driverVehicleType = driverRecord?.vehicleType;
+
   const pendingRides = await prisma.ride.findMany({
     where: { status: 'PENDING', driverId: null },
     include: {
@@ -987,11 +1031,21 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
     orderBy: { createdAt: 'desc' },
     take: 20,
   });
-  const filtered = pendingRides.filter((r) => calcDistance(lat, lng, r.pickupLatitude, r.pickupLongitude) <= radiusKm);
-  // Driver does NOT get OTP in this list - they must get the 4-digit code from the passenger in person when starting the ride
+
+  const filtered = pendingRides.filter((r) => {
+    if (calcDistance(lat, lng, r.pickupLatitude, r.pickupLongitude) > radiusKm) return false;
+    // If ride has a vehicleType and driver has a vehicleType, they must be compatible
+    if (r.vehicleType && driverVehicleType) {
+      const compatibleTypes = getCompatibleDriverVehicleTypes(r.vehicleType);
+      if (!compatibleTypes.includes(driverVehicleType)) return false;
+    }
+    return true;
+  });
+
   return filtered.map((ride) => ({
     id: ride.id,
-    ride_type: 'cab',
+    ride_type: ride.vehicleType || 'cab',
+    vehicleType: ride.vehicleType,
     earning: ride.totalFare * 0.8,
     pickup_distance: `${calcDistance(lat, lng, ride.pickupLatitude, ride.pickupLongitude).toFixed(1)} km`,
     pickup_time: `${Math.ceil(calcDistance(lat, lng, ride.pickupLatitude, ride.pickupLongitude) * 3)} min`,

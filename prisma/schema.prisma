@@ -244,6 +244,7 @@ model Ride {
   status            RideStatus @default(PENDING)
   paymentMethod     PaymentMethod
   paymentStatus     PaymentStatus @default(PENDING)
+  vehicleType       String?   // Requested vehicle type (bike_rescue, auto, cab_mini, cab_xl, cab_premium)
   rideOtp           String?   // 4-digit OTP for ride verification (driver must enter to start ride)
   scheduledAt       DateTime?
   startedAt         DateTime?

@@ -79,10 +79,10 @@ export async function calculateFare(body: {
   }, 'calculateFare', MAX_RETRIES, true);
 }
 
-export async function getNearbyDrivers(lat: number, lng: number, radius: number = 5) {
+export async function getNearbyDrivers(lat: number, lng: number, radius: number = 5, vehicleType?: string) {
   return withRetry(async () => {
     const { data } = await axios.get(`${PRICING_SERVICE_URL}/api/pricing/nearby-drivers`, {
-      params: { lat, lng, radius },
+      params: { lat, lng, radius, ...(vehicleType ? { vehicleType } : {}) },
       timeout: 5000,
     });
     return data.data.drivers as Array<{ id: string }>;

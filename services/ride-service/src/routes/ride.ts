@@ -295,6 +295,12 @@ router.post('/:id/accept', authenticate, asyncHandler(async (req: AuthRequest, r
       return;
     }
     
+    if (error.message?.includes('Vehicle type mismatch')) {
+      console.log(`[RIDE_ACCEPT] ❌ REJECTED: ${error.message}`);
+      res.status(403).json({ success: false, message: error.message, code: 'VEHICLE_TYPE_MISMATCH' });
+      return;
+    }
+    
     console.log(`[RIDE_ACCEPT] ========== ACCEPT FAILED ==========`);
     throw error;
   }
