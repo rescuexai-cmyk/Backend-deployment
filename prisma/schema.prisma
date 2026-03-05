@@ -247,6 +247,7 @@ model Ride {
   vehicleType       String?   // Requested vehicle type (bike_rescue, auto, cab_mini, cab_xl, cab_premium)
   rideOtp           String?   // 4-digit OTP for ride verification (driver must enter to start ride)
   scheduledAt       DateTime?
+  driverArrivedAt   DateTime? // When driver tapped "I've arrived" (for waiting time calc)
   startedAt         DateTime?
   completedAt       DateTime?
   cancelledAt       DateTime?
@@ -254,6 +255,13 @@ model Ride {
   cancellationReason String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+
+  // Post-ride fare adjustments (driver input at completion)
+  tolls             Float     @default(0)   // Toll charges (₹)
+  waitingMinutes    Int       @default(0)   // Time driver waited at pickup (mins)
+  parkingFees       Float     @default(0)   // Parking charges (₹)
+  extraStopsCount   Int       @default(0)   // Additional stops beyond origin
+  discountPercent   Float     @default(0)   // Applied promo/coupon (0–100)
   
   // Rating fields (per-ride rating)
   passengerRating   Int?      // 1-5 rating given by passenger to driver
@@ -399,7 +407,167 @@ model SurgeArea {
   @@map("surge_areas")
 }
 
+model TollPlaza {
+  id          String   @id @default(cuid())
+  name        String
+  latitude    Float
+  longitude   Float
+  amount      Float    // Toll amount in ₹
+  highway     String?  // e.g. "NH-48", "Delhi-Mumbai"
+  city        String?
+  state       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  
+  @@index([latitude, longitude])
+  @@index([isActive])
+  @@map("toll_plazas")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Per-city/region pricing
+// ─────────────────────────────────────────────────────────────
+
+model CityPricing {
+  id            String   @id @default(cuid())
+  city          String   // "delhi", "gurgaon", "noida", "faridabad"
+  vehicleType   String   // "cab_mini", "auto", "cab_xl", "bike_rescue", "cab_premium", "personal_driver"
+  startingFee   Float
+  ratePerKm     Float
+  ratePerMin    Float
+  minimumFare   Float
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@unique([city, vehicleType])
+  @@index([city])
+  @@index([isActive])
+  @@map("city_pricing")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Promotions and discounts
+// ─────────────────────────────────────────────────────────────
+
+model Promo {
+  id              String      @id @default(cuid())
+  code            String      @unique
+  type            PromoType   // PERCENT, FLAT, CASHBACK
+  value           Float       // e.g. 10 for 10% or ₹50
+  maxDiscount     Float?      // cap for percent type
+  minFare         Float?      // minimum fare to apply
+  usageLimit      Int?        // total uses allowed (null = unlimited)
+  perUserLimit    Int         @default(1)
+  validFrom       DateTime
+  validTo         DateTime?
+  vehicleTypes    String[]    // [] = all
+  cities          String[]    // [] = all
+  isFirstRideOnly Boolean     @default(false)
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  usages          PromoUsage[]
+  
+  @@index([code])
+  @@index([isActive])
+  @@index([validFrom, validTo])
+  @@map("promos")
+}
+
+model PromoUsage {
+  id        String   @id @default(cuid())
+  promoId   String
+  userId    String
+  rideId    String?
+  usedAt    DateTime @default(now())
+  
+  promo     Promo    @relation(fields: [promoId], references: [id], onDelete: Cascade)
+  
+  @@unique([promoId, userId, rideId])
+  @@index([promoId])
+  @@index([userId])
+  @@map("promo_usages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Cancellation policy
+// ─────────────────────────────────────────────────────────────
+
+model CancellationPolicy {
+  id                    String   @id @default(cuid())
+  vehicleType           String   // "cab_mini", "auto", etc.
+  city                  String?  // null = all cities
+  freeWindowMinutes     Int      @default(2)   // Free cancellation window after assignment
+  freeWaitingMinutes    Int      @default(3)   // Free waiting after driver arrived
+  waitingFeePerMin      Float    // Fee per minute after free waiting
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  
+  @@unique([vehicleType, city])
+  @@index([vehicleType])
+  @@index([isActive])
+  @@map("cancellation_policies")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Driver incentives (future)
+// ─────────────────────────────────────────────────────────────
+
+model DriverIncentive {
+  id            String        @id @default(cuid())
+  name          String        // "Complete 10 rides today"
+  type          IncentiveType // RIDES_COUNT, EARNINGS_TARGET, ONLINE_HOURS, PEAK_RIDES
+  targetValue   Float         // e.g. 10 rides, ₹2000 earnings
+  bonusAmount   Float         // ₹100 bonus
+  validFrom     DateTime
+  validTo       DateTime
+  cities        String[]      // [] = all
+  vehicleTypes  String[]      // [] = all
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  
+  progress      DriverIncentiveProgress[]
+  
+  @@index([isActive])
+  @@index([validFrom, validTo])
+  @@map("driver_incentives")
+}
+
+model DriverIncentiveProgress {
+  id           String    @id @default(cuid())
+  driverId     String
+  incentiveId  String
+  progress     Float     @default(0)
+  achieved     Boolean   @default(false)
+  achievedAt   DateTime?
+  paidOut      Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  
+  incentive    DriverIncentive @relation(fields: [incentiveId], references: [id], onDelete: Cascade)
+  
+  @@unique([driverId, incentiveId])
+  @@index([driverId])
+  @@index([incentiveId])
+  @@map("driver_incentive_progress")
+}
+
 // Enums
+enum PromoType {
+  PERCENT
+  FLAT
+  CASHBACK
+}
+
+enum IncentiveType {
+  RIDES_COUNT
+  EARNINGS_TARGET
+  ONLINE_HOURS
+  PEAK_RIDES
+}
+
 enum DocumentType {
   LICENSE
   RC

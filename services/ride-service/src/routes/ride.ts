@@ -399,6 +399,12 @@ router.put(
     body('status').isIn(['CONFIRMED', 'DRIVER_ARRIVED', 'RIDE_STARTED', 'RIDE_COMPLETED', 'CANCELLED']),
     body('cancellationReason').optional().isString(),
     body('otp').optional().isString().isLength({ min: 4, max: 4 }), // OTP required for RIDE_STARTED
+    // Fare adjustments (driver input when completing ride)
+    body('tolls').optional().isFloat({ min: 0 }),
+    body('waitingMinutes').optional().isInt({ min: 0 }),
+    body('parkingFees').optional().isFloat({ min: 0 }),
+    body('extraStopsCount').optional().isInt({ min: 0 }),
+    body('discountPercent').optional().isFloat({ min: 0, max: 100 }),
   ],
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
@@ -406,8 +412,8 @@ router.put(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    
-    const { status, cancellationReason, otp } = req.body;
+
+    const { status, cancellationReason, otp, tolls, waitingMinutes, parkingFees, extraStopsCount, discountPercent } = req.body;
     const rideId = req.params.id;
     
     // Get ride details
@@ -471,11 +477,18 @@ router.put(
       }
     }
     
+    const fareAdjustments =
+      status === 'RIDE_COMPLETED' &&
+      (tolls != null || waitingMinutes != null || parkingFees != null || extraStopsCount != null || discountPercent != null)
+        ? { tolls, waitingMinutes, parkingFees, extraStopsCount, discountPercent }
+        : undefined;
+
     const updatedRide = await rideService.updateRideStatus(
       rideId,
       status,
       req.user!.id,
-      cancellationReason
+      cancellationReason,
+      fareAdjustments
     );
     res.status(200).json({ success: true, message: 'Ride status updated successfully', data: updatedRide });
   })
@@ -507,6 +520,17 @@ router.post(
         success: false, 
         message: `Cannot cancel ride with status: ${existingRide.status}`,
         code: 'INVALID_STATUS'
+      });
+      return;
+    }
+    
+    // Passenger cannot cancel once ride has started (driver entered OTP)
+    const isPassenger = existingRide.passengerId === req.user!.id;
+    if (isPassenger && existingRide.status === 'RIDE_STARTED') {
+      res.status(400).json({ 
+        success: false, 
+        message: 'Cannot cancel ride after it has started. Please contact the driver if needed.',
+        code: 'RIDE_ALREADY_STARTED'
       });
       return;
     }

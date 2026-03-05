@@ -79,6 +79,32 @@ export async function calculateFare(body: {
   }, 'calculateFare', MAX_RETRIES, true);
 }
 
+/**
+ * Finalize fare post-ride (Algorithm 3) - tolls, waiting, airport, GST, etc.
+ * Pass pickup/drop for airport detection and toll estimation. Returns { finalFare, breakdown }.
+ */
+export async function finalizeFare(body: {
+  rideId: string;
+  dynamicFare: number;
+  pickupLat?: number;
+  pickupLng?: number;
+  dropLat?: number;
+  dropLng?: number;
+  tolls?: number;
+  waitingMinutes?: number;
+  hasAirportPickup?: boolean;
+  parkingFees?: number;
+  extraStopsCount?: number;
+  discountPercent?: number;
+}): Promise<{ finalFare: number; breakdown: Record<string, number> }> {
+  return withRetry(async () => {
+    const { data } = await axios.post(`${PRICING_SERVICE_URL}/api/pricing/finalize`, body, {
+      timeout: 5000,
+    });
+    return data.data;
+  }, 'finalizeFare', MAX_RETRIES, true);
+}
+
 export async function getNearbyDrivers(lat: number, lng: number, radius: number = 5, vehicleType?: string) {
   return withRetry(async () => {
     const { data } = await axios.get(`${PRICING_SERVICE_URL}/api/pricing/nearby-drivers`, {

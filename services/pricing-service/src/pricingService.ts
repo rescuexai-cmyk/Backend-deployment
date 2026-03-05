@@ -1,62 +1,37 @@
+/**
+ * Pricing Service - Implements cab_pricing_algorithms.md
+ * Estimate: Algorithm 1 + 2 | Finalize: Algorithm 3
+ */
+
 import { getDistance } from 'geolib';
 import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
-import { 
-  latLngToH3, 
-  getKRing, 
-  getH3Config, 
-  createMatchingLog, 
+import {
+  latLngToH3,
+  getKRing,
+  getH3Config,
+  createMatchingLog,
   logMatchingProcess,
   estimateKRingRadiusKm,
 } from '@raahi/shared';
+import {
+  calculateBaseFare,
+  calculateDynamicFare,
+  calculateFinalFare,
+  CityPricingParams,
+} from './algorithms';
+import { getRouteDistanceAndTime } from './routeService';
+import {
+  getTimeBasedFlags,
+  getDemandSupplyRatio,
+  getWeatherCondition,
+  isAirportPickup,
+  isSpecialEventActive,
+} from './dataSourcing';
+import { estimateTollsFromRoute } from './tollService';
+import { getCityFromCoordinates, getCityPricing, getMinimumFare } from './cityPricingService';
 
 const logger = createLogger('pricing-service');
-
-// ============================================================
-// Vehicle-type pricing configuration (Absolute Pricing Model)
-// No surge. No peak-hour multiplier.
-// ============================================================
-
-export type VehicleType = 'cab' | 'auto' | 'bike';
-
-interface VehicleRate {
-  baseFare: number;
-  perKmRate: number;
-  perMinuteRate: number;
-}
-
-const VEHICLE_RATES: Record<VehicleType, VehicleRate> = {
-  cab: {
-    baseFare: 30,
-    perKmRate: 15,
-    perMinuteRate: 1.5,
-  },
-  auto: {
-    baseFare: 30,
-    perKmRate: 10,
-    perMinuteRate: 1,
-  },
-  bike: {
-    baseFare: 20,
-    perKmRate: 7,
-    perMinuteRate: 1,
-  },
-};
-
-// Fixed fees applied to every ride (in ₹)
-const SERVICE_FEE = 10;
-const INSURANCE_FEE = 2;
-const PLATFORM_FEE = 10;
-
-function getVehicleRate(vehicleType?: string): { rate: VehicleRate; type: VehicleType } {
-  const normalized = (vehicleType || 'cab').toLowerCase() as VehicleType;
-  const rate = VEHICLE_RATES[normalized];
-  if (!rate) {
-    logger.warn(`[PRICING] Unknown vehicle type "${vehicleType}", defaulting to cab`);
-    return { rate: VEHICLE_RATES.cab, type: 'cab' };
-  }
-  return { rate, type: normalized };
-}
 
 // ============================================================
 // Request / Response types
@@ -71,44 +46,49 @@ export interface PricingRequest {
   scheduledTime?: Date;
 }
 
-export interface PricingResponse {
+export interface EstimateResponse {
   baseFare: number;
   distanceFare: number;
   timeFare: number;
-  serviceFee: number;
-  insuranceFee: number;
-  platformFee: number;
-  totalFare: number;
-  distance: number;
-  estimatedDuration: number;
-  vehicleType: string;
-  breakdown: {
-    baseFare: number;
-    distanceFare: number;
-    timeFare: number;
-    rideFare: number;
-    serviceFee: number;
-    insuranceFee: number;
-    platformFee: number;
-    totalFees: number;
-    total: number;
-  };
-  // Kept for backward compatibility (always 1.0 now)
   surgeMultiplier: number;
-  peakHourMultiplier: number;
+  totalFare: number;
+  minimumFare: number;
+  distance: number;
+  distanceKm: number;
+  estimatedDuration: number;
+  estimatedDurationMin: number;
+  vehicleType: string;
+  city: string;
+  breakdown: {
+    startingFee: number;
+    ratePerKm: number;
+    ratePerMin: number;
+    vehicleMultiplier: number;
+    dynamicMultiplier: number;
+  };
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
-function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  return getDistance({ latitude: lat1, longitude: lng1 }, { latitude: lat2, longitude: lng2 }) / 1000;
+export interface FinalizeRequest {
+  rideId: string;
+  dynamicFare: number;
+  vehicleType?: string;
+  city?: string;
+  pickupLat?: number;
+  pickupLng?: number;
+  dropLat?: number;
+  dropLng?: number;
+  tolls?: number;
+  waitingMinutes?: number;
+  hasAirportPickup?: boolean;
+  parkingFees?: number;
+  extraStopsCount?: number;
+  discountPercent?: number;
+  discountAmount?: number; // Flat discount from promo
 }
 
-function estimateDuration(distanceKm: number): number {
-  // Average city speed ~25 km/h
-  return Math.ceil((distanceKm / 25) * 60);
+export interface FinalizeResponse {
+  finalFare: number;
+  breakdown: Record<string, number>;
 }
 
 function round2(n: number): number {
@@ -116,136 +96,234 @@ function round2(n: number): number {
 }
 
 // ============================================================
-// Fare Calculation (Absolute Pricing – no surge)
-//
-// Formula:
-//   rideFare   = baseFare + (distance × perKmRate) + (duration × perMinuteRate)
-//   totalFare  = rideFare + serviceFee + insuranceFee + platformFee
+// Estimate: Algorithm 1 + 2
 // ============================================================
 
-export async function calculateFare(request: PricingRequest): Promise<PricingResponse> {
-  const { rate, type } = getVehicleRate(request.vehicleType);
+export async function calculateFare(request: PricingRequest): Promise<EstimateResponse> {
+  const { pickupLat, pickupLng, dropLat, dropLng, vehicleType, scheduledTime } = request;
 
-  const distance = calcDistance(
-    request.pickupLat, request.pickupLng,
-    request.dropLat, request.dropLng,
+  // Edge case: validate inputs
+  if (
+    !Number.isFinite(pickupLat) || !Number.isFinite(pickupLng) ||
+    !Number.isFinite(dropLat) || !Number.isFinite(dropLng)
+  ) {
+    throw new Error('Invalid coordinates');
+  }
+
+  const vehicle = (vehicleType || 'cab_mini').toLowerCase();
+  const date = scheduledTime ? new Date(scheduledTime) : new Date();
+
+  // Get city from pickup coordinates for per-city pricing
+  const city = await getCityFromCoordinates(pickupLat, pickupLng);
+  const cityPricing = await getCityPricing(city, vehicle);
+
+  const route = await getRouteDistanceAndTime(pickupLat, pickupLng, dropLat, dropLng, date);
+  let { distanceKm, timeMin } = route;
+
+  if (distanceKm < 0 || !Number.isFinite(distanceKm)) distanceKm = 0;
+  if (timeMin < 0 || !Number.isFinite(timeMin)) timeMin = 0;
+
+  if (distanceKm === 0 && timeMin === 0) {
+    logger.warn('[PRICING] Route not found (0 distance/time), using minimum');
+    distanceKm = 0.1;
+    timeMin = 1;
+  }
+
+  const [demandSupplyRatio, weather, isSpecialEvent] = await Promise.all([
+    getDemandSupplyRatio(pickupLat, pickupLng, 5),
+    getWeatherCondition(pickupLat, pickupLng),
+    isSpecialEventActive(),
+  ]);
+
+  const { isPeakHour, isNight, isWeekend } = getTimeBasedFlags(date);
+
+  // Pass city pricing to base fare calculation
+  const base = calculateBaseFare({ distanceKm, timeMin, vehicleType: vehicle, cityPricing });
+  const dynamic = calculateDynamicFare({
+    baseFare: base.baseFare,
+    demandSupplyRatio,
+    isPeakHour,
+    isNight,
+    isWeekend,
+    weather,
+    isSpecialEvent,
+  });
+
+  // Use per-vehicle minimum fare
+  const totalFare = Math.max(base.minimumFare, round2(dynamic.dynamicFare));
+
+  logger.info(
+    `[PRICING] ${city}/${vehicle} | ${round2(distanceKm)}km | ${timeMin}min | base=₹${base.baseFare} | surge=${dynamic.surgeMultiplier}x | total=₹${totalFare}`
   );
-  const estimatedDuration = estimateDuration(distance);
 
-  const baseFare = rate.baseFare;
-  const distanceFare = round2(distance * rate.perKmRate);
-  const timeFare = round2(estimatedDuration * rate.perMinuteRate);
-  const rideFare = round2(baseFare + distanceFare + timeFare);
-
-  const totalFees = SERVICE_FEE + INSURANCE_FEE + PLATFORM_FEE;
-  const totalFare = round2(rideFare + totalFees);
-
-  logger.info(`[PRICING] ${type.toUpperCase()} | ${round2(distance)}km | ${estimatedDuration}min | ride=₹${rideFare} + fees=₹${totalFees} = ₹${totalFare}`);
-
+  const dist = round2(distanceKm);
   return {
-    baseFare,
-    distanceFare,
-    timeFare,
-    serviceFee: SERVICE_FEE,
-    insuranceFee: INSURANCE_FEE,
-    platformFee: PLATFORM_FEE,
+    baseFare: round2(base.baseFare),
+    distanceFare: base.distanceFare,
+    timeFare: base.timeFare,
+    surgeMultiplier: dynamic.surgeMultiplier,
     totalFare,
-    distance: round2(distance),
-    estimatedDuration,
-    vehicleType: type,
-    surgeMultiplier: 1.0,
-    peakHourMultiplier: 1.0,
+    minimumFare: base.minimumFare,
+    distance: dist,
+    distanceKm: dist,
+    estimatedDuration: timeMin,
+    estimatedDurationMin: timeMin,
+    vehicleType: vehicle,
+    city,
     breakdown: {
-      baseFare,
-      distanceFare,
-      timeFare,
-      rideFare,
-      serviceFee: SERVICE_FEE,
-      insuranceFee: INSURANCE_FEE,
-      platformFee: PLATFORM_FEE,
-      totalFees,
-      total: totalFare,
+      startingFee: base.breakdown.startingFee,
+      ratePerKm: base.breakdown.ratePerKm,
+      ratePerMin: base.breakdown.ratePerMin,
+      vehicleMultiplier: base.breakdown.vehicleMultiplier,
+      dynamicMultiplier: dynamic.totalDynamicMultiplier,
     },
   };
 }
 
 // ============================================================
-// Multi-vehicle fare: return prices for all vehicle types at once
+// Calculate all vehicle types (for frontend cab picker)
 // ============================================================
 
-export async function calculateAllFares(
-  pickupLat: number, pickupLng: number,
-  dropLat: number, dropLng: number,
-): Promise<Record<VehicleType, PricingResponse>> {
-  const types: VehicleType[] = ['cab', 'auto', 'bike'];
-  const results = {} as Record<VehicleType, PricingResponse>;
+const ALL_VEHICLE_TYPES = [
+  'bike_rescue',
+  'auto',
+  'cab_mini',
+  'cab_xl',
+  'cab_premium',
+  'personal_driver',
+];
 
-  for (const vt of types) {
+export async function calculateAllFares(
+  pickupLat: number,
+  pickupLng: number,
+  dropLat: number,
+  dropLng: number,
+  scheduledTime?: Date
+): Promise<Record<string, EstimateResponse>> {
+  const results: Record<string, EstimateResponse> = {};
+  for (const vt of ALL_VEHICLE_TYPES) {
     results[vt] = await calculateFare({
-      pickupLat, pickupLng, dropLat, dropLng,
+      pickupLat,
+      pickupLng,
+      dropLat,
+      dropLng,
       vehicleType: vt,
+      scheduledTime,
     });
   }
-
   return results;
 }
 
 // ============================================================
-// Get current pricing rules (for admin / display purposes)
+// Finalize: Algorithm 3 (post-ride)
 // ============================================================
 
-export function getPricingRules() {
+export async function finalizeFare(request: FinalizeRequest): Promise<FinalizeResponse> {
+  let hasAirportPickup = request.hasAirportPickup ?? false;
+  if (
+    hasAirportPickup === false &&
+    Number.isFinite(request.pickupLat) &&
+    Number.isFinite(request.pickupLng)
+  ) {
+    hasAirportPickup = isAirportPickup(request.pickupLat!, request.pickupLng!);
+  }
+
+  // Use driver input for tolls, or estimate from route (pickup→drop) if not provided
+  let tolls = request.tolls ?? 0;
+  if (
+    tolls === 0 &&
+    Number.isFinite(request.pickupLat) &&
+    Number.isFinite(request.pickupLng) &&
+    Number.isFinite(request.dropLat) &&
+    Number.isFinite(request.dropLng)
+  ) {
+    const est = await estimateTollsFromRoute(
+      request.pickupLat!,
+      request.pickupLng!,
+      request.dropLat!,
+      request.dropLng!
+    );
+    tolls = est.amount;
+    if (tolls > 0) {
+      logger.info(`[PRICING] Estimated tolls ₹${tolls} from ${est.plazas.length} plazas`);
+    }
+  }
+
+  // Get per-vehicle minimum fare for the city
+  let minimumFare = 35;
+  if (request.city && request.vehicleType) {
+    minimumFare = await getMinimumFare(request.city, request.vehicleType);
+  } else if (Number.isFinite(request.pickupLat) && Number.isFinite(request.pickupLng) && request.vehicleType) {
+    const city = await getCityFromCoordinates(request.pickupLat!, request.pickupLng!);
+    minimumFare = await getMinimumFare(city, request.vehicleType);
+  }
+
+  const result = calculateFinalFare({
+    dynamicFare: request.dynamicFare,
+    tolls,
+    waitingMinutes: request.waitingMinutes ?? 0,
+    hasAirportPickup,
+    parkingFees: request.parkingFees ?? 0,
+    extraStopsCount: request.extraStopsCount ?? 0,
+    discountPercent: request.discountPercent ?? 0,
+    discountAmount: request.discountAmount ?? 0,
+    minimumFare,
+  });
+
+  logger.info(`[PRICING] Finalize ride ${request.rideId}: dynamic=₹${request.dynamicFare} → final=₹${result.finalFare}`);
+
   return {
-    vehicleRates: VEHICLE_RATES,
-    fees: {
-      serviceFee: SERVICE_FEE,
-      insuranceFee: INSURANCE_FEE,
-      platformFee: PLATFORM_FEE,
-      totalFees: SERVICE_FEE + INSURANCE_FEE + PLATFORM_FEE,
-    },
-    surgeEnabled: false,
-    peakHourEnabled: false,
+    finalFare: result.finalFare,
+    breakdown: result.breakdown as Record<string, number>,
   };
 }
 
 // ============================================================
-// H3-based nearby driver search (unchanged)
+// Get pricing rules (for admin/display)
 // ============================================================
 
+export function getPricingRules() {
+  return {
+    algorithmVersion: 'cab_pricing_v1',
+    vehicleTypes: ['bike_rescue', 'auto', 'cab_mini', 'cab_xl', 'cab_premium', 'personal_driver'],
+    surgeEnabled: true,
+    peakHourEnabled: true,
+    weatherEnabled: true,
+  };
+}
+
+// ============================================================
+// H3-based nearby driver search
+// ============================================================
+
+function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  return getDistance(
+    { latitude: lat1, longitude: lng1 },
+    { latitude: lat2, longitude: lng2 }
+  ) / 1000;
+}
+
 export async function getNearbyDrivers(
-  lat: number, 
-  lng: number, 
+  lat: number,
+  lng: number,
   radiusKm: number = 5,
   vehicleType?: string
 ) {
   const startTime = Date.now();
   const h3Config = getH3Config();
-  
   const isDev = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
-  
   const pickupH3 = latLngToH3(lat, lng);
-  
-  logger.info(`[H3-NEARBY] ========== H3 DRIVER SEARCH ==========`);
-  logger.info(`[H3-NEARBY] Location: (${lat}, ${lng})`);
-  logger.info(`[H3-NEARBY] H3 Index: ${pickupH3}`);
-  logger.info(`[H3-NEARBY] Resolution: ${h3Config.resolution}`);
-  logger.info(`[H3-NEARBY] Max kRing: ${h3Config.maxKRing}`);
-  logger.info(`[H3-NEARBY] Mode: ${isDev ? 'DEVELOPMENT' : 'PRODUCTION'}`);
-  if (vehicleType) {
-    logger.info(`[H3-NEARBY] Vehicle Type Filter: ${vehicleType}`);
-  }
-  
+
+  logger.info(`[H3-NEARBY] Location: (${lat}, ${lng}) H3: ${pickupH3}`);
+
   const iterations: Array<{ k: number; cellCount: number; driversFound: number }> = [];
   let finalDrivers: any[] = [];
-  
   const heartbeatThreshold = new Date(Date.now() - 5 * 60 * 1000);
-  
+
   for (let k = 1; k <= h3Config.maxKRing; k++) {
     const searchCells = getKRing(pickupH3, k);
     const approxRadiusKm = estimateKRingRadiusKm(k);
-    
-    logger.info(`[H3-NEARBY] Searching k=${k}: ${searchCells.length} cells, ~${approxRadiusKm.toFixed(2)}km radius`);
-    
+
     const whereClause: any = {
       h3Index: { in: searchCells },
       isOnline: true,
@@ -254,83 +332,52 @@ export async function getNearbyDrivers(
       currentLatitude: { not: null },
       currentLongitude: { not: null },
     };
-    
-    if (!isDev) {
-      whereClause.isVerified = true;
-    }
-    
-    if (vehicleType) {
-      whereClause.vehicleType = vehicleType;
-    }
-    
+
+    if (!isDev) whereClause.isVerified = true;
+    if (vehicleType) whereClause.vehicleType = vehicleType;
+
     const drivers = await prisma.driver.findMany({
       where: whereClause,
-      include: { 
-        user: { 
-          select: { id: true, firstName: true, lastName: true, profileImage: true, phone: true } 
-        } 
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, profileImage: true, phone: true } },
       },
     });
-    
+
     const driversWithDistance = drivers
-      .map(d => ({
+      .map((d) => ({
         ...d,
         distance: calcDistance(lat, lng, d.currentLatitude!, d.currentLongitude!),
         h3Index: d.h3Index,
       }))
-      .filter(d => d.distance <= radiusKm)
+      .filter((d) => d.distance <= radiusKm)
       .sort((a, b) => a.distance - b.distance);
-    
-    iterations.push({
-      k,
-      cellCount: searchCells.length,
-      driversFound: driversWithDistance.length,
-    });
-    
-    logger.info(`[H3-NEARBY]   → Found ${driversWithDistance.length} drivers within ${radiusKm}km`);
-    
+
+    iterations.push({ k, cellCount: searchCells.length, driversFound: driversWithDistance.length });
+
     if (driversWithDistance.length > 0) {
       finalDrivers = driversWithDistance;
-      
-      driversWithDistance.forEach(driver => {
-        const name = `${driver.user.firstName} ${driver.user.lastName || ''}`.trim();
-        logger.info(`[H3-NEARBY]   ✅ Driver ${driver.id} (${name}): ${driver.distance.toFixed(2)}km, h3=${driver.h3Index}`);
-      });
-      
       break;
     }
-    
-    if (k === h3Config.maxKRing && driversWithDistance.length === 0) {
-      logger.warn(`[H3-NEARBY] ⚠️ No drivers found after max expansion (k=${h3Config.maxKRing})`);
-      
-      const [totalOnline, totalWithH3, totalInArea] = await Promise.all([
-        prisma.driver.count({ where: { isOnline: true, isActive: true } }),
-        prisma.driver.count({ where: { isOnline: true, isActive: true, h3Index: { not: null } } }),
-        prisma.driver.count({ where: { h3Index: { in: searchCells } } }),
-      ]);
-      
-      logger.warn(`[H3-NEARBY] Diagnostics:`);
-      logger.warn(`[H3-NEARBY]   - Online & Active drivers: ${totalOnline}`);
-      logger.warn(`[H3-NEARBY]   - With H3 index: ${totalWithH3}`);
-      logger.warn(`[H3-NEARBY]   - In search area (any status): ${totalInArea}`);
-      logger.warn(`[H3-NEARBY]   - Heartbeat threshold: ${heartbeatThreshold.toISOString()}`);
-    }
   }
-  
+
   const matchingTimeMs = Date.now() - startTime;
-  
   const matchingLog = createMatchingLog(lat, lng, pickupH3, iterations, matchingTimeMs);
   logMatchingProcess(matchingLog);
-  
-  logger.info(`[H3-NEARBY] ========== SEARCH COMPLETE ==========`);
-  logger.info(`[H3-NEARBY] Total time: ${matchingTimeMs}ms`);
-  logger.info(`[H3-NEARBY] Final k: ${matchingLog.finalK}`);
-  logger.info(`[H3-NEARBY] Drivers found: ${finalDrivers.length}`);
-  
-  if (finalDrivers.length === 0 && iterations.some(i => i.driversFound > 0)) {
-    logger.error(`[H3-NEARBY] 🚨 MATCHING BUG: Found drivers in iterations but final result is empty!`);
-    throw new Error('H3 matching logic error: drivers found but not returned');
-  }
-  
+
+  logger.info(`[H3-NEARBY] Found ${finalDrivers.length} drivers in ${matchingTimeMs}ms`);
+
   return finalDrivers;
+}
+
+// Re-export for ride-service compatibility (response shape)
+export interface PricingResponse {
+  baseFare: number;
+  distanceFare: number;
+  timeFare: number;
+  totalFare: number;
+  distance: number;
+  estimatedDuration: number;
+  vehicleType: string;
+  surgeMultiplier: number;
+  breakdown?: any;
 }

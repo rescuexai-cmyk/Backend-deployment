@@ -3,6 +3,7 @@ import { prisma } from '@raahi/shared';
 import { createLogger, canDriverStartRides } from '@raahi/shared';
 import {
   calculateFare as httpCalculateFare,
+  finalizeFare as httpFinalizeFare,
   getNearbyDrivers as httpGetNearbyDrivers,
   broadcastRideRequest as httpBroadcastRideRequest,
   broadcastRideStatusUpdate,
@@ -16,6 +17,7 @@ import {
   verifyOtpViaFireball,
   updateRideLocationViaFireball,
 } from './httpClients';
+import { calculateCancellationFee, CancellationContext } from './cancellationService';
 
 const logger = createLogger('ride-service');
 
@@ -609,52 +611,138 @@ const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
   'CANCELLED': [], // Terminal state
 };
 
+export interface FareAdjustments {
+  tolls?: number;
+  waitingMinutes?: number;
+  parkingFees?: number;
+  extraStopsCount?: number;
+  discountPercent?: number;
+}
+
 export async function updateRideStatus(
   rideId: string,
   status: 'CONFIRMED' | 'DRIVER_ARRIVED' | 'RIDE_STARTED' | 'RIDE_COMPLETED' | 'CANCELLED',
   _userId: string,
-  cancellationReason?: string
+  cancellationReason?: string,
+  fareAdjustments?: FareAdjustments
 ) {
   // First, get current ride status for validation
   const currentRide = await prisma.ride.findUnique({
     where: { id: rideId },
     select: { status: true, driverId: true },
   });
-  
+
   if (!currentRide) {
     throw new Error('Ride not found');
   }
-  
+
   // Validate status transition
   const allowedTransitions = VALID_STATUS_TRANSITIONS[currentRide.status] || [];
   if (!allowedTransitions.includes(status)) {
     throw new Error(`Invalid status transition: ${currentRide.status} -> ${status}`);
   }
-  
+
   // Validate that ride has a driver for driver-dependent statuses
   const driverRequiredStatuses = ['CONFIRMED', 'DRIVER_ARRIVED', 'RIDE_STARTED', 'RIDE_COMPLETED'];
   if (driverRequiredStatuses.includes(status) && !currentRide.driverId) {
     throw new Error(`Cannot set status to ${status} without an assigned driver`);
   }
-  
+
   const updateData: any = { status };
+  if (status === 'DRIVER_ARRIVED') updateData.driverArrivedAt = new Date();
   if (status === 'RIDE_STARTED') updateData.startedAt = new Date();
   if (status === 'RIDE_COMPLETED') {
     updateData.completedAt = new Date();
     updateData.paymentStatus = 'PAID'; // Mark as paid when completed
+
+    // Store driver input for fare adjustments
+    if (fareAdjustments) {
+      if (fareAdjustments.tolls != null) updateData.tolls = Math.max(0, fareAdjustments.tolls);
+      if (fareAdjustments.waitingMinutes != null) updateData.waitingMinutes = Math.max(0, fareAdjustments.waitingMinutes);
+      if (fareAdjustments.parkingFees != null) updateData.parkingFees = Math.max(0, fareAdjustments.parkingFees);
+      if (fareAdjustments.extraStopsCount != null) updateData.extraStopsCount = Math.max(0, fareAdjustments.extraStopsCount);
+      if (fareAdjustments.discountPercent != null) updateData.discountPercent = Math.min(100, Math.max(0, fareAdjustments.discountPercent));
+    }
+
+    // Finalize fare (Algorithm 3): tolls, waiting, airport, GST, etc.
+    try {
+      const rideForFinalize = await prisma.ride.findUnique({
+        where: { id: rideId },
+        select: {
+          totalFare: true,
+          pickupLatitude: true,
+          pickupLongitude: true,
+          dropLatitude: true,
+          dropLongitude: true,
+          driverArrivedAt: true,
+          startedAt: true,
+        },
+      });
+      if (rideForFinalize) {
+        let waitingMinutes = fareAdjustments?.waitingMinutes ?? 0;
+        if (waitingMinutes === 0 && rideForFinalize.driverArrivedAt && rideForFinalize.startedAt) {
+          waitingMinutes = Math.max(0, Math.round(
+            (rideForFinalize.startedAt.getTime() - rideForFinalize.driverArrivedAt.getTime()) / 60000
+          ));
+          updateData.waitingMinutes = waitingMinutes;
+        } else if (fareAdjustments?.waitingMinutes != null) {
+          waitingMinutes = fareAdjustments.waitingMinutes;
+        }
+
+        const finalResult = await httpFinalizeFare({
+          rideId,
+          dynamicFare: rideForFinalize.totalFare,
+          pickupLat: rideForFinalize.pickupLatitude,
+          pickupLng: rideForFinalize.pickupLongitude,
+          dropLat: rideForFinalize.dropLatitude,
+          dropLng: rideForFinalize.dropLongitude,
+          tolls: fareAdjustments?.tolls,
+          waitingMinutes: waitingMinutes > 0 ? waitingMinutes : undefined,
+          parkingFees: fareAdjustments?.parkingFees,
+          extraStopsCount: fareAdjustments?.extraStopsCount,
+          discountPercent: fareAdjustments?.discountPercent,
+        });
+        updateData.totalFare = finalResult.finalFare;
+        logger.info(`[RIDE] Finalized fare: dynamic ₹${rideForFinalize.totalFare} → final ₹${finalResult.finalFare}`);
+      }
+    } catch (finalizeErr) {
+      logger.warn(`[RIDE] Finalize fare failed, using estimate totalFare`, { error: (finalizeErr as Error).message });
+      // Continue with existing totalFare
+    }
   }
   if (status === 'CANCELLED') {
-    updateData.cancelledAt = new Date();
+    const cancelledAt = new Date();
+    updateData.cancelledAt = cancelledAt;
     updateData.cancellationReason = cancellationReason;
+    
+    // Calculate cancellation fee
+    const cancellationContext: CancellationContext = {
+      vehicleType: currentRide.vehicleType || 'cab_mini',
+      driverAssignedAt: currentRide.driverAssignedAt,
+      driverArrivedAt: currentRide.driverArrivedAt,
+      cancelledAt,
+      driverId: currentRide.driverId,
+    };
+    
+    const cancellationResult = calculateCancellationFee(cancellationContext);
+    
+    if (cancellationResult.fee > 0) {
+      // Store cancellation fee in totalFare field for payment processing
+      updateData.totalFare = cancellationResult.fee;
+      logger.info(`[CANCEL] Ride ${rideId}: Fee ₹${cancellationResult.fee} - ${cancellationResult.reason}`);
+    } else {
+      logger.info(`[CANCEL] Ride ${rideId}: No fee - ${cancellationResult.reason}`);
+    }
   }
-  
+
   // CRITICAL FIX: For RIDE_COMPLETED, wrap status update AND earnings creation in a single transaction
   // This ensures data consistency - ride is only marked completed if earnings are also created
   let ride: any;
   
   if (status === 'RIDE_COMPLETED' && currentRide.driverId) {
-    // Get platform fee rate from config BEFORE transaction (default 20%)
-    let commissionRate = 0.20;
+    // Get platform fee rate from config BEFORE transaction (default 2%)
+    // Changed from 20% to 2% to be competitive with market
+    let commissionRate = 0.02;
     try {
       const platformFeeConfig = await prisma.platformConfig.findUnique({
         where: { key: 'platform_fee_rate' },
@@ -663,7 +751,7 @@ export async function updateRideStatus(
         commissionRate = parseFloat(platformFeeConfig.value);
       }
     } catch (configError) {
-      logger.warn(`[EARNINGS] Failed to fetch platform_fee_rate config, using default 20%`, { error: configError });
+      logger.warn(`[EARNINGS] Failed to fetch platform_fee_rate config, using default 2%`, { error: configError });
     }
     
     // Check if earnings already exist to prevent duplicates
