@@ -146,6 +146,9 @@ model Driver {
   earnings          DriverEarning[]
   penalties         DriverPenalty[]
   supportTickets    SupportTicket[]
+  payoutAccounts    DriverPayoutAccount[]
+  payouts           DriverPayout[]
+  wallet            DriverWallet?
   
   @@index([isOnline, isActive])
   @@index([currentLatitude, currentLongitude])
@@ -652,4 +655,164 @@ model PlatformConfig {
   updatedAt          DateTime @updatedAt
   
   @@map("platform_config")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRIVER PAYOUT SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Driver Bank Account / UPI for receiving payouts
+model DriverPayoutAccount {
+  id              String            @id @default(cuid())
+  driverId        String
+  accountType     PayoutAccountType
+  
+  // Bank Account Details
+  bankName        String?
+  accountNumber   String?           // Last 4 digits stored, full number encrypted separately
+  accountNumberEncrypted String?    // Full account number (encrypted)
+  ifscCode        String?
+  accountHolderName String?
+  
+  // UPI Details
+  upiId           String?           // e.g., driver@upi, driver@paytm
+  
+  // Razorpay Integration
+  razorpayContactId    String?      // Razorpay Contact ID
+  razorpayFundAccountId String?     // Razorpay Fund Account ID
+  
+  // Verification
+  isVerified      Boolean           @default(false)
+  verifiedAt      DateTime?
+  verificationMethod String?        // penny_drop, upi_verify, manual
+  isPrimary       Boolean           @default(false)
+  
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  driver          Driver            @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  payouts         DriverPayout[]
+  
+  @@index([driverId])
+  @@index([isPrimary])
+  @@map("driver_payout_accounts")
+}
+
+// Driver Wallet for tracking available balance
+model DriverWallet {
+  id              String    @id @default(cuid())
+  driverId        String    @unique
+  
+  // Balance tracking
+  availableBalance Float    @default(0)   // Ready for withdrawal
+  pendingBalance   Float    @default(0)   // Earnings being processed/settled
+  holdBalance      Float    @default(0)   // Held for penalties or disputes
+  totalWithdrawn   Float    @default(0)   // Lifetime withdrawals
+  totalEarned      Float    @default(0)   // Lifetime earnings (for reference)
+  
+  // Settlement tracking
+  lastSettlementAt DateTime?
+  lastPayoutAt     DateTime?
+  
+  // Minimum withdrawal threshold
+  minimumWithdrawal Float   @default(100) // ₹100 minimum
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  driver          Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  
+  @@map("driver_wallets")
+}
+
+// Payout/Withdrawal Requests
+model DriverPayout {
+  id              String        @id @default(cuid())
+  driverId        String
+  payoutAccountId String?
+  
+  // Amount details
+  amount          Float         // Requested amount
+  fee             Float         @default(0)  // Processing fee (if any)
+  netAmount       Float         // amount - fee (actual transfer)
+  
+  // Status tracking
+  status          PayoutStatus  @default(PENDING)
+  payoutMethod    PayoutAccountType
+  
+  // Payment gateway details
+  razorpayPayoutId String?      // Razorpay Payout ID
+  transactionId    String?      // UTR/Transaction reference
+  failureReason    String?
+  failureCode      String?
+  
+  // Timing
+  requestedAt     DateTime      @default(now())
+  processedAt     DateTime?     // When processing started
+  completedAt     DateTime?     // When money was transferred
+  
+  // Metadata
+  remarks         String?       // Admin notes
+  isAutoSettlement Boolean      @default(false) // True if triggered by auto-settlement
+  
+  driver          Driver        @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  payoutAccount   DriverPayoutAccount? @relation(fields: [payoutAccountId], references: [id], onDelete: SetNull)
+  
+  @@index([driverId])
+  @@index([status])
+  @@index([requestedAt])
+  @@index([isAutoSettlement])
+  @@map("driver_payouts")
+}
+
+// Wallet Transaction Log (for audit trail)
+model WalletTransaction {
+  id              String              @id @default(cuid())
+  driverId        String
+  
+  // Transaction details
+  type            WalletTransactionType
+  amount          Float               // Positive for credit, negative for debit
+  balanceBefore   Float
+  balanceAfter    Float
+  
+  // Reference
+  referenceType   String?             // ride, payout, penalty, adjustment, settlement
+  referenceId     String?             // ID of the related record
+  
+  description     String?
+  createdAt       DateTime            @default(now())
+  
+  @@index([driverId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([referenceType, referenceId])
+  @@map("wallet_transactions")
+}
+
+// Enums for Payout System
+enum PayoutAccountType {
+  BANK_ACCOUNT
+  UPI
+}
+
+enum PayoutStatus {
+  PENDING       // Withdrawal requested
+  PROCESSING    // Being processed by payment gateway
+  COMPLETED     // Successfully transferred
+  FAILED        // Transfer failed
+  CANCELLED     // Cancelled by driver or admin
+  REVERSED      // Money returned due to issue
+}
+
+enum WalletTransactionType {
+  RIDE_EARNING      // Credit from completed ride
+  WITHDRAWAL        // Debit for payout
+  PENALTY           // Debit for penalty
+  PENALTY_REVERSAL  // Credit for reversed penalty
+  ADJUSTMENT        // Manual adjustment by admin
+  SETTLEMENT        // Auto-settlement credit
+  HOLD              // Amount put on hold
+  RELEASE           // Amount released from hold
+  REFUND            // Refund credited
 }

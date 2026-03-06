@@ -14,6 +14,7 @@ import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfi
 import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
 import { startVerificationWorker, stopVerificationWorker } from './documentVerificationWorker';
 import { isVisionConfigured } from './visionService';
+import * as PayoutService from './payoutService';
 
 // Helper function to get platform config with error handling
 async function getPlatformConfig(key: string, defaultValue: string): Promise<string> {
@@ -501,6 +502,292 @@ app.get(
           hasNext: page < Math.ceil(total / limit),
           hasPrev: page > 1,
         },
+      },
+    });
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAYOUT ACCOUNT MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/driver/payout-accounts - Get all payout accounts
+app.get('/api/driver/payout-accounts', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  const accounts = await PayoutService.getPayoutAccounts(driver.id);
+  res.json({ success: true, data: { accounts } });
+}));
+
+// POST /api/driver/payout-accounts - Add a new payout account
+app.post(
+  '/api/driver/payout-accounts',
+  authenticateDriver,
+  [
+    body('accountType').isIn(['BANK_ACCOUNT', 'UPI']).withMessage('accountType must be BANK_ACCOUNT or UPI'),
+    body('bankName').optional().isString(),
+    body('accountNumber').optional().isString().isLength({ min: 9, max: 18 }),
+    body('ifscCode').optional().matches(/^[A-Z]{4}0[A-Z0-9]{6}$/).withMessage('Invalid IFSC code'),
+    body('accountHolderName').optional().isString().isLength({ min: 2, max: 100 }),
+    body('upiId').optional().matches(/^[\w.-]+@[\w]+$/).withMessage('Invalid UPI ID format'),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    try {
+      const account = await PayoutService.createPayoutAccount({
+        driverId: driver.id,
+        accountType: req.body.accountType,
+        bankName: req.body.bankName,
+        accountNumber: req.body.accountNumber,
+        ifscCode: req.body.ifscCode,
+        accountHolderName: req.body.accountHolderName,
+        upiId: req.body.upiId,
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Payout account added successfully',
+        data: {
+          id: account.id,
+          accountType: account.accountType,
+          bankName: account.bankName,
+          accountNumber: account.accountNumber,
+          ifscCode: account.ifscCode,
+          accountHolderName: account.accountHolderName,
+          upiId: account.upiId,
+          isPrimary: account.isPrimary,
+          isVerified: account.isVerified,
+        },
+      });
+    } catch (error: any) {
+      res.status(400).json({ success: false, message: error.message });
+    }
+  })
+);
+
+// PUT /api/driver/payout-accounts/:id/primary - Set account as primary
+app.put('/api/driver/payout-accounts/:id/primary', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  try {
+    await PayoutService.setPrimaryAccount(driver.id, req.params.id);
+    res.json({ success: true, message: 'Primary account updated' });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+}));
+
+// DELETE /api/driver/payout-accounts/:id - Delete a payout account
+app.delete('/api/driver/payout-accounts/:id', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  try {
+    await PayoutService.deletePayoutAccount(driver.id, req.params.id);
+    res.json({ success: true, message: 'Payout account deleted' });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WALLET & WITHDRAWALS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/driver/wallet - Get wallet balance and details
+app.get('/api/driver/wallet', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  const wallet = await PayoutService.getDriverWallet(driver.id);
+  
+  // Get primary payout account
+  const primaryAccount = await prisma.driverPayoutAccount.findFirst({
+    where: { driverId: driver.id, isPrimary: true },
+    select: {
+      id: true,
+      accountType: true,
+      bankName: true,
+      accountNumber: true,
+      upiId: true,
+      isVerified: true,
+    },
+  });
+
+  res.json({
+    success: true,
+    data: {
+      balance: {
+        available: wallet.availableBalance,
+        pending: wallet.pendingBalance,
+        hold: wallet.holdBalance,
+        effective: wallet.effectiveBalance,
+      },
+      stats: {
+        totalEarned: wallet.totalEarned,
+        totalWithdrawn: wallet.totalWithdrawn,
+        unpaidPenalties: wallet.unpaidPenalties,
+        pendingWithdrawals: wallet.pendingWithdrawals,
+      },
+      minimumWithdrawal: wallet.minimumWithdrawal,
+      lastPayoutAt: wallet.lastPayoutAt,
+      primaryAccount,
+    },
+  });
+}));
+
+// POST /api/driver/wallet/withdraw - Request a withdrawal
+app.post(
+  '/api/driver/wallet/withdraw',
+  authenticateDriver,
+  [
+    body('amount').isFloat({ min: 1 }).withMessage('Amount must be at least ₹1'),
+    body('payoutAccountId').optional().isString(),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    try {
+      const payout = await PayoutService.requestWithdrawal({
+        driverId: driver.id,
+        amount: req.body.amount,
+        payoutAccountId: req.body.payoutAccountId,
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Withdrawal request submitted',
+        data: {
+          payoutId: payout.id,
+          amount: payout.amount,
+          fee: payout.fee,
+          netAmount: payout.netAmount,
+          status: payout.status,
+          payoutMethod: payout.payoutMethod,
+          estimatedTime: payout.payoutMethod === 'UPI' ? 'Instant' : '1-2 business days',
+        },
+      });
+    } catch (error: any) {
+      res.status(400).json({ success: false, message: error.message });
+    }
+  })
+);
+
+// GET /api/driver/wallet/transactions - Get wallet transaction history
+app.get(
+  '/api/driver/wallet/transactions',
+  authenticateDriver,
+  [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    const result = await PayoutService.getWalletTransactions(driver.id, page, limit);
+
+    res.json({
+      success: true,
+      data: {
+        transactions: result.transactions.map(t => ({
+          id: t.id,
+          type: t.type,
+          amount: t.amount,
+          description: t.description,
+          referenceType: t.referenceType,
+          referenceId: t.referenceId,
+          createdAt: t.createdAt,
+        })),
+        pagination: result.pagination,
+      },
+    });
+  })
+);
+
+// GET /api/driver/wallet/payouts - Get payout history
+app.get(
+  '/api/driver/wallet/payouts',
+  authenticateDriver,
+  [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    const result = await PayoutService.getPayoutHistory(driver.id, page, limit);
+
+    res.json({
+      success: true,
+      data: {
+        payouts: result.payouts.map(p => ({
+          id: p.id,
+          amount: p.amount,
+          fee: p.fee,
+          netAmount: p.netAmount,
+          status: p.status,
+          payoutMethod: p.payoutMethod,
+          transactionId: p.transactionId,
+          failureReason: p.failureReason,
+          requestedAt: p.requestedAt,
+          completedAt: p.completedAt,
+          account: p.payoutAccount ? {
+            type: p.payoutAccount.accountType,
+            bankName: p.payoutAccount.bankName,
+            accountNumber: p.payoutAccount.accountNumber,
+            upiId: p.payoutAccount.upiId,
+          } : null,
+        })),
+        pagination: result.pagination,
       },
     });
   })
