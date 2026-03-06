@@ -629,7 +629,13 @@ export async function updateRideStatus(
   // First, get current ride status for validation
   const currentRide = await prisma.ride.findUnique({
     where: { id: rideId },
-    select: { status: true, driverId: true },
+    select: { 
+      status: true, 
+      driverId: true,
+      vehicleType: true,
+      driverAssignedAt: true,
+      driverArrivedAt: true,
+    },
   });
 
   if (!currentRide) {

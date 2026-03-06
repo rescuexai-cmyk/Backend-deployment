@@ -274,7 +274,7 @@ export async function finalizeFare(request: FinalizeRequest): Promise<FinalizeRe
 
   return {
     finalFare: result.finalFare,
-    breakdown: result.breakdown as Record<string, number>,
+    breakdown: result.breakdown as unknown as Record<string, number>,
   };
 }
 

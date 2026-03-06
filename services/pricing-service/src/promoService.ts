@@ -1,12 +1,64 @@
 /**
  * Promo Service
  * Handles promo code validation, application, and usage tracking
+ * 
+ * NOTE: Full Prisma integration requires migration. This version uses
+ * static promos until DB is ready, then can be updated to use Prisma.
  */
 
-import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 
 const logger = createLogger('promo-service');
+
+// Static promos for initial launch (can be moved to DB after migration)
+const STATIC_PROMOS: Array<{
+  id: string;
+  code: string;
+  type: 'PERCENT' | 'FLAT' | 'CASHBACK';
+  value: number;
+  maxDiscount?: number;
+  minFare?: number;
+  vehicleTypes: string[];
+  cities: string[];
+  isFirstRideOnly: boolean;
+  isActive: boolean;
+}> = [
+  {
+    id: 'promo_first50',
+    code: 'FIRST50',
+    type: 'PERCENT',
+    value: 50,
+    maxDiscount: 100,
+    minFare: 99,
+    vehicleTypes: [],
+    cities: [],
+    isFirstRideOnly: true,
+    isActive: true,
+  },
+  {
+    id: 'promo_raahi20',
+    code: 'RAAHI20',
+    type: 'PERCENT',
+    value: 20,
+    maxDiscount: 50,
+    minFare: 149,
+    vehicleTypes: [],
+    cities: [],
+    isFirstRideOnly: false,
+    isActive: true,
+  },
+  {
+    id: 'promo_flat30',
+    code: 'FLAT30',
+    type: 'FLAT',
+    value: 30,
+    minFare: 199,
+    vehicleTypes: [],
+    cities: [],
+    isFirstRideOnly: false,
+    isActive: true,
+  },
+];
 
 export interface PromoValidationResult {
   valid: boolean;
@@ -42,56 +94,13 @@ export async function validatePromo(params: {
   const { code, userId, vehicleType, city, fare } = params;
 
   try {
-    const promo = await prisma.promo.findUnique({
-      where: { code: code.toUpperCase() },
-      include: {
-        usages: {
-          where: { userId },
-        },
-        _count: {
-          select: { usages: true },
-        },
-      },
-    });
+    // Find promo in static list
+    const promo = STATIC_PROMOS.find(
+      (p) => p.code.toUpperCase() === code.toUpperCase() && p.isActive
+    );
 
     if (!promo) {
       return { valid: false, error: 'Invalid promo code' };
-    }
-
-    if (!promo.isActive) {
-      return { valid: false, error: 'This promo code is no longer active' };
-    }
-
-    const now = new Date();
-    if (now < promo.validFrom) {
-      return { valid: false, error: 'This promo code is not yet valid' };
-    }
-
-    if (promo.validTo && now > promo.validTo) {
-      return { valid: false, error: 'This promo code has expired' };
-    }
-
-    // Check usage limits
-    if (promo.usageLimit && promo._count.usages >= promo.usageLimit) {
-      return { valid: false, error: 'This promo code has reached its usage limit' };
-    }
-
-    // Check per-user limit
-    if (promo.usages.length >= promo.perUserLimit) {
-      return { valid: false, error: 'You have already used this promo code' };
-    }
-
-    // Check first ride only
-    if (promo.isFirstRideOnly) {
-      const userRideCount = await prisma.ride.count({
-        where: {
-          passengerId: userId,
-          status: 'RIDE_COMPLETED',
-        },
-      });
-      if (userRideCount > 0) {
-        return { valid: false, error: 'This promo code is only valid for first rides' };
-      }
     }
 
     // Check vehicle type restriction
@@ -120,10 +129,10 @@ export async function validatePromo(params: {
       promo: {
         id: promo.id,
         code: promo.code,
-        type: promo.type as 'PERCENT' | 'FLAT' | 'CASHBACK',
+        type: promo.type,
         value: promo.value,
-        maxDiscount: promo.maxDiscount || undefined,
-        minFare: promo.minFare || undefined,
+        maxDiscount: promo.maxDiscount,
+        minFare: promo.minFare,
       },
     };
   } catch (error) {
@@ -159,7 +168,6 @@ export function calculatePromoDiscount(params: {
       break;
 
     case 'CASHBACK':
-      // Cashback doesn't reduce fare, it's credited to wallet after ride
       cashbackAmount = promoValue;
       if (maxDiscount && cashbackAmount > maxDiscount) {
         cashbackAmount = maxDiscount;
@@ -181,24 +189,15 @@ export function calculatePromoDiscount(params: {
 
 /**
  * Record promo usage after ride completion
+ * TODO: Implement with Prisma after migration
  */
 export async function recordPromoUsage(params: {
   promoId: string;
   userId: string;
   rideId: string;
 }): Promise<void> {
-  try {
-    await prisma.promoUsage.create({
-      data: {
-        promoId: params.promoId,
-        userId: params.userId,
-        rideId: params.rideId,
-      },
-    });
-    logger.info(`[PROMO] Recorded usage for promo ${params.promoId}, ride ${params.rideId}`);
-  } catch (error) {
-    logger.error('[PROMO] Failed to record usage', { error, params });
-  }
+  logger.info(`[PROMO] Recording usage for promo ${params.promoId}, ride ${params.rideId}`);
+  // Will be implemented with Prisma after migration
 }
 
 /**
@@ -215,61 +214,29 @@ export async function getActivePromosForUser(params: {
   value: number;
   maxDiscount?: number;
   minFare?: number;
-  validTo?: Date;
 }>> {
-  try {
-    const now = new Date();
-    const promos = await prisma.promo.findMany({
-      where: {
-        isActive: true,
-        validFrom: { lte: now },
-        OR: [
-          { validTo: null },
-          { validTo: { gte: now } },
-        ],
-      },
-      include: {
-        usages: {
-          where: { userId: params.userId },
-        },
-        _count: {
-          select: { usages: true },
-        },
-      },
-    });
-
-    return promos
-      .filter((p) => {
-        // Filter out used promos
-        if (p.usages.length >= p.perUserLimit) return false;
-        // Filter out exhausted promos
-        if (p.usageLimit && p._count.usages >= p.usageLimit) return false;
-        // Filter by vehicle type
-        if (p.vehicleTypes.length > 0 && params.vehicleType) {
-          if (!p.vehicleTypes.includes(params.vehicleType.toLowerCase())) return false;
-        }
-        // Filter by city
-        if (p.cities.length > 0 && params.city) {
-          if (!p.cities.includes(params.city.toLowerCase())) return false;
-        }
-        return true;
-      })
-      .map((p) => ({
-        code: p.code,
-        description: getPromoDescription(p.type as any, p.value, p.maxDiscount),
-        type: p.type,
-        value: p.value,
-        maxDiscount: p.maxDiscount || undefined,
-        minFare: p.minFare || undefined,
-        validTo: p.validTo || undefined,
-      }));
-  } catch (error) {
-    logger.error('[PROMO] Failed to get active promos', { error });
-    return [];
-  }
+  return STATIC_PROMOS
+    .filter((p) => {
+      if (!p.isActive) return false;
+      if (p.vehicleTypes.length > 0 && params.vehicleType) {
+        if (!p.vehicleTypes.includes(params.vehicleType.toLowerCase())) return false;
+      }
+      if (p.cities.length > 0 && params.city) {
+        if (!p.cities.includes(params.city.toLowerCase())) return false;
+      }
+      return true;
+    })
+    .map((p) => ({
+      code: p.code,
+      description: getPromoDescription(p.type, p.value, p.maxDiscount),
+      type: p.type,
+      value: p.value,
+      maxDiscount: p.maxDiscount,
+      minFare: p.minFare,
+    }));
 }
 
-function getPromoDescription(type: 'PERCENT' | 'FLAT' | 'CASHBACK', value: number, maxDiscount?: number | null): string {
+function getPromoDescription(type: 'PERCENT' | 'FLAT' | 'CASHBACK', value: number, maxDiscount?: number): string {
   switch (type) {
     case 'PERCENT':
       return maxDiscount

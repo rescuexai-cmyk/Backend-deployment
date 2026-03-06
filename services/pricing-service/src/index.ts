@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, optionalAuth, requireAuth, errorHandler, notFound, asyncHandler } from '@raahi/shared';
+import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { calculateFare, calculateAllFares, finalizeFare, getNearbyDrivers, getPricingRules } from './pricingService';
 import { validatePromo, calculatePromoDiscount, getActivePromosForUser } from './promoService';
@@ -187,7 +187,7 @@ app.post(
     body('city').optional().isString(),
     body('fare').optional().isFloat({ min: 0 }),
   ],
-  requireAuth,
+  authenticate,
   asyncHandler(async (req: any, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -221,7 +221,7 @@ app.post(
     body('vehicleType').optional().isString(),
     body('city').optional().isString(),
   ],
-  requireAuth,
+  authenticate,
   asyncHandler(async (req: any, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -269,7 +269,7 @@ app.get(
     query('vehicleType').optional().isString(),
     query('city').optional().isString(),
   ],
-  requireAuth,
+  authenticate,
   asyncHandler(async (req: any, res) => {
     const userId = req.user.id;
     const vehicleType = req.query.vehicleType as string | undefined;

@@ -247,6 +247,7 @@ model Ride {
   vehicleType       String?   // Requested vehicle type (bike_rescue, auto, cab_mini, cab_xl, cab_premium)
   rideOtp           String?   // 4-digit OTP for ride verification (driver must enter to start ride)
   scheduledAt       DateTime?
+  driverAssignedAt  DateTime? // When driver was assigned to ride
   driverArrivedAt   DateTime? // When driver tapped "I've arrived" (for waiting time calc)
   startedAt         DateTime?
   completedAt       DateTime?
