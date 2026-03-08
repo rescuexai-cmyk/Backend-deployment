@@ -157,6 +157,13 @@ docker-compose -f docker-compose.prod.yml up -d
 echo -e "${YELLOW}⏳ Waiting for services to start (90 seconds)...${NC}"
 sleep 90
 
+# Step 10b: Run database migrations
+echo -e "${YELLOW}📦 Running database migrations...${NC}"
+if [ -f scripts/run-migrations.sh ]; then
+  chmod +x scripts/run-migrations.sh
+  ./scripts/run-migrations.sh --docker 2>/dev/null || echo "Migration skipped (run manually: ./scripts/run-migrations.sh --docker)"
+fi
+
 echo -e "${YELLOW}📊 Service status:${NC}"
 docker-compose -f docker-compose.prod.yml ps
 

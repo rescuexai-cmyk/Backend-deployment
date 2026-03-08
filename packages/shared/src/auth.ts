@@ -3,6 +3,16 @@ import jwt from 'jsonwebtoken';
 import { logger } from './logger';
 import { prisma } from './database';
 
+// One-time startup warning if JWT_SECRET is missing (causes "invalid signature" for all tokens)
+let _jwtSecretWarned = false;
+function ensureJwtSecretWarned(): void {
+  if (_jwtSecretWarned) return;
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16) {
+    logger.warn('[AUTH] JWT_SECRET not set or too short - token verification will fail. Set JWT_SECRET in .env (min 32 chars).');
+    _jwtSecretWarned = true;
+  }
+}
+
 export interface AuthRequest extends Request {
   user?: {
     id: string;
@@ -25,6 +35,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
 
     const token = authHeader.substring(7);
     const jwtSecret = process.env.JWT_SECRET || 'fallback-secret-key';
+    ensureJwtSecretWarned();
 
     // Mock tokens ONLY allowed in development/test mode
     if ((token.startsWith('mock-driver-token-') || token.startsWith('mock-passenger-token-')) && 
