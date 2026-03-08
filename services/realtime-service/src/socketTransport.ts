@@ -15,7 +15,7 @@
 
 import type { Server as SocketServer } from 'socket.io';
 import { createLogger } from '@raahi/shared';
-import { eventBus, RealtimeEvent, RealtimeTransport, CHANNELS } from './eventBus';
+import { eventBus, RealtimeEvent, RealtimeTransport, CHANNELS, RideRequestEvent } from './eventBus';
 
 const logger = createLogger('socket-transport');
 
@@ -41,17 +41,24 @@ class SocketIOTransport implements RealtimeTransport {
   deliver(channel: string, event: RealtimeEvent): void {
     if (!this.io) return;
 
+    // For new-ride-request: emit payload (ride data) not full event - matches direct emit format
+    // Flutter RideOffer.fromJson expects ride data at top level
+    const emitData =
+      event.type === 'new-ride-request' && 'payload' in event
+        ? (event as RideRequestEvent).payload
+        : event;
+
     // Map EventBus channels to Socket.io rooms and events
     if (channel.startsWith('ride:')) {
       const rideId = channel.slice(5);
       const room = `ride-${rideId}`;
-      this.io.to(room).emit(event.type, event);
+      this.io.to(room).emit(event.type, emitData);
     } else if (channel.startsWith('driver:')) {
       const driverId = channel.slice(7);
       const room = `driver-${driverId}`;
-      this.io.to(room).emit(event.type, event);
+      this.io.to(room).emit(event.type, emitData);
     } else if (channel === 'available-drivers') {
-      this.io.to('available-drivers').emit(event.type, event);
+      this.io.to('available-drivers').emit(event.type, emitData);
     } else if (channel === 'driver-locations') {
       this.io.emit('driver-location-update', event);
     } else if (channel.startsWith('h3:')) {
