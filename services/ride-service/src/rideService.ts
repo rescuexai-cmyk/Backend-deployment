@@ -222,6 +222,13 @@ function formatRide(ride: any, includeOtp: boolean = false) {
           vehicleNumber: ride.driver.vehicleNumber,
           vehicleModel: ride.driver.vehicleModel,
           phone: ride.driver.user?.phone,
+          current_location: ride.driver.currentLatitude && ride.driver.currentLongitude
+            ? {
+                lat: ride.driver.currentLatitude,
+                lng: ride.driver.currentLongitude,
+                heading: ride.driver.currentHeading,
+              }
+            : null,
         }
       : undefined,
   };
