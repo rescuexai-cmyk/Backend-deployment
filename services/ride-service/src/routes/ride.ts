@@ -727,10 +727,22 @@ router.get('/:id/messages', authenticate, asyncHandler(async (req: AuthRequest, 
     res.status(404).json({ success: false, message: 'Ride not found' });
     return;
   }
-  if (ride.passengerId !== req.user!.id && ride.driverId !== req.user!.id) {
+  
+  // Check access: passenger can always access, driver needs lookup
+  let hasAccess = ride.passengerId === req.user!.id;
+  if (!hasAccess && ride.driverId) {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user!.id },
+      select: { id: true }
+    });
+    hasAccess = driver?.id === ride.driverId;
+  }
+  
+  if (!hasAccess) {
     res.status(403).json({ success: false, message: 'Access denied' });
     return;
   }
+  
   const messages = await prisma.rideMessage.findMany({
     where: { rideId: req.params.id },
     orderBy: { timestamp: 'asc' },
@@ -753,10 +765,22 @@ router.post(
       res.status(404).json({ success: false, message: 'Ride not found' });
       return;
     }
-    if (ride.passengerId !== req.user!.id && ride.driverId !== req.user!.id) {
+    
+    // Check access: passenger can always access, driver needs lookup
+    let hasAccess = ride.passengerId === req.user!.id;
+    if (!hasAccess && ride.driverId) {
+      const driver = await prisma.driver.findUnique({
+        where: { userId: req.user!.id },
+        select: { id: true }
+      });
+      hasAccess = driver?.id === ride.driverId;
+    }
+    
+    if (!hasAccess) {
       res.status(403).json({ success: false, message: 'Access denied' });
       return;
     }
+    
     const chatMessage = await prisma.rideMessage.create({
       data: {
         rideId: req.params.id,
