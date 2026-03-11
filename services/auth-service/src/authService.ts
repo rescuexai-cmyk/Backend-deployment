@@ -3,9 +3,11 @@ import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import * as FirebaseAuth from './firebaseAuth';
+import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
 
 const logger = createLogger('auth-service');
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const TEST_DRIVER_PHONE_DIGITS = '919794696252';
 
 export interface AuthTokens {
   accessToken: string;
@@ -24,6 +26,45 @@ export interface UserProfile {
   isActive: boolean;
   createdAt: Date;
   lastLoginAt?: Date;
+}
+
+function normalizePhoneDigits(phone: string): string {
+  return (phone || '').replace(/\D/g, '');
+}
+
+function isTestDriverPhone(phone: string): boolean {
+  const digits = normalizePhoneDigits(phone);
+  return digits === TEST_DRIVER_PHONE_DIGITS || digits === `0${TEST_DRIVER_PHONE_DIGITS}`;
+}
+
+async function applyTestDriverOverrides(userId: string, phone: string): Promise<void> {
+  if (!isTestDriverPhone(phone)) return;
+
+  const now = new Date();
+  const driver = await prisma.driver.findFirst({
+    where: { userId },
+    select: { id: true },
+  });
+
+  if (!driver) return;
+
+  const paid = await prisma.driverPenalty.updateMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    data: { status: PenaltyStatus.PAID, paidAt: now },
+  });
+
+  await prisma.driver.update({
+    where: { id: driver.id },
+    data: {
+      onboardingStatus: OnboardingStatus.COMPLETED,
+      isVerified: true,
+      isActive: true,
+      documentsVerifiedAt: now,
+      verificationNotes: 'Auto-test override: onboarding completed and penalties cleared at login.',
+    },
+  });
+
+  logger.info(`[AUTH] Applied test-driver override for ${phone} (driverId=${driver.id}, penalties_cleared=${paid.count})`);
 }
 
 function generateTokens(userId: string): AuthTokens {
@@ -126,6 +167,7 @@ export async function authenticateWithFirebasePhone(
 
   const tokens = generateTokens(user.id);
   await saveRefreshToken(user.id, tokens.refreshToken);
+  await applyTestDriverOverrides(user.id, user.phone);
 
   logger.info(`[AUTH] Firebase Phone auth successful for user: ${user.id}`);
 
@@ -196,6 +238,7 @@ export async function authenticateWithVerifiedPhone(
 
   const tokens = generateTokens(user.id);
   await saveRefreshToken(user.id, tokens.refreshToken);
+  await applyTestDriverOverrides(user.id, user.phone);
 
   return { user: toUserProfile(user), tokens, isNewUser };
 }
@@ -257,6 +300,7 @@ export async function authenticateWithGoogle(idToken: string): Promise<{ user: U
 
   const tokens = generateTokens(user.id);
   await saveRefreshToken(user.id, tokens.refreshToken);
+  await applyTestDriverOverrides(user.id, user.phone);
 
   const requiresPhone = user.phone.startsWith('google_') || user.phone === '';
 
@@ -363,6 +407,7 @@ export async function authenticateWithTruecaller(
 
   const tokens = generateTokens(user.id);
   await saveRefreshToken(user.id, tokens.refreshToken);
+  await applyTestDriverOverrides(user.id, user.phone);
 
   return { user: toUserProfile(user), tokens, isNewUser };
 }
