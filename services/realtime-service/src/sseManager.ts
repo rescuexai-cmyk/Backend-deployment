@@ -50,6 +50,8 @@ class SSEManagerImpl implements RealtimeTransport {
   private entityToClient = new Map<string, Set<string>>(); // entityId → Set<clientId>
   private eventCounter = 0;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private heartbeatEventsSent = 0;
+  private heartbeatWriteFailures = 0;
 
   // Configuration
   private readonly HEARTBEAT_INTERVAL_MS = 15000; // 15s heartbeat (SSE keep-alive)
@@ -438,7 +440,6 @@ class SSEManagerImpl implements RealtimeTransport {
 
   private startHeartbeat(): void {
     this.heartbeatInterval = setInterval(() => {
-      const now = Date.now();
       const deadClients: string[] = [];
 
       for (const [clientId, client] of this.clients) {
@@ -447,10 +448,18 @@ class SSEManagerImpl implements RealtimeTransport {
           continue;
         }
 
-        // Send SSE comment as heartbeat (: is a comment in SSE spec)
+        // Send both:
+        // 1) SSE comment heartbeat for low overhead keepalive.
+        // 2) Named heartbeat event so client watchdogs that track event callbacks
+        //    can reset their stale-connection timers reliably.
         try {
           client.res.write(`: heartbeat ${new Date().toISOString()}\n\n`);
+          this.sendEvent(client, 'heartbeat', {
+            t: Date.now(),
+          });
+          this.heartbeatEventsSent++;
         } catch {
+          this.heartbeatWriteFailures++;
           deadClients.push(clientId);
         }
       }
@@ -480,6 +489,8 @@ class SSEManagerImpl implements RealtimeTransport {
       activeChannels: this.channelSubscribers.size,
       clientsByType,
       eventCounter: this.eventCounter,
+      heartbeatEventsSent: this.heartbeatEventsSent,
+      heartbeatWriteFailures: this.heartbeatWriteFailures,
     };
   }
 

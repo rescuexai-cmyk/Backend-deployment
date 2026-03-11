@@ -3,7 +3,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, optionalAuth, authenticate, AuthRequest, errorHandler, notFound, asyncHandler } from '@raahi/shared';
+import { connectDatabase, optionalAuth, authenticate, AuthRequest, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
@@ -480,6 +480,41 @@ io.on('connection', (socket) => {
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Realtime Service API',
+  version: '1.0.0',
+  description: 'Raahi Realtime Service - SSE, WebSocket, and MQTT for real-time communications',
+  port: Number(PORT),
+  basePath: '/api/realtime',
+  apis: [__filename],
+});
+
+/**
+ * @openapi
+ * tags:
+ *   - name: Health
+ *     description: Service health check
+ *   - name: SSE
+ *     description: Server-Sent Events endpoints
+ *   - name: Location
+ *     description: Driver location tracking
+ *   - name: Stats
+ *     description: Real-time statistics
+ *   - name: Internal
+ *     description: Internal service-to-service APIs
+ */
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',

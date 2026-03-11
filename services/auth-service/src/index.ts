@@ -1,9 +1,10 @@
 import express from 'express';
 import cors from 'cors';
-import { connectDatabase, errorHandler, notFound } from '@raahi/shared';
+import { connectDatabase, errorHandler, notFound, setupSwagger } from '@raahi/shared';
 import authRoutes from './routes/auth';
 import { createLogger } from '@raahi/shared';
 import { initializeFirebase, getFirebaseStatus } from './firebaseAuth';
+import path from 'path';
 
 const logger = createLogger('auth-service');
 const app = express();
@@ -12,6 +13,49 @@ const PORT = process.env.PORT || 5001;
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Auth Service API',
+  version: '1.0.0',
+  description: 'Raahi Authentication Service - Phone OTP, Google, and Truecaller authentication',
+  port: Number(PORT),
+  basePath: '/api/auth',
+  apis: [path.join(__dirname, './routes/*.ts'), path.join(__dirname, './routes/*.js')],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     description: Returns the health status of the auth service and Firebase initialization status
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: OK
+ *                 service:
+ *                   type: string
+ *                   example: auth-service
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                 firebase:
+ *                   type: object
+ *                   properties:
+ *                     initialized:
+ *                       type: boolean
+ *                     projectId:
+ *                       type: string
+ *                       nullable: true
+ */
 app.get('/health', (req, res) => {
   const fbStatus = getFirebaseStatus();
   res.json({

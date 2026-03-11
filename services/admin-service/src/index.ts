@@ -1,7 +1,7 @@
 import express, { NextFunction, Response } from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, authenticate, AuthRequest } from '@raahi/shared';
+import { connectDatabase, authenticate, AuthRequest, setupSwagger } from '@raahi/shared';
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
@@ -31,6 +31,26 @@ function sanitizePagination(
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Admin Service API',
+  version: '1.0.0',
+  description: 'Raahi Admin Service - Driver verification and platform management',
+  port: Number(PORT),
+  basePath: '/api/admin',
+  apis: [__filename],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'admin-service', timestamp: new Date().toISOString() });
 });
@@ -90,6 +110,39 @@ function formatDriver(driver: any) {
   };
 }
 
+/**
+ * @openapi
+ * /api/admin/drivers:
+ *   get:
+ *     tags: [Drivers]
+ *     summary: List all drivers
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           maximum: 100
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: filter
+ *         schema:
+ *           type: string
+ *           enum: [all, pending, verified, rejected]
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of drivers
+ *       403:
+ *         description: Admin access required
+ */
 app.get(
   '/api/admin/drivers',
   authenticate,

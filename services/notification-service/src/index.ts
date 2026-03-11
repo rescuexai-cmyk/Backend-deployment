@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, prisma, AuthRequest } from '@raahi/shared';
+import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, prisma, AuthRequest, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import * as PushService from './pushService';
 
@@ -44,6 +44,26 @@ const DEFAULT_PAGINATION_LIMIT = 20;
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Notification Service API',
+  version: '1.0.0',
+  description: 'Raahi Notification Service - Push notifications and in-app notifications',
+  port: Number(PORT),
+  basePath: '/api/notifications',
+  apis: [__filename],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
   const pushStatus = PushService.getPushNotificationStatus();
   res.json({ 
@@ -59,12 +79,47 @@ app.get('/health', (req, res) => {
 // ============================================
 
 /**
- * POST /api/notifications/device - Register/update device for push notifications
- * 
- * Call this endpoint when:
- * - User logs in (to register device)
- * - FCM token refreshes (Firebase can rotate tokens)
- * - User switches devices
+ * @openapi
+ * /api/notifications/device:
+ *   post:
+ *     tags: [Device Registration]
+ *     summary: Register device for push notifications
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fcmToken, platform]
+ *             properties:
+ *               fcmToken:
+ *                 type: string
+ *               platform:
+ *                 type: string
+ *                 enum: [ios, android, web]
+ *               deviceId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Device registered
+ *   get:
+ *     tags: [Device Registration]
+ *     summary: Get device registration status
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Device registration status
+ *   delete:
+ *     tags: [Device Registration]
+ *     summary: Unregister device
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Device unregistered
  */
 app.post(
   '/api/notifications/device',

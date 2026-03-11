@@ -5,3 +5,4 @@ export { authenticate, optionalAuth, authenticateDriver, AuthRequest } from './a
 export * from './h3Utils';
 export * from './driverVerification';
 export * from './redis';
+export * from './swagger';

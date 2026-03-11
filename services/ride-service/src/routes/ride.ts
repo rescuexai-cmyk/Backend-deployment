@@ -10,6 +10,63 @@ import { broadcastRideChatMessage } from '../httpClients';
 
 const router = express.Router();
 
+/**
+ * @openapi
+ * /api/rides:
+ *   post:
+ *     tags: [Rides]
+ *     summary: Create a new ride
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod]
+ *             properties:
+ *               pickupLat:
+ *                 type: number
+ *                 minimum: -90
+ *                 maximum: 90
+ *               pickupLng:
+ *                 type: number
+ *                 minimum: -180
+ *                 maximum: 180
+ *               dropLat:
+ *                 type: number
+ *               dropLng:
+ *                 type: number
+ *               pickupAddress:
+ *                 type: string
+ *               dropAddress:
+ *                 type: string
+ *               paymentMethod:
+ *                 type: string
+ *                 enum: [CASH, CARD, UPI, WALLET]
+ *               scheduledTime:
+ *                 type: string
+ *                 format: date-time
+ *               vehicleType:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Ride created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 data:
+ *                   $ref: '#/components/schemas/Ride'
+ *       400:
+ *         description: Validation failed
+ */
 router.post(
   '/',
   authenticate,
@@ -47,6 +104,28 @@ router.post(
   })
 );
 
+/**
+ * @openapi
+ * /api/rides:
+ *   get:
+ *     tags: [Rides]
+ *     summary: List user's rides
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           maximum: 50
+ *     responses:
+ *       200:
+ *         description: List of rides
+ */
 router.get(
   '/',
   authenticate,
@@ -67,6 +146,36 @@ router.get(
   })
 );
 
+/**
+ * @openapi
+ * /api/rides/available:
+ *   get:
+ *     tags: [Rides]
+ *     summary: Get available rides for driver
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: lat
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: lng
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: radius
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *     responses:
+ *       200:
+ *         description: Available rides
+ *       403:
+ *         description: Driver access required
+ */
 router.get('/available', authenticate, [
   query('lat').isFloat({ min: -90, max: 90 }),
   query('lng').isFloat({ min: -180, max: 180 }),
@@ -89,7 +198,24 @@ router.get('/available', authenticate, [
   res.status(200).json({ success: true, data: { rides, total: rides.length } });
 }));
 
-// Share ride: public endpoint (no auth) - get minimal ride info by share token
+/**
+ * @openapi
+ * /api/rides/share/{token}:
+ *   get:
+ *     tags: [Rides]
+ *     summary: Get ride by share token (public)
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Ride details
+ *       404:
+ *         description: Share link invalid or expired
+ */
 router.get('/share/:token', asyncHandler(async (req: AuthRequest, res: Response) => {
   const record = await prisma.rideShareToken.findUnique({
     where: { token: req.params.token },
@@ -145,6 +271,28 @@ router.get('/share/:token', asyncHandler(async (req: AuthRequest, res: Response)
   });
 }));
 
+/**
+ * @openapi
+ * /api/rides/{id}:
+ *   get:
+ *     tags: [Rides]
+ *     summary: Get ride by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Ride details
+ *       403:
+ *         description: Access denied
+ *       404:
+ *         description: Ride not found
+ */
 router.get('/:id', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
   // Pass requester ID so we can determine if they should see the OTP
   const ride = await rideService.getRideById(req.params.id, req.user!.id);
@@ -170,6 +318,34 @@ router.get('/:id', authenticate, asyncHandler(async (req: AuthRequest, res: Resp
   res.status(200).json({ success: true, data: ride });
 }));
 
+/**
+ * @openapi
+ * /api/rides/{id}/assign-driver:
+ *   post:
+ *     tags: [Rides]
+ *     summary: Assign driver to ride (admin)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [driverId]
+ *             properties:
+ *               driverId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Driver assigned
+ */
 router.post('/:id/assign-driver', authenticate, [body('driverId').isString().notEmpty()], asyncHandler(async (req: AuthRequest, res: Response) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -180,7 +356,30 @@ router.post('/:id/assign-driver', authenticate, [body('driverId').isString().not
   res.status(200).json({ success: true, message: 'Driver assigned successfully', data: ride });
 }));
 
-// Driver self-accept endpoint - driver accepts a ride for themselves
+/**
+ * @openapi
+ * /api/rides/{id}/accept:
+ *   post:
+ *     tags: [Rides]
+ *     summary: Driver accepts a ride
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Ride accepted
+ *       403:
+ *         description: Driver not verified
+ *       404:
+ *         description: Ride not found
+ *       409:
+ *         description: Ride already taken
+ */
 router.post('/:id/accept', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
   const rideId = req.params.id;
   const userId = req.user!.id;

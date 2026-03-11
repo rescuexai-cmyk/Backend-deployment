@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { body, validationResult, query } from 'express-validator';
-import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, prisma, AuthRequest } from '@raahi/shared';
+import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, prisma, AuthRequest, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 
 const logger = createLogger('user-service');
@@ -17,12 +17,73 @@ const MAX_DESCRIPTION_LENGTH = 2000;
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'User Service API',
+  version: '1.0.0',
+  description: 'Raahi User Service - User profile, saved places, and support tickets',
+  port: Number(PORT),
+  basePath: '/api/user',
+  apis: [__filename],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: OK
+ *                 service:
+ *                   type: string
+ *                   example: user-service
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'user-service', timestamp: new Date().toISOString() });
 });
 
 // ==================== USER PROFILE ====================
-// GET /api/user/profile - Return full user profile (redirects logic from /api/auth/me)
+
+/**
+ * @openapi
+ * /api/user/profile:
+ *   get:
+ *     tags: [User Profile]
+ *     summary: Get user profile
+ *     description: Returns the authenticated user's profile information
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: User profile retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   $ref: '#/components/schemas/User'
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: User not found
+ */
 app.get('/api/user/profile', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.user!.id },
@@ -63,7 +124,54 @@ app.get('/api/user/profile', authenticate, asyncHandler(async (req: AuthRequest,
 }));
 
 // ==================== SAVED PLACES ====================
-// GET /api/user/saved-places - List user's saved places with pagination
+
+/**
+ * @openapi
+ * /api/user/saved-places:
+ *   get:
+ *     tags: [Saved Places]
+ *     summary: List saved places
+ *     description: Returns paginated list of user's saved places
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
+ *     responses:
+ *       200:
+ *         description: List of saved places
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/SavedPlace'
+ *                 pagination:
+ *                   $ref: '#/components/schemas/Pagination'
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Unauthorized
+ */
 app.get(
   '/api/user/saved-places',
   authenticate,
@@ -115,7 +223,66 @@ app.get(
   })
 );
 
-// POST /api/user/saved-places - Create a new saved place
+/**
+ * @openapi
+ * /api/user/saved-places:
+ *   post:
+ *     tags: [Saved Places]
+ *     summary: Create a saved place
+ *     description: Add a new saved place (home, work, or other)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, address, latitude, longitude]
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 maxLength: 100
+ *                 example: Home
+ *               address:
+ *                 type: string
+ *                 maxLength: 500
+ *                 example: 123 Main Street, City
+ *               latitude:
+ *                 type: number
+ *                 minimum: -90
+ *                 maximum: 90
+ *                 example: 28.6139
+ *               longitude:
+ *                 type: number
+ *                 minimum: -180
+ *                 maximum: 180
+ *                 example: 77.2090
+ *               placeType:
+ *                 type: string
+ *                 enum: [home, work, other]
+ *                 default: other
+ *     responses:
+ *       201:
+ *         description: Saved place created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Saved place created
+ *                 data:
+ *                   $ref: '#/components/schemas/SavedPlace'
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Unauthorized
+ */
 app.post(
   '/api/user/saved-places',
   authenticate,
@@ -163,7 +330,69 @@ app.post(
   })
 );
 
-// PUT /api/user/saved-places/:id - Update a saved place
+/**
+ * @openapi
+ * /api/user/saved-places/{id}:
+ *   put:
+ *     tags: [Saved Places]
+ *     summary: Update a saved place
+ *     description: Update an existing saved place
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Saved place ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 maxLength: 100
+ *               address:
+ *                 type: string
+ *                 maxLength: 500
+ *               latitude:
+ *                 type: number
+ *                 minimum: -90
+ *                 maximum: 90
+ *               longitude:
+ *                 type: number
+ *                 minimum: -180
+ *                 maximum: 180
+ *               placeType:
+ *                 type: string
+ *                 enum: [home, work, other]
+ *     responses:
+ *       200:
+ *         description: Saved place updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Saved place updated
+ *                 data:
+ *                   $ref: '#/components/schemas/SavedPlace'
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Saved place not found
+ */
 app.put(
   '/api/user/saved-places/:id',
   authenticate,
@@ -221,7 +450,41 @@ app.put(
   })
 );
 
-// DELETE /api/user/saved-places/:id - Delete a saved place
+/**
+ * @openapi
+ * /api/user/saved-places/{id}:
+ *   delete:
+ *     tags: [Saved Places]
+ *     summary: Delete a saved place
+ *     description: Remove a saved place
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Saved place ID
+ *     responses:
+ *       200:
+ *         description: Saved place deleted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Saved place deleted
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Saved place not found
+ */
 app.delete('/api/user/saved-places/:id', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   const { id } = req.params;
 
@@ -240,7 +503,58 @@ app.delete('/api/user/saved-places/:id', authenticate, asyncHandler(async (req: 
 }));
 
 // ==================== USER SUPPORT TICKETS ====================
-// POST /api/user/support - Submit a support ticket (persisted)
+
+/**
+ * @openapi
+ * /api/user/support:
+ *   post:
+ *     tags: [Support]
+ *     summary: Submit a support ticket
+ *     description: Create a new support request
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [issue_type, description]
+ *             properties:
+ *               issue_type:
+ *                 type: string
+ *                 maxLength: 100
+ *                 example: Payment Issue
+ *               description:
+ *                 type: string
+ *                 minLength: 10
+ *                 maxLength: 2000
+ *                 example: I was charged twice for my last ride
+ *               priority:
+ *                 type: string
+ *                 enum: [low, medium, high]
+ *                 default: medium
+ *     responses:
+ *       201:
+ *         description: Support ticket created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Support request submitted successfully
+ *                 data:
+ *                   $ref: '#/components/schemas/SupportTicket'
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Unauthorized
+ */
 app.post(
   '/api/user/support',
   authenticate,
@@ -289,7 +603,56 @@ app.post(
   })
 );
 
-// GET /api/user/support - List user's support tickets
+/**
+ * @openapi
+ * /api/user/support:
+ *   get:
+ *     tags: [Support]
+ *     summary: List support tickets
+ *     description: Returns paginated list of user's support tickets
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
+ *     responses:
+ *       200:
+ *         description: List of support tickets
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     tickets:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/SupportTicket'
+ *                     pagination:
+ *                       $ref: '#/components/schemas/Pagination'
+ *       400:
+ *         description: Validation failed
+ *       401:
+ *         description: Unauthorized
+ */
 app.get(
   '/api/user/support',
   authenticate,
@@ -343,7 +706,40 @@ app.get(
   })
 );
 
-// GET /api/user/support/:id - Get a single support ticket
+/**
+ * @openapi
+ * /api/user/support/{id}:
+ *   get:
+ *     tags: [Support]
+ *     summary: Get a support ticket
+ *     description: Get details of a specific support ticket
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Support ticket ID
+ *     responses:
+ *       200:
+ *         description: Support ticket details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   $ref: '#/components/schemas/SupportTicket'
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Support ticket not found
+ */
 app.get('/api/user/support/:id', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   const { id } = req.params;
 

@@ -20,7 +20,15 @@ const REALTIME_SERVICE = process.env.REALTIME_SERVICE_URL || 'http://localhost:5
 const ADMIN_SERVICE = process.env.ADMIN_SERVICE_URL || 'http://localhost:5008';
 
 app.use(helmet());
-app.use(compression());
+app.use(compression({
+  // SSE streams must never be compressed, otherwise small heartbeat frames can be buffered.
+  filter: (req, res) => {
+    if (req.path.startsWith('/api/realtime/sse')) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+}));
 app.use(morgan('combined', { stream: { write: (m: string) => logger.info(m.trim()) } }));
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 
@@ -135,11 +143,16 @@ const wsProxyOptions = {
 const sseProxyOptions = {
   target: REALTIME_SERVICE,
   changeOrigin: true,
+  // Keep SSE connections long-lived.
+  timeout: 0,
+  proxyTimeout: 0,
   // Critical for SSE: disable response buffering so events stream immediately
   onProxyRes: (proxyRes: any) => {
     // Ensure no buffering for SSE connections
     proxyRes.headers['x-accel-buffering'] = 'no';
     proxyRes.headers['cache-control'] = 'no-cache, no-transform';
+    // Explicitly disable any upstream compression for event streams.
+    proxyRes.headers['content-encoding'] = 'identity';
   },
   onProxyReq: (proxyReq: any, req: express.Request) => {
     fixRequestBody(proxyReq, req);
@@ -170,6 +183,22 @@ const mqttWsProxyOptions = {
   },
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SWAGGER API DOCUMENTATION ROUTES
+// Each service exposes its own Swagger UI at /api-docs
+// ═══════════════════════════════════════════════════════════════════════════════
+app.use('/api/auth/api-docs', createProxyMiddleware({ target: AUTH_SERVICE, pathRewrite: { '^/api/auth/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/user/api-docs', createProxyMiddleware({ target: USER_SERVICE, pathRewrite: { '^/api/user/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/driver/api-docs', createProxyMiddleware({ target: DRIVER_SERVICE, pathRewrite: { '^/api/driver/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/rides/api-docs', createProxyMiddleware({ target: RIDE_SERVICE, pathRewrite: { '^/api/rides/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/pricing/api-docs', createProxyMiddleware({ target: PRICING_SERVICE, pathRewrite: { '^/api/pricing/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/notifications/api-docs', createProxyMiddleware({ target: NOTIFICATION_SERVICE, pathRewrite: { '^/api/notifications/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/realtime/api-docs', createProxyMiddleware({ target: REALTIME_SERVICE, pathRewrite: { '^/api/realtime/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/admin/api-docs', createProxyMiddleware({ target: ADMIN_SERVICE, pathRewrite: { '^/api/admin/api-docs': '/api-docs' }, ...proxyOptions }));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// API ROUTES
+// ═══════════════════════════════════════════════════════════════════════════════
 app.use('/api/auth', createProxyMiddleware({ target: AUTH_SERVICE, ...proxyOptions }));
 app.use('/api/user', createProxyMiddleware({ target: USER_SERVICE, ...proxyOptions }));
 // File upload endpoint - must come before general /api/driver route
@@ -197,5 +226,15 @@ app.listen(PORT, () => {
   logger.info(`  SSE Proxy   : /api/realtime/sse/* → ${REALTIME_SERVICE}`);
   logger.info(`  Socket.io   : /socket.io → ${REALTIME_SERVICE} (legacy)`);
   logger.info(`  MQTT WS     : /mqtt → ${MQTT_WS_SERVICE}`);
+  logger.info(`════════════════════════════════════════════════════════════════`);
+  logger.info(`  Swagger API Documentation:`);
+  logger.info(`    Auth     : /api/auth/api-docs`);
+  logger.info(`    User     : /api/user/api-docs`);
+  logger.info(`    Driver   : /api/driver/api-docs`);
+  logger.info(`    Rides    : /api/rides/api-docs`);
+  logger.info(`    Pricing  : /api/pricing/api-docs`);
+  logger.info(`    Notify   : /api/notifications/api-docs`);
+  logger.info(`    Realtime : /api/realtime/api-docs`);
+  logger.info(`    Admin    : /api/admin/api-docs`);
   logger.info(`════════════════════════════════════════════════════════════════`);
 });

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import { connectDatabase, errorHandler, notFound } from '@raahi/shared';
+import path from 'path';
+import { connectDatabase, errorHandler, notFound, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import rideRoutes from './routes/ride';
 
@@ -11,6 +12,26 @@ const PORT = process.env.PORT || 5004;
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Ride Service API',
+  version: '1.0.0',
+  description: 'Raahi Ride Service - Ride booking, tracking, and management',
+  port: Number(PORT),
+  basePath: '/api/rides',
+  apis: [path.join(__dirname, './routes/*.ts'), path.join(__dirname, './routes/*.js'), __filename],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'ride-service', timestamp: new Date().toISOString() });
 });

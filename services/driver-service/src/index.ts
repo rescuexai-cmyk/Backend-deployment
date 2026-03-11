@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, authenticate, authenticateDriver, AuthRequest } from '@raahi/shared';
+import { connectDatabase, authenticate, authenticateDriver, AuthRequest, setupSwagger } from '@raahi/shared';
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger, latLngToH3 } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
@@ -76,6 +76,83 @@ app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONT
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(uploadsBaseDir));
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Driver Service API',
+  version: '1.0.0',
+  description: 'Raahi Driver Service - Driver onboarding, documents, earnings, payouts, and profile management',
+  port: Number(PORT),
+  basePath: '/api/driver',
+  apis: [__filename, path.join(__dirname, './swagger-definitions.ts'), path.join(__dirname, './swagger-definitions.js')],
+});
+
+/**
+ * @openapi
+ * tags:
+ *   - name: Health
+ *     description: Service health check
+ *   - name: Driver Profile
+ *     description: Driver profile and status management
+ *   - name: Penalties
+ *     description: Driver penalty management
+ *   - name: Earnings
+ *     description: Driver earnings and transactions
+ *   - name: Payout Accounts
+ *     description: Bank account and UPI management for payouts
+ *   - name: Wallet
+ *     description: Wallet balance and withdrawals
+ *   - name: Trips
+ *     description: Driver trip history
+ *   - name: Support
+ *     description: Driver support tickets
+ *   - name: Settings
+ *     description: Driver settings and preferences
+ *   - name: Onboarding
+ *     description: Driver onboarding flow
+ *   - name: Documents
+ *     description: Document upload and verification
+ *   - name: DigiLocker
+ *     description: DigiLocker integration for KYC
+ *   - name: Aadhaar
+ *     description: Aadhaar OTP verification
+ */
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: OK
+ *                 service:
+ *                   type: string
+ *                   example: driver-service
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                 storage:
+ *                   type: object
+ *                   properties:
+ *                     type:
+ *                       type: string
+ *                       example: digitalocean-spaces
+ *                     configured:
+ *                       type: boolean
+ *                     bucket:
+ *                       type: string
+ *                     endpoint:
+ *                       type: string
+ */
 app.get('/health', (req, res) => {
   const storage = getStorageConfig();
   res.json({ 
@@ -92,6 +169,33 @@ app.get('/health', (req, res) => {
 });
 
 // Driver profile & status
+
+/**
+ * @openapi
+ * /api/driver/profile:
+ *   get:
+ *     tags: [Driver Profile]
+ *     summary: Get driver profile
+ *     description: Returns complete driver profile including earnings, documents status, and vehicle info
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Driver profile retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   $ref: '#/components/schemas/DriverProfile'
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Driver not found
+ */
 app.get('/api/driver/profile', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const now = new Date();
   const today = new Date(now);
@@ -146,6 +250,40 @@ app.get('/api/driver/profile', authenticateDriver, asyncHandler(async (req: Auth
 
 const PENALTY_STOP_RIDING_AMOUNT = parseFloat(process.env.PENALTY_STOP_RIDING_AMOUNT || '10');
 
+/**
+ * @openapi
+ * /api/driver/status:
+ *   patch:
+ *     tags: [Driver Profile]
+ *     summary: Update driver online status
+ *     description: Toggle driver online/offline status. May charge penalty when going offline.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [online]
+ *             properties:
+ *               online:
+ *                 type: boolean
+ *               location:
+ *                 type: object
+ *                 properties:
+ *                   latitude:
+ *                     type: number
+ *                   longitude:
+ *                     type: number
+ *     responses:
+ *       200:
+ *         description: Status updated
+ *       403:
+ *         description: Driver not verified or has unpaid penalties
+ *       404:
+ *         description: Driver not found
+ */
 app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(), body('location.latitude').optional().isFloat(), body('location.longitude').optional().isFloat()], asyncHandler(async (req: AuthRequest, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -276,7 +414,24 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
   });
 }));
 
-// List driver penalties (optional filter: ?status=PENDING)
+/**
+ * @openapi
+ * /api/driver/penalties:
+ *   get:
+ *     tags: [Penalties]
+ *     summary: List driver penalties
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [PENDING, PAID]
+ *     responses:
+ *       200:
+ *         description: Penalties retrieved
+ */
 app.get('/api/driver/penalties', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -310,7 +465,18 @@ app.get('/api/driver/penalties', authenticateDriver, asyncHandler(async (req: Au
   });
 }));
 
-// Pay unpaid penalties so driver can go online again
+/**
+ * @openapi
+ * /api/driver/penalties/pay:
+ *   post:
+ *     tags: [Penalties]
+ *     summary: Pay all pending penalties
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Penalties paid
+ */
 app.post('/api/driver/penalties/pay', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -343,7 +509,19 @@ app.post('/api/driver/penalties/pay', authenticateDriver, asyncHandler(async (re
   });
 }));
 
-// GET /api/driver/earnings - Summary with real calculations
+/**
+ * @openapi
+ * /api/driver/earnings:
+ *   get:
+ *     tags: [Earnings]
+ *     summary: Get earnings summary
+ *     description: Returns earnings breakdown for today, week, month, and total
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Earnings summary
+ */
 app.get('/api/driver/earnings', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const windowType = await getPlatformConfig('earnings_window_type', 'calendar');
   const platformFeeRate = parseFloat(await getPlatformConfig('platform_fee_rate', '0.20'));
@@ -437,7 +615,40 @@ app.get('/api/driver/earnings', authenticateDriver, asyncHandler(async (req: Aut
   });
 }));
 
-// GET /api/driver/earnings/transactions - List individual earning records
+/**
+ * @openapi
+ * /api/driver/earnings/transactions:
+ *   get:
+ *     tags: [Earnings]
+ *     summary: List earning transactions
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *       - in: query
+ *         name: from
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *       - in: query
+ *         name: to
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *     responses:
+ *       200:
+ *         description: Transactions list
+ */
 app.get(
   '/api/driver/earnings/transactions',
   authenticateDriver,
@@ -511,7 +722,18 @@ app.get(
 // PAYOUT ACCOUNT MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/driver/payout-accounts - Get all payout accounts
+/**
+ * @openapi
+ * /api/driver/payout-accounts:
+ *   get:
+ *     tags: [Payout Accounts]
+ *     summary: Get all payout accounts
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Payout accounts list
+ */
 app.get('/api/driver/payout-accounts', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -523,7 +745,26 @@ app.get('/api/driver/payout-accounts', authenticateDriver, asyncHandler(async (r
   res.json({ success: true, data: { accounts } });
 }));
 
-// POST /api/driver/payout-accounts - Add a new payout account
+/**
+ * @openapi
+ * /api/driver/payout-accounts:
+ *   post:
+ *     tags: [Payout Accounts]
+ *     summary: Add a payout account
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/PayoutAccountRequest'
+ *     responses:
+ *       201:
+ *         description: Account created
+ *       400:
+ *         description: Validation failed
+ */
 app.post(
   '/api/driver/payout-accounts',
   authenticateDriver,
@@ -580,7 +821,24 @@ app.post(
   })
 );
 
-// PUT /api/driver/payout-accounts/:id/primary - Set account as primary
+/**
+ * @openapi
+ * /api/driver/payout-accounts/{id}/primary:
+ *   put:
+ *     tags: [Payout Accounts]
+ *     summary: Set account as primary
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Primary account updated
+ */
 app.put('/api/driver/payout-accounts/:id/primary', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -596,7 +854,24 @@ app.put('/api/driver/payout-accounts/:id/primary', authenticateDriver, asyncHand
   }
 }));
 
-// DELETE /api/driver/payout-accounts/:id - Delete a payout account
+/**
+ * @openapi
+ * /api/driver/payout-accounts/{id}:
+ *   delete:
+ *     tags: [Payout Accounts]
+ *     summary: Delete a payout account
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Account deleted
+ */
 app.delete('/api/driver/payout-accounts/:id', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -616,7 +891,28 @@ app.delete('/api/driver/payout-accounts/:id', authenticateDriver, asyncHandler(a
 // WALLET & WITHDRAWALS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/driver/wallet - Get wallet balance and details
+/**
+ * @openapi
+ * /api/driver/wallet:
+ *   get:
+ *     tags: [Wallet]
+ *     summary: Get wallet balance
+ *     description: Returns wallet balance, stats, and primary payout account
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Wallet details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   $ref: '#/components/schemas/WalletBalance'
+ */
 app.get('/api/driver/wallet', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
   if (!driver) {
@@ -661,7 +957,33 @@ app.get('/api/driver/wallet', authenticateDriver, asyncHandler(async (req: AuthR
   });
 }));
 
-// POST /api/driver/wallet/withdraw - Request a withdrawal
+/**
+ * @openapi
+ * /api/driver/wallet/withdraw:
+ *   post:
+ *     tags: [Wallet]
+ *     summary: Request a withdrawal
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [amount]
+ *             properties:
+ *               amount:
+ *                 type: number
+ *                 minimum: 1
+ *               payoutAccountId:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Withdrawal requested
+ *       400:
+ *         description: Insufficient balance or validation error
+ */
 app.post(
   '/api/driver/wallet/withdraw',
   authenticateDriver,
@@ -708,7 +1030,27 @@ app.post(
   })
 );
 
-// GET /api/driver/wallet/transactions - Get wallet transaction history
+/**
+ * @openapi
+ * /api/driver/wallet/transactions:
+ *   get:
+ *     tags: [Wallet]
+ *     summary: Get wallet transactions
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Transaction list
+ */
 app.get(
   '/api/driver/wallet/transactions',
   authenticateDriver,
@@ -746,7 +1088,27 @@ app.get(
   })
 );
 
-// GET /api/driver/wallet/payouts - Get payout history
+/**
+ * @openapi
+ * /api/driver/wallet/payouts:
+ *   get:
+ *     tags: [Wallet]
+ *     summary: Get payout history
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Payout history
+ */
 app.get(
   '/api/driver/wallet/payouts',
   authenticateDriver,
@@ -793,6 +1155,31 @@ app.get(
   })
 );
 
+/**
+ * @openapi
+ * /api/driver/trips:
+ *   get:
+ *     tags: [Trips]
+ *     summary: Get trip history
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Trip history
+ */
 app.get(
   '/api/driver/trips',
   authenticateDriver,
@@ -870,7 +1257,33 @@ app.get(
   })
 );
 
-// POST /api/driver/support - Submit support ticket (persisted to DB)
+/**
+ * @openapi
+ * /api/driver/support:
+ *   post:
+ *     tags: [Support]
+ *     summary: Submit support ticket
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [issue_type, description]
+ *             properties:
+ *               issue_type:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               priority:
+ *                 type: string
+ *                 enum: [low, medium, high]
+ *     responses:
+ *       201:
+ *         description: Ticket created
+ */
 app.post(
   '/api/driver/support',
   authenticateDriver,
@@ -927,7 +1340,32 @@ app.post(
   })
 );
 
-// GET /api/driver/support - List driver's support tickets
+/**
+ * @openapi
+ * /api/driver/support:
+ *   get:
+ *     tags: [Support]
+ *     summary: List support tickets
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [open, in_progress, resolved, closed]
+ *     responses:
+ *       200:
+ *         description: Support tickets list
+ */
 app.get(
   '/api/driver/support',
   authenticateDriver,
@@ -994,7 +1432,26 @@ app.get(
   })
 );
 
-// GET /api/driver/support/:id - Get single support ticket
+/**
+ * @openapi
+ * /api/driver/support/{id}:
+ *   get:
+ *     tags: [Support]
+ *     summary: Get support ticket
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Support ticket details
+ *       404:
+ *         description: Ticket not found
+ */
 app.get('/api/driver/support/:id', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const { id } = req.params;
 
@@ -1030,7 +1487,19 @@ app.get('/api/driver/support/:id', authenticateDriver, asyncHandler(async (req: 
 }));
 
 // ==================== DRIVER SETTINGS ====================
-// GET /api/driver/settings - Get driver settings
+
+/**
+ * @openapi
+ * /api/driver/settings:
+ *   get:
+ *     tags: [Settings]
+ *     summary: Get driver settings
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Driver settings
+ */
 app.get('/api/driver/settings', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({
     where: { userId: req.user!.id },
@@ -1067,7 +1536,34 @@ app.get('/api/driver/settings', authenticateDriver, asyncHandler(async (req: Aut
   });
 }));
 
-// PUT /api/driver/settings - Update driver settings
+/**
+ * @openapi
+ * /api/driver/settings:
+ *   put:
+ *     tags: [Settings]
+ *     summary: Update driver settings
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notifications_enabled:
+ *                 type: boolean
+ *               preferred_language:
+ *                 type: string
+ *               vehicle_model:
+ *                 type: string
+ *               vehicle_color:
+ *                 type: string
+ *               vehicle_year:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Settings updated
+ */
 app.put(
   '/api/driver/settings',
   authenticateDriver,
@@ -1134,7 +1630,19 @@ app.put(
 // ==================== ONBOARDING ENDPOINTS ====================
 
 /**
- * Step 1: Start onboarding - creates driver profile
+ * @openapi
+ * /api/driver/onboarding/start:
+ *   post:
+ *     tags: [Onboarding]
+ *     summary: Start driver onboarding
+ *     description: Creates driver profile or returns existing one
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Existing driver profile
+ *       201:
+ *         description: New driver profile created
  */
 app.post('/api/driver/onboarding/start', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   let driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
@@ -1655,7 +2163,28 @@ app.get('/api/driver/documents/:id/verification-status', authenticate, asyncHand
 }));
 
 /**
- * Get onboarding status with detailed verification info
+ * @openapi
+ * /api/driver/onboarding/status:
+ *   get:
+ *     tags: [Onboarding]
+ *     summary: Get onboarding status
+ *     description: Returns detailed onboarding and verification status
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Onboarding status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   $ref: '#/components/schemas/OnboardingStatus'
+ *       404:
+ *         description: Driver not found
  */
 app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id }, include: { documents: true, user: true } });

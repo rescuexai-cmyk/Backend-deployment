@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, asyncHandler } from '@raahi/shared';
+import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { calculateFare, calculateAllFares, finalizeFare, getNearbyDrivers, getPricingRules } from './pricingService';
 import { validatePromo, calculatePromoDiscount, getActivePromosForUser } from './promoService';
@@ -13,13 +13,69 @@ const PORT = process.env.PORT || 5005;
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
 
+// Setup Swagger documentation
+setupSwagger(app, {
+  title: 'Pricing Service API',
+  version: '1.0.0',
+  description: 'Raahi Pricing Service - Fare calculation, nearby drivers, and promo codes',
+  port: Number(PORT),
+  basePath: '/api/pricing',
+  apis: [__filename],
+});
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Health check endpoint
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'pricing-service', timestamp: new Date().toISOString() });
 });
 
 /**
- * POST /api/pricing/calculate
- * Calculate fare for a single vehicle type (defaults to "cab").
+ * @openapi
+ * /api/pricing/calculate:
+ *   post:
+ *     tags: [Pricing]
+ *     summary: Calculate fare for a ride
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pickupLat, pickupLng, dropLat, dropLng]
+ *             properties:
+ *               pickupLat:
+ *                 type: number
+ *               pickupLng:
+ *                 type: number
+ *               dropLat:
+ *                 type: number
+ *               dropLng:
+ *                 type: number
+ *               vehicleType:
+ *                 type: string
+ *               scheduledTime:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       200:
+ *         description: Fare estimate
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   $ref: '#/components/schemas/FareBreakdown'
  */
 app.post(
   '/api/pricing/calculate',
@@ -52,8 +108,33 @@ app.post(
 );
 
 /**
- * POST /api/pricing/calculate-all
- * Calculate fares for ALL vehicle types in one call.
+ * @openapi
+ * /api/pricing/calculate-all:
+ *   post:
+ *     tags: [Pricing]
+ *     summary: Calculate fares for all vehicle types
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pickupLat, pickupLng, dropLat, dropLng]
+ *             properties:
+ *               pickupLat:
+ *                 type: number
+ *               pickupLng:
+ *                 type: number
+ *               dropLat:
+ *                 type: number
+ *               dropLng:
+ *                 type: number
+ *               scheduledTime:
+ *                 type: string
+ *                 format: date-time
+ *     responses:
+ *       200:
+ *         description: Fare estimates for all vehicle types
  */
 app.post(
   '/api/pricing/calculate-all',
@@ -84,8 +165,36 @@ app.post(
 );
 
 /**
- * POST /api/pricing/finalize
- * Compute final fare post-ride (Algorithm 3).
+ * @openapi
+ * /api/pricing/finalize:
+ *   post:
+ *     tags: [Pricing]
+ *     summary: Finalize fare after ride completion
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rideId, dynamicFare]
+ *             properties:
+ *               rideId:
+ *                 type: string
+ *               dynamicFare:
+ *                 type: number
+ *               tolls:
+ *                 type: number
+ *               waitingMinutes:
+ *                 type: number
+ *               parkingFees:
+ *                 type: number
+ *               extraStopsCount:
+ *                 type: integer
+ *               discountPercent:
+ *                 type: number
+ *     responses:
+ *       200:
+ *         description: Final fare calculated
  */
 app.post(
   '/api/pricing/finalize',
@@ -136,7 +245,34 @@ app.post(
 );
 
 /**
- * GET /api/pricing/nearby-drivers
+ * @openapi
+ * /api/pricing/nearby-drivers:
+ *   get:
+ *     tags: [Pricing]
+ *     summary: Get nearby available drivers
+ *     parameters:
+ *       - in: query
+ *         name: lat
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: lng
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: radius
+ *         schema:
+ *           type: number
+ *           default: 5
+ *       - in: query
+ *         name: vehicleType
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of nearby drivers
  */
 app.get(
   '/api/pricing/nearby-drivers',
