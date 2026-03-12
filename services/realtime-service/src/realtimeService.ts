@@ -11,6 +11,29 @@ let io: SocketServer | null = null;
 // Push notification service configuration
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:5006';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+const RIDE_OFFER_PUSH_EVENT = 'NEW_RIDE_REQUEST';
+const RIDE_OFFER_PUSH_TTL_MS = 30_000;
+const rideOfferPushDedupe = new Map<string, number>();
+
+function shouldSendRideOfferPush(rideId: string, driverId: string): boolean {
+  const now = Date.now();
+  const dedupeKey = `${rideId}:${driverId}:${RIDE_OFFER_PUSH_EVENT}`;
+
+  // Opportunistic cleanup of expired keys
+  for (const [key, expiresAt] of rideOfferPushDedupe.entries()) {
+    if (expiresAt <= now) {
+      rideOfferPushDedupe.delete(key);
+    }
+  }
+
+  const expiresAt = rideOfferPushDedupe.get(dedupeKey);
+  if (expiresAt && expiresAt > now) {
+    return false;
+  }
+
+  rideOfferPushDedupe.set(dedupeKey, now + RIDE_OFFER_PUSH_TTL_MS);
+  return true;
+}
 
 /**
  * Send push notification for new ride request to a driver
@@ -19,7 +42,16 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service
 async function sendRideRequestPushNotification(
   driverId: string,
   rideId: string,
-  rideData: { pickupAddress: string; totalFare: number; distance: number }
+  rideData: {
+    pickupAddress: string;
+    totalFare: number;
+    distance: number;
+    pickupLatitude?: number;
+    pickupLongitude?: number;
+    dropLatitude?: number;
+    dropLongitude?: number;
+    vehicleType?: string;
+  }
 ): Promise<void> {
   try {
     // Get driver's user ID for push notification
@@ -33,7 +65,7 @@ async function sendRideRequestPushNotification(
       return;
     }
 
-    const response = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/ride-push`, {
+    const response = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -41,12 +73,20 @@ async function sendRideRequestPushNotification(
       },
       body: JSON.stringify({
         userId: driver.userId,
-        event: 'NEW_RIDE_REQUEST',
-        rideId,
-        eventData: {
+        title: 'New Ride Request',
+        body: 'Pickup nearby',
+        data: {
+          type: 'RIDE_UPDATE',
+          event: RIDE_OFFER_PUSH_EVENT,
+          rideId,
           pickupAddress: rideData.pickupAddress,
-          estimatedFare: rideData.totalFare,
-          distance: rideData.distance,
+          pickupLat: rideData.pickupLatitude?.toString() ?? '',
+          pickupLng: rideData.pickupLongitude?.toString() ?? '',
+          dropLat: rideData.dropLatitude?.toString() ?? '',
+          dropLng: rideData.dropLongitude?.toString() ?? '',
+          fareEstimate: rideData.totalFare.toString(),
+          vehicleType: rideData.vehicleType || '',
+          distance: rideData.distance.toString(),
         },
       }),
     });
@@ -54,7 +94,7 @@ async function sendRideRequestPushNotification(
     if (response.ok) {
       const result = await response.json();
       if (result.success) {
-        logger.info(`[PUSH] Sent NEW_RIDE_REQUEST to driver ${driverId}`);
+        logger.info(`[PUSH] Sent ${RIDE_OFFER_PUSH_EVENT} to driver ${driverId}`);
       }
     }
   } catch (error) {
@@ -372,15 +412,7 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
       } else {
         driversNotConnected.push(driverId);
         logger.warn(`[BROADCAST]   ❌ Driver ${driverId} NOT in room (tracked: ${isTracked}, room size: ${roomSize})`);
-        
-        // Send push notification as fallback for drivers not connected to socket
-        // This ensures drivers with app in background still get notified
-        sendRideRequestPushNotification(driverId, rideId, {
-          pickupAddress: rideData.pickupAddress,
-          totalFare: rideData.totalFare,
-          distance: rideData.distance,
-        }).catch(err => logger.warn(`[PUSH] Push fallback failed for ${driverId}`, { error: err }));
-        
+
         // P0 INCONSISTENCY: Driver is in DB as online but not connected to socket
         if (isTracked) {
           logger.error(`[BROADCAST]   🚨 P0 INCONSISTENCY: Driver ${driverId} is tracked but room is empty!`);
@@ -389,6 +421,29 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
       }
     });
   }
+
+  // STEP 1.5: Always send push notification for ride offers to all matched drivers.
+  // Non-blocking and deduped by rideId:driverId:event with 30s TTL.
+  const uniqueDriverIds = Array.from(new Set(driverIds));
+  void Promise.allSettled(
+    uniqueDriverIds.map((driverId) => {
+      if (!shouldSendRideOfferPush(rideId, driverId)) {
+        logger.debug(`[PUSH] Dedupe hit for ${rideId}:${driverId}:${RIDE_OFFER_PUSH_EVENT}`);
+        return Promise.resolve();
+      }
+
+      return sendRideRequestPushNotification(driverId, rideId, {
+        pickupAddress: rideData.pickupAddress,
+        totalFare: Number(rideData.totalFare || 0),
+        distance: Number(rideData.distance || 0),
+        pickupLatitude: rideData.pickupLatitude,
+        pickupLongitude: rideData.pickupLongitude,
+        dropLatitude: rideData.dropLatitude,
+        dropLongitude: rideData.dropLongitude,
+        vehicleType: rideData.vehicleType,
+      });
+    }),
+  );
   
   // STEP 2: DO NOT broadcast ride requests to generic available-drivers room.
   // This prevents cross-vehicle leakage (e.g., bike requests reaching cab drivers).

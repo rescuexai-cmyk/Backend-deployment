@@ -578,6 +578,8 @@ app.get('/api/driver/earnings', authenticateDriver, asyncHandler(async (req: Aut
   res.json({
     success: true,
     data: {
+      rating: driver.rating,
+      rating_count: driver.ratingCount,
       window_type: windowType,
       platform_fee_rate: platformFeeRate,
       today: {
