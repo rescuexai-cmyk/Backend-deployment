@@ -183,6 +183,7 @@ function generateRideOtp(): string {
  * @param includeOtp - Whether to include the OTP (only for passenger)
  */
 function formatRide(ride: any, includeOtp: boolean = false) {
+  const passengerPhone = ride.passenger?.phone ?? null;
   return {
     id: ride.id,
     passengerId: ride.passengerId,
@@ -204,6 +205,8 @@ function formatRide(ride: any, includeOtp: boolean = false) {
     paymentMethod: ride.paymentMethod,
     paymentStatus: ride.paymentStatus,
     vehicleType: ride.vehicleType,
+    passengerPhone,
+    rider_phone: passengerPhone,
     rideOtp: includeOtp ? ride.rideOtp : undefined,
     scheduledAt: ride.scheduledAt,
     startedAt: ride.startedAt,
@@ -229,6 +232,15 @@ function formatRide(ride: any, includeOtp: boolean = false) {
                 heading: ride.driver.currentHeading,
               }
             : null,
+        }
+      : undefined,
+    passenger: ride.passenger
+      ? {
+          id: ride.passenger.id,
+          firstName: ride.passenger.firstName,
+          lastName: ride.passenger.lastName,
+          phone: passengerPhone,
+          email: ride.passenger.email,
         }
       : undefined,
   };
@@ -535,6 +547,7 @@ export async function assignDriver(rideId: string, driverId: string) {
         status: 'DRIVER_ASSIGNED',
       },
       include: {
+        passenger: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
         driver: {
           include: {
             user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
