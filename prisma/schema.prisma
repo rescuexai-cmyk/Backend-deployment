@@ -280,6 +280,7 @@ model Ride {
   driver            Driver?   @relation("DriverRides", fields: [driverId], references: [id])
   tracking          RideTracking[]
   messages          RideMessage[]
+  chatParticipants  RideChatParticipant[]
   shareTokens       RideShareToken[]
   
   @@index([passengerId])
@@ -326,6 +327,7 @@ model RideMessage {
   id                String    @id @default(cuid())
   rideId            String
   senderId          String
+  clientMessageId   String?
   message           String    @db.VarChar(1000)
   timestamp         DateTime  @default(now())
   
@@ -334,7 +336,27 @@ model RideMessage {
   
   @@index([rideId])
   @@index([timestamp])
+  @@unique([rideId, senderId, clientMessageId])
   @@map("ride_messages")
+}
+
+model RideChatParticipant {
+  id          String   @id @default(cuid())
+  rideId      String
+  userId      String
+  lastReadAt  DateTime?
+  unreadCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  ride        Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+
+  @@unique([rideId, userId])
+  @@index([rideId])
+  @@index([userId])
+  @@index([rideId, userId, lastReadAt])
+  @@map("ride_chat_participants")
 }
 
 model RefreshToken {

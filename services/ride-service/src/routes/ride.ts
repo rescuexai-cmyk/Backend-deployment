@@ -9,6 +9,89 @@ import * as rideService from '../rideService';
 import { broadcastRideChatMessage } from '../httpClients';
 
 const router = express.Router();
+const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://notification-service:5006';
+const REALTIME_SERVICE_URL = process.env.REALTIME_SERVICE_URL || 'http://realtime-service:5007';
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+type RideChatAccess = {
+  ride: {
+    id: string;
+    passengerId: string;
+    driverId: string | null;
+  };
+  driverUserId: string | null;
+  isParticipant: boolean;
+};
+
+async function getRideChatAccess(rideId: string, userId: string): Promise<RideChatAccess | null> {
+  const ride = await prisma.ride.findUnique({
+    where: { id: rideId },
+    select: { id: true, passengerId: true, driverId: true },
+  });
+  if (!ride) return null;
+
+  let driverUserId: string | null = null;
+  if (ride.driverId) {
+    const driver = await prisma.driver.findUnique({
+      where: { id: ride.driverId },
+      select: { userId: true },
+    });
+    driverUserId = driver?.userId ?? null;
+  }
+
+  const isParticipant = userId === ride.passengerId || (driverUserId != null && userId === driverUserId);
+  return { ride, driverUserId, isParticipant };
+}
+
+async function isRecipientChatOpen(rideId: string, userId: string): Promise<boolean> {
+  try {
+    const q = new URLSearchParams({ rideId, userId });
+    const response = await fetch(`${REALTIME_SERVICE_URL}/internal/chat-presence?${q.toString()}`, {
+      method: 'GET',
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+    });
+    if (!response.ok) return false;
+    const payload = await response.json() as { success?: boolean; data?: { isChatOpen?: boolean } };
+    return payload.success === true && payload.data?.isChatOpen === true;
+  } catch {
+    return false;
+  }
+}
+
+async function sendChatPushNotification(params: {
+  recipientUserId: string;
+  senderLabel: 'Driver' | 'Passenger';
+  messageText: string;
+  rideId: string;
+  senderId: string;
+  messageId: string;
+}): Promise<void> {
+  try {
+    await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-api-key': INTERNAL_API_KEY,
+      },
+      body: JSON.stringify({
+        userId: params.recipientUserId,
+        title: `New message from ${params.senderLabel}`,
+        body: `${params.senderLabel}: ${params.messageText}`,
+        data: {
+          type: 'RIDE_UPDATE',
+          messageType: 'RIDE_CHAT',
+          rideId: params.rideId,
+          senderId: params.senderId,
+          messageId: params.messageId,
+          deepLink: `raahi://ride-chat/${params.rideId}`,
+        },
+        saveToDb: false,
+      }),
+    });
+  } catch {
+    // Non-critical path: never break chat persistence/realtime on push failure.
+  }
+}
 
 /**
  * @openapi
@@ -921,80 +1004,260 @@ router.get('/:id/receipt', authenticate, asyncHandler(async (req: AuthRequest, r
 
 // Chat messages
 router.get('/:id/messages', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
-  const ride = await prisma.ride.findUnique({ where: { id: req.params.id } });
-  if (!ride) {
+  const access = await getRideChatAccess(req.params.id, req.user!.id);
+  if (!access) {
     res.status(404).json({ success: false, message: 'Ride not found' });
     return;
   }
-  
-  // Check access: passenger can always access, driver needs lookup
-  let hasAccess = ride.passengerId === req.user!.id;
-  if (!hasAccess && ride.driverId) {
-    const driver = await prisma.driver.findUnique({
-      where: { userId: req.user!.id },
-      select: { id: true }
-    });
-    hasAccess = driver?.id === ride.driverId;
-  }
-  
-  if (!hasAccess) {
+
+  if (!access.isParticipant) {
     res.status(403).json({ success: false, message: 'Access denied' });
     return;
   }
-  
+
   const messages = await prisma.rideMessage.findMany({
     where: { rideId: req.params.id },
     orderBy: { timestamp: 'asc' },
   });
-  res.status(200).json({ success: true, data: { messages } });
+  const participant = await prisma.rideChatParticipant.findUnique({
+    where: { rideId_userId: { rideId: req.params.id, userId: req.user!.id } },
+    select: { lastReadAt: true, unreadCount: true },
+  });
+  res.status(200).json({
+    success: true,
+    data: {
+      messages,
+      unreadCount: participant?.unreadCount ?? 0,
+      lastReadAt: participant?.lastReadAt ?? null,
+    },
+  });
 }));
 
 router.post(
   '/:id/messages',
   authenticate,
-  [body('message').isString().notEmpty()],
+  [
+    body('message').isString().notEmpty(),
+    body('clientMessageId').optional().isString().isLength({ min: 8, max: 120 }),
+  ],
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const ride = await prisma.ride.findUnique({ where: { id: req.params.id } });
-    if (!ride) {
+    const access = await getRideChatAccess(req.params.id, req.user!.id);
+    if (!access) {
       res.status(404).json({ success: false, message: 'Ride not found' });
       return;
     }
-    
-    // Check access: passenger can always access, driver needs lookup
-    let hasAccess = ride.passengerId === req.user!.id;
-    if (!hasAccess && ride.driverId) {
-      const driver = await prisma.driver.findUnique({
-        where: { userId: req.user!.id },
-        select: { id: true }
-      });
-      hasAccess = driver?.id === ride.driverId;
-    }
-    
-    if (!hasAccess) {
+
+    if (!access.isParticipant) {
       res.status(403).json({ success: false, message: 'Access denied' });
       return;
     }
-    
-    const chatMessage = await prisma.rideMessage.create({
-      data: {
-        rideId: req.params.id,
-        senderId: req.user!.id,
-        message: req.body.message,
-      },
+
+    const messageText = (req.body.message as string).trim();
+    const clientMessageId = (req.body.clientMessageId as string | undefined)?.trim() || null;
+    const senderId = req.user!.id;
+    const isSenderPassenger = senderId === access.ride.passengerId;
+    const receiverUserId = isSenderPassenger ? access.driverUserId : access.ride.passengerId;
+
+    if (!receiverUserId) {
+      res.status(400).json({ success: false, message: 'Receiver not available for this ride' });
+      return;
+    }
+
+    // Idempotency guard: retries must not duplicate message, unread, or push.
+    if (clientMessageId) {
+      const existing = await prisma.rideMessage.findFirst({
+        where: {
+          rideId: req.params.id,
+          senderId,
+          clientMessageId,
+        },
+      });
+      if (existing) {
+        res.status(200).json({
+          success: true,
+          data: { message: existing, idempotent: true },
+        });
+        return;
+      }
+    }
+
+    const now = new Date();
+    const { chatMessage, unreadCountForReceiver } = await prisma.$transaction(async (tx) => {
+      const chatMessage = await tx.rideMessage.create({
+        data: {
+          rideId: req.params.id,
+          senderId,
+          clientMessageId,
+          message: messageText,
+        },
+      });
+
+      // Ensure participant rows exist for both sides.
+      await tx.rideChatParticipant.upsert({
+        where: { rideId_userId: { rideId: req.params.id, userId: senderId } },
+        update: {},
+        create: {
+          rideId: req.params.id,
+          userId: senderId,
+          lastReadAt: now,
+          unreadCount: 0,
+        },
+      });
+      await tx.rideChatParticipant.upsert({
+        where: { rideId_userId: { rideId: req.params.id, userId: receiverUserId } },
+        update: {
+          unreadCount: { increment: 1 },
+        },
+        create: {
+          rideId: req.params.id,
+          userId: receiverUserId,
+          lastReadAt: null,
+          unreadCount: 1,
+        },
+      });
+
+      // Keep unreadCount aligned with lastReadAt semantics.
+      const receiverParticipant = await tx.rideChatParticipant.findUnique({
+        where: { rideId_userId: { rideId: req.params.id, userId: receiverUserId } },
+        select: { lastReadAt: true },
+      });
+      const unreadCountForReceiver = await tx.rideMessage.count({
+        where: {
+          rideId: req.params.id,
+          senderId: { not: receiverUserId },
+          timestamp: receiverParticipant?.lastReadAt
+              ? { gt: receiverParticipant.lastReadAt }
+              : undefined,
+        },
+      });
+      await tx.rideChatParticipant.update({
+        where: { rideId_userId: { rideId: req.params.id, userId: receiverUserId } },
+        data: { unreadCount: unreadCountForReceiver },
+      });
+
+      return { chatMessage, unreadCountForReceiver };
     });
-    // Broadcast to ride room so driver/passenger get message in real time
+
+    // Broadcast to ride room so driver/passenger get message in real time.
     await broadcastRideChatMessage(req.params.id, {
       id: chatMessage.id,
       senderId: chatMessage.senderId,
       message: chatMessage.message,
       timestamp: chatMessage.timestamp,
     });
-    res.status(201).json({ success: true, data: { message: chatMessage } });
+
+    // Push only when recipient is NOT actively viewing this ride chat.
+    const chatOpen = await isRecipientChatOpen(req.params.id, receiverUserId);
+    if (!chatOpen) {
+      await sendChatPushNotification({
+        recipientUserId: receiverUserId,
+        senderLabel: isSenderPassenger ? 'Passenger' : 'Driver',
+        messageText,
+        rideId: req.params.id,
+        senderId,
+        messageId: chatMessage.id,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      data: {
+        message: chatMessage,
+        unreadCount: unreadCountForReceiver,
+      },
+    });
+  })
+);
+
+router.post(
+  '/:id/messages/read',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const access = await getRideChatAccess(req.params.id, req.user!.id);
+    if (!access) {
+      res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+    if (!access.isParticipant) {
+      res.status(403).json({ success: false, message: 'Access denied' });
+      return;
+    }
+
+    const now = new Date();
+    await prisma.rideChatParticipant.upsert({
+      where: { rideId_userId: { rideId: req.params.id, userId: req.user!.id } },
+      update: {
+        lastReadAt: now,
+        unreadCount: 0,
+      },
+      create: {
+        rideId: req.params.id,
+        userId: req.user!.id,
+        lastReadAt: now,
+        unreadCount: 0,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      data: { rideId: req.params.id, lastReadAt: now.toISOString(), unreadCount: 0 },
+    });
+  })
+);
+
+router.get(
+  '/:id/messages/unread-count',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const access = await getRideChatAccess(req.params.id, req.user!.id);
+    if (!access) {
+      res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+    if (!access.isParticipant) {
+      res.status(403).json({ success: false, message: 'Access denied' });
+      return;
+    }
+
+    const participant = await prisma.rideChatParticipant.findUnique({
+      where: { rideId_userId: { rideId: req.params.id, userId: req.user!.id } },
+      select: { lastReadAt: true, unreadCount: true },
+    });
+
+    const unreadCount = await prisma.rideMessage.count({
+      where: {
+        rideId: req.params.id,
+        senderId: { not: req.user!.id },
+        timestamp: participant?.lastReadAt ? { gt: participant.lastReadAt } : undefined,
+      },
+    });
+
+    if ((participant?.unreadCount ?? 0) != unreadCount) {
+      await prisma.rideChatParticipant.upsert({
+        where: { rideId_userId: { rideId: req.params.id, userId: req.user!.id } },
+        update: { unreadCount },
+        create: {
+          rideId: req.params.id,
+          userId: req.user!.id,
+          lastReadAt: participant?.lastReadAt ?? null,
+          unreadCount,
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        rideId: req.params.id,
+        unreadCount,
+        lastReadAt: participant?.lastReadAt ?? null,
+      },
+    });
   })
 );
 

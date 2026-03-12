@@ -75,6 +75,8 @@ setIo(io);
 const connectedDrivers = new Map<string, string>(); // socketId -> driverId
 const driverSockets = new Map<string, Set<string>>(); // driverId -> Set of socketIds (for multi-device)
 const userIdToDriverId = new Map<string, string>(); // userId -> driverId (for ID translation)
+const openChatSessions = new Map<string, Set<string>>(); // rideId -> Set<userId>
+const chatSessionsBySocket = new Map<string, Set<string>>(); // socketId -> Set<rideId|userId>
 
 // Share maps with realtimeService for broadcast verification
 setDriverMaps(connectedDrivers, driverSockets);
@@ -312,6 +314,31 @@ io.on('connection', (socket) => {
     updateActivity();
     socket.join(`ride-${rideId}`);
     logger.debug(`[SOCKET] Socket ${socket.id} joined ride room: ride-${rideId}`);
+  });
+
+  socket.on('chat-open', (raw: unknown) => {
+    const payload = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+    const rideId = typeof payload.rideId === 'string' ? payload.rideId.trim() : '';
+    const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+    if (!rideId || !userId) return;
+    updateActivity();
+    if (!openChatSessions.has(rideId)) openChatSessions.set(rideId, new Set<string>());
+    openChatSessions.get(rideId)!.add(userId);
+    if (!chatSessionsBySocket.has(socket.id)) chatSessionsBySocket.set(socket.id, new Set<string>());
+    chatSessionsBySocket.get(socket.id)!.add(`${rideId}|${userId}`);
+  });
+
+  socket.on('chat-close', (raw: unknown) => {
+    const payload = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+    const rideId = typeof payload.rideId === 'string' ? payload.rideId.trim() : '';
+    const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+    if (!rideId || !userId) return;
+    updateActivity();
+    const users = openChatSessions.get(rideId);
+    if (!users) return;
+    users.delete(userId);
+    if (users.size === 0) openChatSessions.delete(rideId);
+    chatSessionsBySocket.get(socket.id)?.delete(`${rideId}|${userId}`);
   });
   
   socket.on('leave-ride', (rideId: string) => {
@@ -565,6 +592,18 @@ io.on('connection', (socket) => {
   });
   
   socket.on('disconnect', async (reason) => {
+    const sessions = chatSessionsBySocket.get(socket.id);
+    if (sessions) {
+      for (const key of sessions) {
+        const [rideId, userId] = key.split('|');
+        const users = openChatSessions.get(rideId);
+        if (!users) continue;
+        users.delete(userId);
+        if (users.size === 0) openChatSessions.delete(rideId);
+      }
+      chatSessionsBySocket.delete(socket.id);
+    }
+
     const driverId = connectedDrivers.get(socket.id);
     if (driverId) {
       connectedDrivers.delete(socket.id);
@@ -1084,6 +1123,22 @@ app.post('/internal/broadcast-ride-chat', authenticateInternal, express.json(), 
     timestamp: message.timestamp ? new Date(message.timestamp) : new Date(),
   });
   res.status(200).json({ success: true });
+}));
+
+app.get('/internal/chat-presence', authenticateInternal, asyncHandler(async (req, res) => {
+  const rideId = (req.query.rideId as string | undefined)?.trim();
+  const userId = (req.query.userId as string | undefined)?.trim();
+  if (!rideId || !userId) {
+    res.status(400).json({ success: false, message: 'rideId and userId are required' });
+    return;
+  }
+
+  const users = openChatSessions.get(rideId);
+  const isChatOpen = users?.has(userId) ?? false;
+  res.status(200).json({
+    success: true,
+    data: { rideId, userId, isChatOpen },
+  });
 }));
 
 // ════════════════════════════════════════════════════════════════════════════════
