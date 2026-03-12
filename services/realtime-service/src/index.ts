@@ -415,6 +415,133 @@ io.on('connection', (socket) => {
     });
     logger.info(`Driver ${data.driverId} arrived for ride ${data.rideId}`);
   });
+
+  type RideMessagePayload = {
+    rideId?: unknown;
+    message?: unknown;
+    clientMessageId?: unknown;
+    sender?: unknown;
+    senderId?: unknown;
+    userId?: unknown;
+    senderName?: unknown;
+    timestamp?: unknown;
+  };
+
+  type AckPayload = {
+    ok: boolean;
+    messageId?: string;
+    deliveredAt?: string;
+    error?: string;
+  };
+
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+  const asString = (value: unknown): string =>
+    typeof value === 'string' ? value : '';
+
+  // Chat message with guaranteed ack.
+  // Note: persistence still happens in ride-service REST endpoint, which then
+  // broadcasts canonical chat events. This socket ack confirms realtime receipt.
+  socket.on(
+    'ride-message',
+    async (raw: RideMessagePayload, ack?: (response: AckPayload) => void) => {
+      updateActivity();
+      const payload = asRecord(raw);
+      const rideId = asString(payload.rideId).trim();
+      const messageText = asString(payload.message).trim();
+
+      if (!rideId || !messageText) {
+        ack?.({ ok: false, error: 'rideId and message are required' });
+        return;
+      }
+
+      try {
+        const ride = await prisma.ride.findUnique({
+          where: { id: rideId },
+          select: { id: true },
+        });
+        if (!ride) {
+          ack?.({ ok: false, error: 'ride not found' });
+          return;
+        }
+
+        const clientMessageId = asString(payload.clientMessageId).trim();
+        const timestamp = new Date().toISOString();
+
+        ack?.({
+          ok: true,
+          // Echo client temp id so client can correlate ack deterministically.
+          messageId: clientMessageId || undefined,
+          deliveredAt: timestamp,
+        });
+      } catch (error) {
+        logger.error('[SOCKET] ride-message handler failed', {
+          rideId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        ack?.({ ok: false, error: 'failed to process ride-message' });
+      }
+    }
+  );
+
+  // Typing indicators (room fan-out for chat header UX)
+  socket.on('typing-start', (raw: unknown) => {
+    updateActivity();
+    const payload = asRecord(raw);
+    const rideId = asString(payload.rideId).trim();
+    if (!rideId) return;
+    const userId = asString(payload.userId) || asString(payload.senderId);
+    io.to(`ride-${rideId}`).emit('typing-start', {
+      rideId,
+      userId,
+      senderId: userId,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  socket.on('typing-stop', (raw: unknown) => {
+    updateActivity();
+    const payload = asRecord(raw);
+    const rideId = asString(payload.rideId).trim();
+    if (!rideId) return;
+    const userId = asString(payload.userId) || asString(payload.senderId);
+    io.to(`ride-${rideId}`).emit('typing-stop', {
+      rideId,
+      userId,
+      senderId: userId,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Delivery/read receipts pass-through for WhatsApp-style ticks.
+  socket.on('message-delivered', (raw: unknown) => {
+    updateActivity();
+    const payload = asRecord(raw);
+    const rideId = asString(payload.rideId).trim();
+    const messageId = asString(payload.messageId).trim();
+    if (!rideId || !messageId) return;
+    io.to(`ride-${rideId}`).emit('message-delivered', {
+      rideId,
+      messageId,
+      receiverId: asString(payload.receiverId),
+      deliveredAt: new Date().toISOString(),
+    });
+  });
+
+  socket.on('message-read', (raw: unknown) => {
+    updateActivity();
+    const payload = asRecord(raw);
+    const rideId = asString(payload.rideId).trim();
+    const messageId = asString(payload.messageId).trim();
+    if (!rideId || !messageId) return;
+    io.to(`ride-${rideId}`).emit('message-read', {
+      rideId,
+      messageId,
+      readerId: asString(payload.readerId),
+      readAt: new Date().toISOString(),
+    });
+  });
   
   // Driver location update during ride — uses RAMEN + Fireball (no DB writes)
   socket.on('location-update', async (data: { rideId: string; lat: number; lng: number; heading?: number; speed?: number }) => {
