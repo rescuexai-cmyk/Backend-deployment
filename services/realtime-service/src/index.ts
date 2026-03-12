@@ -164,7 +164,17 @@ io.on('connection', (socket) => {
     // CRITICAL: Verify driver is actually online in DB
     const dbDriver = await prisma.driver.findUnique({
       where: { id: driverId },
-      select: { id: true, userId: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true, currentLatitude: true, currentLongitude: true },
+      select: {
+        id: true,
+        userId: true,
+        isOnline: true,
+        isActive: true,
+        isVerified: true,
+        onboardingStatus: true,
+        currentLatitude: true,
+        currentLongitude: true,
+        vehicleType: true,
+      },
     });
     
     if (!dbDriver) {
@@ -269,7 +279,7 @@ io.on('connection', (socket) => {
         profileImage: null,
         vehicleNumber: null,
         vehicleModel: null,
-        vehicleType: null,
+        vehicleType: dbDriver.vehicleType ?? null,
         rating: 0,
         ratingCount: 0,
         totalRides: 0,

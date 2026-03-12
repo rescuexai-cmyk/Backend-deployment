@@ -390,18 +390,10 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     });
   }
   
-  // STEP 2: Broadcast to all available drivers room as fallback (Socket.io)
-  const availableDriversRoom = io.sockets.adapter.rooms.get('available-drivers');
-  result.availableDrivers = availableDriversRoom?.size || 0;
-  
-  logger.info(`[BROADCAST] Step 2: Broadcasting to available-drivers room (${result.availableDrivers} sockets)`);
-  
-  if (result.availableDrivers > 0) {
-    io.to('available-drivers').emit('new-ride-request', payload);
-    logger.info(`[BROADCAST]   ✅ EMITTED to available-drivers room (Socket.io)`);
-  } else {
-    logger.warn(`[BROADCAST]   ⚠️ available-drivers room is EMPTY (Socket.io)`);
-  }
+  // STEP 2: DO NOT broadcast ride requests to generic available-drivers room.
+  // This prevents cross-vehicle leakage (e.g., bike requests reaching cab drivers).
+  result.availableDrivers = 0;
+  logger.info(`[BROADCAST] Step 2: Skipped generic available-drivers broadcast (vehicle-safe mode)`);
   
   // ── STEP 3: Broadcast via EventBus to SSE + MQTT transports ──────────────
   // This is the key improvement - SSE and MQTT provide reliable delivery
@@ -414,10 +406,10 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     payload,
   };
   
-  // 3a: Publish to available-drivers channel (SSE + MQTT subscribers)
-  const sseAvailableSize = eventBus.getTotalListeners(CHANNELS.availableDrivers);
-  eventBus.publish(CHANNELS.availableDrivers, rideRequestEvent);
-  logger.info(`[BROADCAST]   ✅ EventBus → available-drivers (${sseAvailableSize} listeners)`);
+  // 3a: Skip generic available-drivers EventBus broadcast for ride requests.
+  // Keep only targeted driver channels for strict vehicle matching.
+  const sseAvailableSize = 0;
+  logger.info(`[BROADCAST]   ⏭️ EventBus available-drivers broadcast skipped (vehicle-safe mode)`);
   
   // 3b: Publish to individual driver channels (SSE + MQTT)
   let eventBusDriversReached = 0;
@@ -430,26 +422,9 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
   }
   logger.info(`[BROADCAST]   ✅ EventBus → ${eventBusDriversReached}/${driverIds.length} individual drivers`);
   
-  // 3c: Publish to H3 cell channels for geospatial targeting (SSE + MQTT)
-  if (rideData.pickupLatitude && rideData.pickupLongitude) {
-    try {
-      const pickupH3 = latLngToH3(rideData.pickupLatitude, rideData.pickupLongitude);
-      const h3Config = getH3Config();
-      const nearbyCells = getKRing(pickupH3, h3Config.maxKRing);
-      
-      let h3Listeners = 0;
-      for (const cell of nearbyCells) {
-        const listeners = eventBus.getTotalListeners(CHANNELS.h3Cell(cell));
-        if (listeners > 0) {
-          eventBus.publish(CHANNELS.h3Cell(cell), rideRequestEvent);
-          h3Listeners += listeners;
-        }
-      }
-      logger.info(`[BROADCAST]   ✅ EventBus → H3 cells (${nearbyCells.length} cells, ${h3Listeners} listeners)`);
-    } catch (h3Error) {
-      logger.warn(`[BROADCAST]   ⚠️ H3 cell broadcast failed`, { error: h3Error });
-    }
-  }
+  // 3c: Skip generic H3 fanout for ride requests.
+  // H3 channels are geospatial only and not vehicle-segmented.
+  logger.info(`[BROADCAST]   ⏭️ EventBus H3 broadcast skipped for strict vehicle targeting`);
   
   // SUMMARY
   logger.info(`[BROADCAST] ========== BROADCAST SUMMARY ==========`);

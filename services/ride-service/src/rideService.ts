@@ -165,6 +165,37 @@ export interface CreateRideRequest {
   vehicleType?: string;
 }
 
+function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
+  if (!raw) return null;
+  const value = raw.toLowerCase().trim().replace(/-/g, '_');
+
+  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
+  if (value === 'auto') return 'auto';
+  if (
+    [
+      'cab',
+      'cab_mini',
+      'cab_sedan',
+      'cab_xl',
+      'cab_suv',
+      'cab_premium',
+      'personal_driver',
+      'commercial_car',
+    ].includes(value)
+  ) {
+    return 'cab';
+  }
+  return null;
+}
+
+function isDriverCompatibleForRide(rideVehicleType: string | null | undefined, driverVehicleType: string | null | undefined): boolean {
+  const rideKind = normalizeVehicleType(rideVehicleType);
+  if (!rideKind) return true; // Unknown ride type: keep legacy behavior.
+  const driverKind = normalizeVehicleType(driverVehicleType);
+  if (!driverKind) return false; // Be safe: unknown driver type should not receive typed ride.
+  return rideKind === driverKind;
+}
+
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
   return getDistance({ latitude: lat1, longitude: lng1 }, { latitude: lat2, longitude: lng2 }) / 1000;
 }
@@ -352,23 +383,22 @@ export async function createRide(req: CreateRideRequest) {
     logger.info(`[RIDE] Pickup: ${req.pickupAddress} (${req.pickupLat}, ${req.pickupLng})`);
     logger.info(`[RIDE] Fare: ₹${pricing.totalFare}`);
     
-    // Map ride's vehicle type to the driver-registration vehicle type for filtering
-    const driverVehicleTypes = req.vehicleType ? getCompatibleDriverVehicleTypes(req.vehicleType) : undefined;
-    const driverVehicleType = driverVehicleTypes?.length === 1 ? driverVehicleTypes[0] : undefined;
-    
     // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
     logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
-    logger.info(`[RIDE] Ride vehicleType: ${req.vehicleType}, mapped to driver types: ${JSON.stringify(driverVehicleTypes)}`);
-    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, driverVehicleType);
+    logger.info(`[RIDE] Ride vehicleType: ${req.vehicleType}, normalized=${normalizeVehicleType(req.vehicleType)}`);
+    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10);
     
     if (!nearbyDrivers) {
       logger.info(`[RIDE] RAMEN unavailable, falling back to DB query...`);
-      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, driverVehicleType);
+      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10);
     } else {
       logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
     }
-    
-    const driverIds = nearbyDrivers.map((d: { id: string }) => d.id);
+
+    const typeFilteredDrivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
+      isDriverCompatibleForRide(req.vehicleType, (d.vehicleType as string | null | undefined) ?? null),
+    );
+    const driverIds = typeFilteredDrivers.map((d: { id: string }) => d.id);
     
     logger.info(`[RIDE] Found ${driverIds.length} nearby drivers: ${JSON.stringify(driverIds)}`);
     
@@ -524,14 +554,11 @@ export async function assignDriver(rideId: string, driverId: string) {
       throw new Error('Driver is not online');
     }
 
-    // Validate vehicle type compatibility
-    if (currentRide.vehicleType && driver.vehicleType) {
-      const compatible = getCompatibleDriverVehicleTypes(currentRide.vehicleType);
-      if (!compatible.includes(driver.vehicleType)) {
-        throw new Error(
-          `Vehicle type mismatch: ride requires ${currentRide.vehicleType} but driver has ${driver.vehicleType}`
-        );
-      }
+    // Validate vehicle type compatibility (strict)
+    if (currentRide.vehicleType && !isDriverCompatibleForRide(currentRide.vehicleType, driver.vehicleType)) {
+      throw new Error(
+        `Vehicle type mismatch: ride requires ${currentRide.vehicleType} but driver has ${driver.vehicleType}`
+      );
     }
 
     // Perform the atomic update with WHERE clause to ensure no concurrent modification
@@ -1108,27 +1135,6 @@ export async function cancelRide(rideId: string, cancelledBy: 'passenger' | 'dri
   return formatRide(ride);
 }
 
-/**
- * Map a ride's vehicleType to compatible driver vehicleType values.
- * Passengers pick: bike_rescue, auto, cab_mini, cab_xl, cab_premium, personal_driver
- * Drivers register as: motorbike, auto, commercial_car
- */
-function getCompatibleDriverVehicleTypes(rideVehicleType: string | null): string[] {
-  switch (rideVehicleType) {
-    case 'bike_rescue':
-      return ['motorbike'];
-    case 'auto':
-      return ['auto'];
-    case 'cab_mini':
-    case 'cab_xl':
-    case 'cab_premium':
-    case 'personal_driver':
-      return ['commercial_car'];
-    default:
-      return ['motorbike', 'auto', 'commercial_car'];
-  }
-}
-
 export async function getAvailableRidesForDriver(lat: number, lng: number, radiusKm: number, _driverId: string) {
   // Fetch driver's vehicle type to only show compatible rides
   const driverRecord = await prisma.driver.findUnique({
@@ -1148,11 +1154,7 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
 
   const filtered = pendingRides.filter((r) => {
     if (calcDistance(lat, lng, r.pickupLatitude, r.pickupLongitude) > radiusKm) return false;
-    // If ride has a vehicleType and driver has a vehicleType, they must be compatible
-    if (r.vehicleType && driverVehicleType) {
-      const compatibleTypes = getCompatibleDriverVehicleTypes(r.vehicleType);
-      if (!compatibleTypes.includes(driverVehicleType)) return false;
-    }
+    if (!isDriverCompatibleForRide(r.vehicleType, driverVehicleType)) return false;
     return true;
   });
 
