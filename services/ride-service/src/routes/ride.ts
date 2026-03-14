@@ -95,16 +95,30 @@ async function sendChatPushNotification(params: {
         saveToDb: false,
       }),
     });
+    const responseText = await response.text().catch(() => '');
+    if (response.ok) {
+      console.info('[CHAT-PUSH] Sent', {
+        recipientUserId: params.recipientUserId,
+        rideId: params.rideId,
+        senderId: params.senderId,
+      });
+      return;
+    }
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
       console.warn('[CHAT-PUSH] notification-service rejected push', {
         recipientUserId: params.recipientUserId,
         status: response.status,
-        body,
+        body: responseText,
       });
     }
-  } catch {
+  } catch (error) {
     // Non-critical path: never break chat persistence/realtime on push failure.
+    console.error('[CHAT-PUSH] Failed to call notification-service', {
+      recipientUserId: params.recipientUserId,
+      rideId: params.rideId,
+      senderId: params.senderId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -1101,8 +1115,16 @@ router.post(
     const messageText = (req.body.message as string).trim();
     const clientMessageId = (req.body.clientMessageId as string | undefined)?.trim() || null;
     const senderId = req.user!.id;
-    const isSenderPassenger = senderId === access.ride.passengerId;
-    const receiverUserId = isSenderPassenger ? access.driverUserId : access.ride.passengerId;
+    const senderRole = senderId === access.ride.passengerId
+      ? 'PASSENGER'
+      : senderId === access.driverUserId
+        ? 'DRIVER'
+        : 'UNKNOWN';
+    if (senderRole === 'UNKNOWN') {
+      res.status(403).json({ success: false, message: 'Sender is not a participant of this ride' });
+      return;
+    }
+    const receiverUserId = senderRole === 'DRIVER' ? access.ride.passengerId : access.driverUserId;
     const senderProfile = await prisma.user.findUnique({
       where: { id: senderId },
       select: { firstName: true, lastName: true },
@@ -1124,7 +1146,7 @@ router.post(
     });
     const fcmToken = recipientUser?.fcmToken ?? null;
     console.info('[CHAT-PUSH] Chat push target', {
-      senderRole: isSenderPassenger ? 'PASSENGER' : 'DRIVER',
+      senderRole,
       senderId,
       recipientId: receiverUserId,
       hasFcmToken: !!fcmToken,
@@ -1218,7 +1240,7 @@ router.post(
     // Always send chat push for parity on both sides, independent of socket/presence.
     await sendChatPushNotification({
       recipientUserId: receiverUserId,
-      senderRoleLabel: isSenderPassenger ? 'Passenger' : 'Driver',
+      senderRoleLabel: senderRole === 'PASSENGER' ? 'Passenger' : 'Driver',
       senderName,
       messageText,
       rideId: req.params.id,
