@@ -616,7 +616,11 @@ export async function assignDriver(rideId: string, driverId: string) {
   // CRITICAL: Send notification to passenger that driver is assigned — include OTP immediately
   if (passengerRide) {
     const driverName = ride.driver?.user ? `${ride.driver.user.firstName} ${ride.driver.user.lastName || ''}`.trim() : 'Your driver';
-    const vehicleInfo = `${ride.driver?.vehicleModel || 'Vehicle'} (${ride.driver?.vehicleNumber || ''})`;
+    const vehicleModel = (ride.driver?.vehicleModel || '').trim();
+    const vehicleNumber = (ride.driver?.vehicleNumber || '').trim();
+    const vehicleInfo = vehicleModel && vehicleNumber
+      ? `${vehicleModel} (${vehicleNumber})`
+      : (vehicleModel || vehicleNumber || 'Vehicle');
     
     // Send database notification with OTP so user sees it right away
     await createNotification({

@@ -321,9 +321,16 @@ export function buildDriverAssignedNotification(
   otp?: string
 ): PushNotificationPayload {
   const otpText = otp ? ` Your ride PIN: ${otp}` : '';
+  const cleanVehicleInfo = vehicleInfo
+    .replace(/\(\s*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  const vehicleSegment = cleanVehicleInfo.length > 0
+    ? ` in a ${cleanVehicleInfo}`
+    : '';
   return {
     title: '🚗 Driver Assigned!',
-    body: `${driverName} is on the way in a ${vehicleInfo}${eta ? `. ETA: ${eta} min` : ''}.${otpText}`,
+    body: `${driverName} is on the way${vehicleSegment}${eta ? `. ETA: ${eta} min` : ''}.${otpText}`,
     data: {
       type: 'RIDE_UPDATE',
       event: 'DRIVER_ASSIGNED',

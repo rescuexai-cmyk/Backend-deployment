@@ -60,13 +60,18 @@ async function isRecipientChatOpen(rideId: string, userId: string): Promise<bool
 
 async function sendChatPushNotification(params: {
   recipientUserId: string;
-  senderLabel: 'Driver' | 'Passenger';
+  senderRoleLabel: 'Driver' | 'Passenger';
+  senderName?: string | null;
   messageText: string;
   rideId: string;
   senderId: string;
   messageId: string;
 }): Promise<void> {
   try {
+    const senderName = (params.senderName ?? '').trim();
+    const senderTitle = senderName.length > 0
+      ? `${params.senderRoleLabel} ${senderName}`
+      : params.senderRoleLabel;
     await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
       method: 'POST',
       headers: {
@@ -75,14 +80,16 @@ async function sendChatPushNotification(params: {
       },
       body: JSON.stringify({
         userId: params.recipientUserId,
-        title: `New message from ${params.senderLabel}`,
-        body: `${params.senderLabel}: ${params.messageText}`,
+        title: senderTitle,
+        body: params.messageText,
         data: {
-          type: 'RIDE_UPDATE',
+          type: 'CHAT_MESSAGE',
           messageType: 'RIDE_CHAT',
           rideId: params.rideId,
           senderId: params.senderId,
           messageId: params.messageId,
+          senderName,
+          senderRole: params.senderRoleLabel.toUpperCase(),
           deepLink: `raahi://ride-chat/${params.rideId}`,
         },
         saveToDb: false,
@@ -1062,6 +1069,14 @@ router.post(
     const senderId = req.user!.id;
     const isSenderPassenger = senderId === access.ride.passengerId;
     const receiverUserId = isSenderPassenger ? access.driverUserId : access.ride.passengerId;
+    const senderProfile = await prisma.user.findUnique({
+      where: { id: senderId },
+      select: { firstName: true, lastName: true },
+    });
+    const senderName = [
+      senderProfile?.firstName ?? '',
+      senderProfile?.lastName ?? '',
+    ].join(' ').trim();
 
     if (!receiverUserId) {
       res.status(400).json({ success: false, message: 'Receiver not available for this ride' });
@@ -1156,7 +1171,8 @@ router.post(
     if (!chatOpen) {
       await sendChatPushNotification({
         recipientUserId: receiverUserId,
-        senderLabel: isSenderPassenger ? 'Passenger' : 'Driver',
+        senderRoleLabel: isSenderPassenger ? 'Passenger' : 'Driver',
+        senderName,
         messageText,
         rideId: req.params.id,
         senderId,
