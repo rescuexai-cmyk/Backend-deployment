@@ -86,6 +86,13 @@ export interface RideChatEvent {
   };
 }
 
+export interface ChatReadEvent {
+  type: 'chat-read';
+  rideId: string;
+  readerId: string;
+  lastReadAt: string;
+}
+
 export interface DriverRegistrationEvent {
   type: 'driver-registered' | 'driver-unregistered';
   driverId: string;
@@ -100,6 +107,7 @@ export type RealtimeEvent =
   | DriverAssignedEvent
   | RideCancelledEvent
   | RideChatEvent
+  | ChatReadEvent
   | DriverRegistrationEvent;
 
 // ─── Channel Names ────────────────────────────────────────────────────────────

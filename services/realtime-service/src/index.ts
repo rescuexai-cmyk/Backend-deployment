@@ -20,6 +20,7 @@ import {
   broadcastDriverAssigned,
   broadcastRideCancelled,
   broadcastRideChatMessage,
+  broadcastChatRead,
 } from './realtimeService';
 
 // Hybrid real-time transport imports
@@ -1132,6 +1133,21 @@ app.post('/internal/broadcast-ride-chat', authenticateInternal, express.json(), 
     message: message.message,
     timestamp: message.timestamp ? new Date(message.timestamp) : new Date(),
   });
+  res.status(200).json({ success: true });
+}));
+
+app.post('/internal/broadcast-chat-read', authenticateInternal, express.json(), asyncHandler(async (req, res) => {
+  const { rideId, readerId, lastReadAt } = req.body;
+  if (!rideId || !readerId || !lastReadAt) {
+    res.status(400).json({ success: false, message: 'rideId, readerId and lastReadAt are required' });
+    return;
+  }
+  const parsedLastReadAt = new Date(lastReadAt);
+  if (Number.isNaN(parsedLastReadAt.getTime())) {
+    res.status(400).json({ success: false, message: 'lastReadAt must be a valid ISO timestamp' });
+    return;
+  }
+  broadcastChatRead(rideId, readerId, parsedLastReadAt);
   res.status(200).json({ success: true });
 }));
 

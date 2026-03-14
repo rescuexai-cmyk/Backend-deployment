@@ -6,7 +6,7 @@ import { asyncHandler } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, DRIVER_NOT_VERIFIED_RIDE_ERROR } from '@raahi/shared';
 import * as rideService from '../rideService';
-import { broadcastRideChatMessage } from '../httpClients';
+import { broadcastRideChatMessage, broadcastRideChatRead } from '../httpClients';
 
 const router = express.Router();
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://notification-service:5006';
@@ -1022,6 +1022,11 @@ router.get('/:id/messages', authenticate, asyncHandler(async (req: AuthRequest, 
     return;
   }
 
+  const requesterUserId = req.user!.id;
+  const counterpartUserId = requesterUserId === access.ride.passengerId
+    ? access.driverUserId
+    : access.ride.passengerId;
+
   const messages = await prisma.rideMessage.findMany({
     where: { rideId: req.params.id },
     orderBy: { timestamp: 'asc' },
@@ -1030,10 +1035,31 @@ router.get('/:id/messages', authenticate, asyncHandler(async (req: AuthRequest, 
     where: { rideId_userId: { rideId: req.params.id, userId: req.user!.id } },
     select: { lastReadAt: true, unreadCount: true },
   });
+  const counterpartParticipant = counterpartUserId
+    ? await prisma.rideChatParticipant.findUnique({
+        where: { rideId_userId: { rideId: req.params.id, userId: counterpartUserId } },
+        select: { lastReadAt: true },
+      })
+    : null;
+
+  const counterpartLastReadAt = counterpartParticipant?.lastReadAt ?? null;
+  const enrichedMessages = messages.map((msg) => {
+    const isOutgoingForRequester = msg.senderId === requesterUserId;
+    const isReadByCounterpart =
+      isOutgoingForRequester &&
+      counterpartLastReadAt != null &&
+      msg.timestamp <= counterpartLastReadAt;
+
+    return {
+      ...msg,
+      isRead: isReadByCounterpart,
+      readAt: isReadByCounterpart ? counterpartLastReadAt : null,
+    };
+  });
   res.status(200).json({
     success: true,
     data: {
-      messages,
+      messages: enrichedMessages,
       unreadCount: participant?.unreadCount ?? 0,
       lastReadAt: participant?.lastReadAt ?? null,
     },
@@ -1218,6 +1244,8 @@ router.post(
         unreadCount: 0,
       },
     });
+
+    await broadcastRideChatRead(req.params.id, req.user!.id, now);
 
     res.status(200).json({
       success: true,

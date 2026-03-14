@@ -181,6 +181,30 @@ export async function broadcastRideChatMessage(
   }
 }
 
+export async function broadcastRideChatRead(
+  rideId: string,
+  readerId: string,
+  lastReadAt: Date,
+) {
+  try {
+    await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/broadcast-chat-read`,
+      {
+        rideId,
+        readerId,
+        lastReadAt: lastReadAt.toISOString(),
+      },
+      { timeout: 3000 }
+    );
+  } catch (e) {
+    logger.debug('Broadcast chat-read failed', {
+      rideId,
+      readerId,
+      error: (e as Error).message,
+    });
+  }
+}
+
 export async function updateDriverLocationRealtime(driverId: string, lat: number, lng: number, heading?: number, speed?: number) {
   // Location updates go to RAMEN (in-memory) first, then async to DB
   try {

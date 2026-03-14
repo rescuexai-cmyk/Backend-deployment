@@ -643,6 +643,29 @@ export function broadcastRideChatMessage(rideId: string, message: { id: string; 
   logger.debug(`[REALTIME] Chat message broadcast to ride-${rideId} (EventBus + Socket.io)`);
 }
 
+/** Broadcast chat read cursor update to everyone in the ride room. */
+export function broadcastChatRead(rideId: string, readerId: string, lastReadAt: Date) {
+  const readAtIso = lastReadAt.toISOString();
+
+  // ── Primary: EventBus broadcast (SSE + MQTT + Socket.io) ─────────────────
+  eventBus.publish(CHANNELS.ride(rideId), {
+    type: 'chat-read',
+    rideId,
+    readerId,
+    lastReadAt: readAtIso,
+  });
+
+  // ── Legacy Socket.io broadcast ───────────────────────────────────────────
+  if (io) {
+    io.to(`ride-${rideId}`).emit('chat-read', {
+      rideId,
+      readerId,
+      lastReadAt: readAtIso,
+    });
+  }
+  logger.debug(`[REALTIME] Chat read broadcast to ride-${rideId} by user=${readerId}`);
+}
+
 export async function getDriverHeatmapData(): Promise<Array<{ lat: number; lng: number; count: number }>> {
   const drivers = await prisma.driver.findMany({
     where: {
