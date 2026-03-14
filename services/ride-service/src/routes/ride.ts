@@ -72,7 +72,7 @@ async function sendChatPushNotification(params: {
     const senderTitle = senderName.length > 0
       ? `${params.senderRoleLabel} ${senderName}`
       : params.senderRoleLabel;
-    await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
+    const response = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -95,6 +95,14 @@ async function sendChatPushNotification(params: {
         saveToDb: false,
       }),
     });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      console.warn('[CHAT-PUSH] notification-service rejected push', {
+        recipientUserId: params.recipientUserId,
+        status: response.status,
+        body,
+      });
+    }
   } catch {
     // Non-critical path: never break chat persistence/realtime on push failure.
   }
@@ -1109,6 +1117,21 @@ router.post(
       return;
     }
 
+    // Debug visibility for push targeting (sender role -> recipient user + token state).
+    const recipientUser = await prisma.user.findUnique({
+      where: { id: receiverUserId },
+      select: { id: true, fcmToken: true },
+    });
+    const fcmToken = recipientUser?.fcmToken ?? null;
+    console.info('[CHAT-PUSH] Chat push target', {
+      senderRole: isSenderPassenger ? 'PASSENGER' : 'DRIVER',
+      senderId,
+      recipientId: receiverUserId,
+      hasFcmToken: !!fcmToken,
+      fcmTokenPreview: fcmToken ? `${fcmToken.slice(0, 12)}...` : null,
+      rideId: req.params.id,
+    });
+
     // Idempotency guard: retries must not duplicate message, unread, or push.
     if (clientMessageId) {
       const existing = await prisma.rideMessage.findFirst({
@@ -1192,19 +1215,16 @@ router.post(
       timestamp: chatMessage.timestamp,
     });
 
-    // Push only when recipient is NOT actively viewing this ride chat.
-    const chatOpen = await isRecipientChatOpen(req.params.id, receiverUserId);
-    if (!chatOpen) {
-      await sendChatPushNotification({
-        recipientUserId: receiverUserId,
-        senderRoleLabel: isSenderPassenger ? 'Passenger' : 'Driver',
-        senderName,
-        messageText,
-        rideId: req.params.id,
-        senderId,
-        messageId: chatMessage.id,
-      });
-    }
+    // Always send chat push for parity on both sides, independent of socket/presence.
+    await sendChatPushNotification({
+      recipientUserId: receiverUserId,
+      senderRoleLabel: isSenderPassenger ? 'Passenger' : 'Driver',
+      senderName,
+      messageText,
+      rideId: req.params.id,
+      senderId,
+      messageId: chatMessage.id,
+    });
 
     res.status(201).json({
       success: true,
