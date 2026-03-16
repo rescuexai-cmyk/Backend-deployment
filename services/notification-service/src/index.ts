@@ -432,9 +432,13 @@ app.post(
     logger.info('[NOTIFICATION] Created', { notificationId: notification.id, userId, type });
 
     // Send push notification if enabled and user has FCM token
+    const notificationsEnabled = await isPushAllowedForUser(userId);
+    const pushSkipped = !sendPush || !user.fcmToken || !notificationsEnabled;
+    const fcmToken = user.fcmToken;
+    logger.info('[NOTIFICATION] Push eligibility', { userId, notificationsEnabled, pushSkipped });
     let pushResult: { success: boolean; messageId?: string; error?: string; invalidToken?: boolean } | null = null;
-    if (sendPush && user.fcmToken) {
-      pushResult = await PushService.sendPushNotification(user.fcmToken, {
+    if (!pushSkipped && fcmToken) {
+      pushResult = await PushService.sendPushNotification(fcmToken, {
         title,
         body: message,
         data: {
@@ -475,6 +479,8 @@ app.post(
           success: pushResult?.success || false,
           messageId: pushResult?.messageId,
           error: pushResult?.error,
+          skipped: pushSkipped,
+          notificationsEnabled,
         },
       },
     });
@@ -499,6 +505,14 @@ function getAndroidChannelForType(type: string): string {
     default:
       return 'raahi_default';
   }
+}
+
+async function isPushAllowedForUser(userId: string): Promise<boolean> {
+  const driver = await prisma.driver.findUnique({
+    where: { userId },
+    select: { notificationsEnabled: true },
+  });
+  return driver?.notificationsEnabled ?? true;
 }
 
 /**
@@ -541,6 +555,27 @@ app.post(
       res.status(400).json({ 
         success: false, 
         message: 'User has no registered device for push notifications' 
+      });
+      return;
+    }
+
+    const notificationsEnabled = await isPushAllowedForUser(userId);
+    if (!notificationsEnabled) {
+      logger.info('[PUSH] Skipped by notification preference', {
+        userId,
+        notificationsEnabled,
+        pushSkipped: true,
+      });
+      res.json({
+        success: true,
+        data: {
+          messageId: null,
+          notificationId: null,
+          error: null,
+          invalidToken: false,
+          pushSkipped: true,
+          notificationsEnabled,
+        },
       });
       return;
     }
@@ -636,6 +671,28 @@ app.post(
         success: false, 
         message: 'User has no registered device',
         noToken: true,
+      });
+      return;
+    }
+
+    const notificationsEnabled = await isPushAllowedForUser(userId);
+    if (!notificationsEnabled) {
+      logger.info('[RIDE-PUSH] Skipped by notification preference', {
+        userId,
+        event,
+        notificationsEnabled,
+        pushSkipped: true,
+      });
+      res.json({
+        success: true,
+        data: {
+          messageId: null,
+          notificationId: null,
+          error: null,
+          invalidToken: false,
+          pushSkipped: true,
+          notificationsEnabled,
+        },
       });
       return;
     }

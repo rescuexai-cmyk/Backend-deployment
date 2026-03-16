@@ -37,7 +37,7 @@ services:
     container_name: raahi-gateway
     restart: always
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -243,7 +243,7 @@ services:
     container_name: raahi-realtime-service
     restart: always
     ports:
-      - "5007:5007"
+      - "127.0.0.1:5007:5007"
     environment:
       NODE_ENV: production
       PORT: 5007
@@ -292,6 +292,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     depends_on:

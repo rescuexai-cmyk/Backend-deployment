@@ -14,6 +14,10 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service
 const RIDE_OFFER_PUSH_EVENT = 'NEW_RIDE_REQUEST';
 const RIDE_OFFER_PUSH_TTL_MS = 30_000;
 const rideOfferPushDedupe = new Map<string, number>();
+const ARRIVAL_RADIUS_METERS = 120;
+const ARRIVAL_RADIUS_HYSTERESIS_METERS = 150;
+const pickupRadiusState = new Map<string, boolean>(); // rideId -> inside radius with jitter guard
+const pickupRadiusNotified = new Set<string>(); // rideIds already notified once
 
 function shouldSendRideOfferPush(rideId: string, driverId: string): boolean {
   const now = Date.now();
@@ -101,6 +105,60 @@ async function sendRideRequestPushNotification(
     logger.warn(`[PUSH] Failed to send ride request push to driver ${driverId}`, { error });
     // Non-blocking - continue with socket broadcast
   }
+}
+
+async function sendDriverNearPickupPushNotification(
+  passengerUserId: string,
+  rideId: string,
+  driverName: string,
+): Promise<void> {
+  try {
+    const response = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-api-key': INTERNAL_API_KEY,
+      },
+      body: JSON.stringify({
+        userId: passengerUserId,
+        title: 'Driver is arriving',
+        body: `${driverName} has almost reached your location. Be ready.`,
+        data: {
+          type: 'DRIVER_NEAR_PICKUP',
+          rideId,
+          driverName,
+          event: 'DRIVER_NEAR_PICKUP',
+        },
+        saveToDb: true,
+      }),
+    });
+
+    if (!response.ok) {
+      logger.warn('[ARRIVAL_RADIUS] Failed to send DRIVER_NEAR_PICKUP push', {
+        rideId,
+        passengerUserId,
+        status: response.status,
+      });
+    }
+  } catch (error) {
+    logger.warn('[ARRIVAL_RADIUS] Error sending DRIVER_NEAR_PICKUP push', {
+      rideId,
+      passengerUserId,
+      error,
+    });
+  }
+}
+
+function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
 }
 
 // Shared driver tracking maps (set by index.ts)
@@ -250,6 +308,76 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
       speed,
       timestamp,
     });
+  }
+
+  // Driver-near-pickup geofence detection (one-time notification per ride).
+  try {
+    const activePrePickupRide = await prisma.ride.findFirst({
+      where: {
+        driverId,
+        status: { in: ['DRIVER_ASSIGNED', 'CONFIRMED'] },
+      },
+      select: {
+        id: true,
+        passengerId: true,
+        pickupLatitude: true,
+        pickupLongitude: true,
+        driver: {
+          select: {
+            user: {
+              select: { firstName: true, lastName: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!activePrePickupRide) {
+      return;
+    }
+
+    const rideId = activePrePickupRide.id;
+    const meterDistance = distanceMeters(
+      lat,
+      lng,
+      activePrePickupRide.pickupLatitude,
+      activePrePickupRide.pickupLongitude,
+    );
+
+    const wasInside = pickupRadiusState.get(rideId) ?? false;
+    const isInside = meterDistance <= ARRIVAL_RADIUS_METERS ||
+      (wasInside && meterDistance <= ARRIVAL_RADIUS_HYSTERESIS_METERS);
+    pickupRadiusState.set(rideId, isInside);
+
+    if (isInside && !wasInside && !pickupRadiusNotified.has(rideId)) {
+      pickupRadiusNotified.add(rideId);
+
+      const firstName = activePrePickupRide.driver?.user?.firstName ?? '';
+      const lastName = activePrePickupRide.driver?.user?.lastName ?? '';
+      const driverName = `${firstName} ${lastName}`.trim() || 'Driver';
+
+      await sendDriverNearPickupPushNotification(
+        activePrePickupRide.passengerId,
+        rideId,
+        driverName,
+      );
+
+      broadcastRideStatusUpdate(rideId, 'DRIVER_NEAR_PICKUP', {
+        rideId,
+        driverName,
+        distanceToPickupMeters: Math.round(meterDistance),
+        arrivalRadiusMeters: ARRIVAL_RADIUS_METERS,
+        event: 'DRIVER_NEAR_PICKUP',
+      });
+
+      logger.info('[ARRIVAL_RADIUS] Driver entered pickup radius', {
+        rideId,
+        driverId,
+        distanceToPickupMeters: Math.round(meterDistance),
+      });
+    }
+  } catch (error) {
+    logger.warn('[ARRIVAL_RADIUS] Geofence detection failed', { driverId, error });
   }
 }
 

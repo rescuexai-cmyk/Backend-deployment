@@ -12,6 +12,19 @@ const router = express.Router();
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://notification-service:5006';
 const REALTIME_SERVICE_URL = process.env.REALTIME_SERVICE_URL || 'http://realtime-service:5007';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+const ARRIVAL_RADIUS_METERS = 120;
+
+function haversineDistanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
 
 type RideChatAccess = {
   ride: {
@@ -730,7 +743,15 @@ router.put(
     // Get ride details
     const ride = await prisma.ride.findUnique({
       where: { id: rideId },
-      select: { id: true, status: true, driverId: true, passengerId: true, rideOtp: true }
+      select: {
+        id: true,
+        status: true,
+        driverId: true,
+        passengerId: true,
+        rideOtp: true,
+        pickupLatitude: true,
+        pickupLongitude: true,
+      }
     });
     
     if (!ride) {
@@ -783,6 +804,52 @@ router.put(
           success: false, 
           message: 'Invalid OTP. Please ask the passenger for the correct code.',
           code: 'INVALID_OTP'
+        });
+        return;
+      }
+    }
+
+    // Enforce geofence for "DRIVER_ARRIVED" on backend (source of truth).
+    if (status === 'DRIVER_ARRIVED') {
+      const driver = await prisma.driver.findUnique({
+        where: { userId: req.user!.id },
+        select: { id: true, currentLatitude: true, currentLongitude: true },
+      });
+
+      if (!driver || ride.driverId !== driver.id) {
+        res.status(403).json({
+          success: false,
+          message: 'Only the assigned driver can mark arrival.',
+          code: 'NOT_ASSIGNED_DRIVER',
+        });
+        return;
+      }
+
+      if (driver.currentLatitude == null || driver.currentLongitude == null) {
+        res.status(400).json({
+          success: false,
+          message: 'Unable to verify your location. Please enable location and try again.',
+          code: 'DRIVER_LOCATION_UNAVAILABLE',
+        });
+        return;
+      }
+
+      const distanceToPickupMeters = haversineDistanceMeters(
+        driver.currentLatitude,
+        driver.currentLongitude,
+        ride.pickupLatitude,
+        ride.pickupLongitude,
+      );
+
+      if (distanceToPickupMeters > ARRIVAL_RADIUS_METERS) {
+        res.status(400).json({
+          success: false,
+          message: 'Move closer to pickup location before marking arrival.',
+          code: 'ARRIVAL_RADIUS_NOT_REACHED',
+          data: {
+            distanceToPickupMeters: Math.round(distanceToPickupMeters),
+            arrivalRadiusMeters: ARRIVAL_RADIUS_METERS,
+          },
         });
         return;
       }

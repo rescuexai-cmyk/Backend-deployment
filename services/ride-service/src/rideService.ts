@@ -830,6 +830,53 @@ export async function updateRideStatus(
           },
         },
       });
+
+      // Idempotent wallet credit for existing earning records
+      const existingWalletCredit = await prisma.walletTransaction.findFirst({
+        where: {
+          driverId: currentRide.driverId,
+          type: 'RIDE_EARNING',
+          referenceType: 'ride',
+          referenceId: rideId,
+        },
+      });
+      if (!existingWalletCredit) {
+        const wallet = await prisma.driverWallet.upsert({
+          where: { driverId: currentRide.driverId },
+          create: {
+            driverId: currentRide.driverId,
+            availableBalance: existingEarning.netAmount,
+            totalEarned: existingEarning.netAmount,
+          },
+          update: {
+            availableBalance: { increment: existingEarning.netAmount },
+            totalEarned: { increment: existingEarning.netAmount },
+          },
+        });
+        const walletBalanceBefore = wallet.availableBalance - existingEarning.netAmount;
+        const walletBalanceAfter = wallet.availableBalance;
+        await prisma.walletTransaction.create({
+          data: {
+            driverId: currentRide.driverId,
+            type: 'RIDE_EARNING',
+            amount: existingEarning.netAmount,
+            balanceBefore: walletBalanceBefore,
+            balanceAfter: walletBalanceAfter,
+            referenceType: 'ride',
+            referenceId: rideId,
+            description: `Ride earning credit for ride ${rideId}`,
+          },
+        });
+        logger.info('[WALLET] Credited existing earning to wallet', {
+          rideId,
+          driverId: currentRide.driverId,
+          fare: ride.totalFare,
+          commission: existingEarning.commission,
+          driverEarning: existingEarning.netAmount,
+          walletBalanceBefore,
+          walletBalanceAfter,
+        });
+      }
     } else {
       // ATOMIC TRANSACTION: Update ride status AND create earnings together
       ride = await prisma.$transaction(async (tx) => {
@@ -877,6 +924,53 @@ export async function updateRideStatus(
             totalEarnings: { increment: netAmount },
           },
         });
+
+        // Step 5: Credit driver wallet and create wallet transaction log (idempotent by reference lookup)
+        const existingWalletCredit = await tx.walletTransaction.findFirst({
+          where: {
+            driverId: updatedRide.driverId!,
+            type: 'RIDE_EARNING',
+            referenceType: 'ride',
+            referenceId: updatedRide.id,
+          },
+        });
+        if (!existingWalletCredit) {
+          const wallet = await tx.driverWallet.upsert({
+            where: { driverId: updatedRide.driverId! },
+            create: {
+              driverId: updatedRide.driverId!,
+              availableBalance: netAmount,
+              totalEarned: netAmount,
+            },
+            update: {
+              availableBalance: { increment: netAmount },
+              totalEarned: { increment: netAmount },
+            },
+          });
+          const walletBalanceBefore = wallet.availableBalance - netAmount;
+          const walletBalanceAfter = wallet.availableBalance;
+          await tx.walletTransaction.create({
+            data: {
+              driverId: updatedRide.driverId!,
+              type: 'RIDE_EARNING',
+              amount: netAmount,
+              balanceBefore: walletBalanceBefore,
+              balanceAfter: walletBalanceAfter,
+              referenceType: 'ride',
+              referenceId: updatedRide.id,
+              description: `Ride earning credit for ride ${updatedRide.id}`,
+            },
+          });
+          logger.info('[WALLET] Credited ride earning to wallet', {
+            rideId: updatedRide.id,
+            driverId: updatedRide.driverId!,
+            fare: updatedRide.totalFare,
+            commission,
+            driverEarning: netAmount,
+            walletBalanceBefore,
+            walletBalanceAfter,
+          });
+        }
         
         logger.info(`[EARNINGS] ATOMIC: Ride ${rideId} completed with earnings ₹${netAmount.toFixed(2)} (commission: ₹${commission.toFixed(2)} at ${(commissionRate * 100).toFixed(0)}%)`);
         
