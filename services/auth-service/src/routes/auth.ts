@@ -3,10 +3,108 @@ import { body, validationResult } from 'express-validator';
 import { authenticate, AuthRequest } from '@raahi/shared';
 import { asyncHandler } from '@raahi/shared';
 import * as AuthService from '../authService';
+import * as FirebaseAuth from '../firebaseAuth';
 import { createLogger } from '@raahi/shared';
 
 const logger = createLogger('auth-routes');
 const router = express.Router();
+
+type OtpWindowEntry = {
+  timestamps: number[];
+};
+
+const otpRequestByPhone = new Map<string, OtpWindowEntry>();
+const otpRequestByDevice = new Map<string, OtpWindowEntry>();
+const otpRequestByIp = new Map<string, OtpWindowEntry>();
+
+function normalizePhone(phone: string): string {
+  let p = phone.replace(/[\s\-()]/g, '');
+  if (!p.startsWith('+')) p = `+${p}`;
+  return p;
+}
+
+function cleanupOldTimestamps(timestamps: number[], now: number): number[] {
+  const oneHourAgo = now - 60 * 60 * 1000;
+  return timestamps.filter((ts) => ts >= oneHourAgo);
+}
+
+function extractClientMeta(req: any): { ip: string; deviceId: string } {
+  const ip = (
+    req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() ||
+    req.ip ||
+    req.socket?.remoteAddress ||
+    'unknown'
+  );
+  const deviceId = (req.headers['x-device-id']?.toString().trim() || 'unknown_device');
+  return { ip, deviceId };
+}
+
+function checkOtpRateLimit(
+  phone: string,
+  deviceId: string,
+  ip: string
+): { allowed: boolean; message?: string; retryAfterSeconds?: number } {
+  const now = Date.now();
+  const tenMinutes = 10 * 60 * 1000;
+  const oneHour = 60 * 60 * 1000;
+
+  const phoneEntry = otpRequestByPhone.get(phone) ?? { timestamps: [] };
+  phoneEntry.timestamps = cleanupOldTimestamps(phoneEntry.timestamps, now);
+  otpRequestByPhone.set(phone, phoneEntry);
+
+  const deviceEntry = otpRequestByDevice.get(deviceId) ?? { timestamps: [] };
+  deviceEntry.timestamps = cleanupOldTimestamps(deviceEntry.timestamps, now);
+  otpRequestByDevice.set(deviceId, deviceEntry);
+
+  const ipEntry = otpRequestByIp.get(ip) ?? { timestamps: [] };
+  ipEntry.timestamps = cleanupOldTimestamps(ipEntry.timestamps, now);
+  otpRequestByIp.set(ip, ipEntry);
+
+  const phoneLast10m = phoneEntry.timestamps.filter((t) => now - t <= tenMinutes);
+  if (phoneLast10m.length >= 3) {
+    const retryAt = phoneLast10m[0] + tenMinutes;
+    return {
+      allowed: false,
+      message: 'Too many OTP requests for this phone number. Try again shortly.',
+      retryAfterSeconds: Math.max(1, Math.ceil((retryAt - now) / 1000)),
+    };
+  }
+
+  if (phoneEntry.timestamps.length >= 5) {
+    const retryAt = phoneEntry.timestamps[0] + oneHour;
+    return {
+      allowed: false,
+      message: 'OTP hourly limit reached for this phone number.',
+      retryAfterSeconds: Math.max(1, Math.ceil((retryAt - now) / 1000)),
+    };
+  }
+
+  // Device/IP abuse heuristics
+  const deviceLast10m = deviceEntry.timestamps.filter((t) => now - t <= tenMinutes).length;
+  const ipLast10m = ipEntry.timestamps.filter((t) => now - t <= tenMinutes).length;
+  if (deviceLast10m >= 10 || ipLast10m >= 20) {
+    return {
+      allowed: false,
+      message: 'Suspicious OTP activity detected. Please try again later.',
+      retryAfterSeconds: 600,
+    };
+  }
+
+  return { allowed: true };
+}
+
+function recordOtpRequest(phone: string, deviceId: string, ip: string): void {
+  const now = Date.now();
+  const add = (map: Map<string, OtpWindowEntry>, key: string) => {
+    const entry = map.get(key) ?? { timestamps: [] };
+    entry.timestamps = cleanupOldTimestamps(entry.timestamps, now);
+    entry.timestamps.push(now);
+    map.set(key, entry);
+  };
+  add(otpRequestByPhone, phone);
+  add(otpRequestByDevice, deviceId);
+  add(otpRequestByIp, ip);
+}
 
 /**
  * @openapi
@@ -106,53 +204,18 @@ router.post(
   '/verify-otp',
   [
     body('idToken').optional().isString(),
-    body('phone').optional().isString(),
-    body('otp').optional().isString(),
+    body('firebaseIdToken').optional().isString(),
   ],
   asyncHandler(async (req, res: Response) => {
-    const { idToken, phone, otp } = req.body;
+    const idToken = req.body.idToken || req.body.firebaseIdToken;
 
-    // MODE 2: Dev/Testing - direct phone + OTP verification
-    if (phone && otp) {
-      const isDevMode = process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_OTP === 'true';
-      
-      if (!isDevMode) {
-        res.status(403).json({
-          success: false,
-          message: 'Dev OTP mode is disabled in production. Use Firebase authentication.',
-          code: 'DEV_OTP_DISABLED',
-        });
-        return;
-      }
-
-      // Accept static OTP "123456" for dev/testing
-      if (otp !== '123456') {
-        res.status(401).json({
-          success: false,
-          message: 'Invalid OTP',
-          code: 'INVALID_OTP',
-        });
-        return;
-      }
-
-      logger.info(`[AUTH] Dev mode OTP verification for phone: ${phone}`);
-      const result = await AuthService.authenticateWithVerifiedPhone(phone);
-
-      res.status(200).json({
-        success: true,
-        message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
-        data: result,
-      });
-      return;
-    }
-
-    // MODE 1: Firebase Token verification (production flow)
+    // Firebase token verification (single production flow)
     if (!idToken) {
       res.status(400).json({
         success: false,
-        message: 'Either idToken (Firebase) or phone+otp (dev mode) is required',
+        message: 'idToken (Firebase) is required',
         errors: [
-          { msg: 'Provide idToken for Firebase auth, or phone+otp for dev mode' }
+          { msg: 'Provide Firebase idToken from client-side OTP verification' }
         ],
       });
       return;
@@ -206,6 +269,15 @@ router.post(
     body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
   ],
   asyncHandler(async (req, res: Response) => {
+    if (process.env.NODE_ENV === 'production') {
+      res.status(403).json({
+        success: false,
+        message: 'Direct phone authentication is disabled in production.',
+        code: 'PHONE_AUTH_DISABLED',
+      });
+      return;
+    }
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
@@ -213,8 +285,75 @@ router.post(
     }
 
     const { idToken } = req.body;
+    const { ip, deviceId } = extractClientMeta(req);
+
+    // Verify once here so we can apply per-phone abuse protection before login.
+    const verified = await FirebaseAuth.verifyFirebaseToken(idToken);
+    if (!verified.success || !verified.phone) {
+      res.status(401).json({
+        success: false,
+        message: verified.error || 'Invalid Firebase token',
+        code: 'INVALID_FIREBASE_TOKEN',
+      });
+      return;
+    }
+
+    const rate = checkOtpRateLimit(verified.phone, deviceId, ip);
+    if (!rate.allowed) {
+      logger.warn(`[AUTH] OTP abuse protection blocked firebase-phone login phone=${verified.phone} ip=${ip} device=${deviceId}`);
+      res.status(429).json({
+        success: false,
+        message: rate.message,
+        code: 'OTP_RATE_LIMITED',
+        retryAfterSeconds: rate.retryAfterSeconds,
+      });
+      return;
+    }
+    recordOtpRequest(verified.phone, deviceId, ip);
+
     const result = await AuthService.authenticateWithFirebasePhone(idToken);
 
+    res.status(200).json({
+      success: true,
+      message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
+      data: result,
+    });
+  })
+);
+
+// Alias endpoint required by mobile clients.
+router.post(
+  '/firebase-login',
+  [body('firebaseIdToken').isString().notEmpty().withMessage('Firebase ID token is required')],
+  asyncHandler(async (req, res: Response) => {
+    req.body.idToken = req.body.firebaseIdToken;
+    const { idToken } = req.body;
+    const { ip, deviceId } = extractClientMeta(req);
+
+    const verified = await FirebaseAuth.verifyFirebaseToken(idToken);
+    if (!verified.success || !verified.phone) {
+      res.status(401).json({
+        success: false,
+        message: verified.error || 'Invalid Firebase token',
+        code: 'INVALID_FIREBASE_TOKEN',
+      });
+      return;
+    }
+
+    const rate = checkOtpRateLimit(verified.phone, deviceId, ip);
+    if (!rate.allowed) {
+      logger.warn(`[AUTH] OTP abuse protection blocked firebase-login phone=${verified.phone} ip=${ip} device=${deviceId}`);
+      res.status(429).json({
+        success: false,
+        message: rate.message,
+        code: 'OTP_RATE_LIMITED',
+        retryAfterSeconds: rate.retryAfterSeconds,
+      });
+      return;
+    }
+    recordOtpRequest(verified.phone, deviceId, ip);
+
+    const result = await AuthService.authenticateWithFirebasePhone(idToken);
     res.status(200).json({
       success: true,
       message: result.isNewUser ? 'Account created successfully' : 'Authentication successful',
@@ -340,36 +479,30 @@ router.post(
       return;
     }
 
-    let { phone } = req.body;
-
-    // Normalize phone number format
-    phone = phone.replace(/[\s\-()]/g, '');
-    if (!phone.startsWith('+')) {
-      phone = `+${phone}`;
-    }
-
-    const isDevMode = process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_OTP === 'true';
-
-    if (!isDevMode) {
-      res.status(403).json({
+    const phone = normalizePhone(req.body.phone);
+    const { ip, deviceId } = extractClientMeta(req);
+    const rate = checkOtpRateLimit(phone, deviceId, ip);
+    if (!rate.allowed) {
+      logger.warn(`[AUTH] OTP precheck blocked phone=${phone} ip=${ip} device=${deviceId}`);
+      res.status(429).json({
         success: false,
-        message: 'Dev OTP mode is disabled in production. Use Firebase authentication on the client.',
-        code: 'DEV_OTP_DISABLED',
+        message: rate.message,
+        code: 'OTP_RATE_LIMITED',
+        retryAfterSeconds: rate.retryAfterSeconds,
       });
       return;
     }
+    recordOtpRequest(phone, deviceId, ip);
 
-    logger.info(`[AUTH] Dev mode: send-otp requested for ${phone} (OTP: 123456)`);
-
+    // This endpoint is now only a precheck/guard.
+    // Actual OTP sending is done via Firebase client SDK.
     res.status(200).json({
       success: true,
-      message: 'OTP sent successfully',
+      message: 'OTP request allowed. Proceed with Firebase phone verification.',
       data: {
         phone,
-        otpSent: true,
-        expiresIn: 300, // 5 minutes
-        // In dev mode, include the OTP in response for convenience
-        ...(process.env.NODE_ENV !== 'production' && { devOtp: '123456' }),
+        otpRequestAllowed: true,
+        resendCooldownSeconds: 30,
       },
     });
   })
