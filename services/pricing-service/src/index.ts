@@ -5,6 +5,7 @@ import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, as
 import { createLogger } from '@raahi/shared';
 import { calculateFare, calculateAllFares, finalizeFare, getNearbyDrivers, getPricingRules } from './pricingService';
 import { validatePromo, calculatePromoDiscount, getActivePromosForUser } from './promoService';
+import { listZoneHealth, runMarketplaceGovernance, upsertMarketplacePolicy, getMarketplacePolicy } from './marketplacePolicy';
 
 const logger = createLogger('pricing-service');
 const app = express();
@@ -12,6 +13,16 @@ const PORT = process.env.PORT || 5005;
 
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json());
+
+function authenticateInternal(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const internalApiKey = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+  const provided = req.headers['x-internal-api-key'] as string | undefined;
+  if (!provided || provided !== internalApiKey) {
+    res.status(401).json({ success: false, message: 'Unauthorized internal API request' });
+    return;
+  }
+  next();
+}
 
 // Setup Swagger documentation
 setupSwagger(app, {
@@ -308,6 +319,94 @@ app.get('/api/pricing/rules', asyncHandler(async (_req, res) => {
 }));
 
 // ============================================================
+// Marketplace policy controls (v2 scalability operations)
+// ============================================================
+
+app.get(
+  '/api/pricing/marketplace/policy',
+  [query('cityCode').isString().notEmpty()],
+  optionalAuth,
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const cityCode = (req.query.cityCode as string).toLowerCase().trim();
+    const policy = await getMarketplacePolicy(cityCode);
+    res.status(200).json({ success: true, data: policy });
+  })
+);
+
+app.put(
+  '/api/pricing/marketplace/policy',
+  authenticateInternal,
+  [
+    body('cityCode').isString().notEmpty(),
+    body('marketplaceMode').optional().isIn(['launch', 'scale']),
+    body('launchSubsidyPct').optional().isFloat({ min: 0, max: 1 }),
+    body('launchSubsidyCap').optional().isFloat({ min: 0 }),
+    body('burnCap').optional().isFloat({ min: 0, max: 1 }),
+    body('contributionFloor').optional().isFloat({ max: 0 }),
+    body('etaTargetMin').optional().isFloat({ min: 1 }),
+    body('supplyThreshold').optional().isFloat({ min: 0 }),
+    body('isActive').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const updated = await upsertMarketplacePolicy({
+      cityCode: (req.body.cityCode as string).toLowerCase().trim(),
+      marketplaceMode: req.body.marketplaceMode,
+      launchSubsidyPct: req.body.launchSubsidyPct,
+      launchSubsidyCap: req.body.launchSubsidyCap,
+      burnCap: req.body.burnCap,
+      contributionFloor: req.body.contributionFloor,
+      etaTargetMin: req.body.etaTargetMin,
+      supplyThreshold: req.body.supplyThreshold,
+      isActive: req.body.isActive,
+    });
+    res.status(200).json({ success: true, data: updated });
+  })
+);
+
+app.get(
+  '/api/pricing/marketplace/zone-health',
+  [query('cityCode').isString().notEmpty(), query('limit').optional().isInt({ min: 1, max: 500 })],
+  authenticateInternal,
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const cityCode = (req.query.cityCode as string).toLowerCase().trim();
+    const limit = parseInt((req.query.limit as string) || '50', 10);
+    const rows = await listZoneHealth(cityCode, limit);
+    res.status(200).json({ success: true, data: { cityCode, count: rows.length, rows } });
+  })
+);
+
+app.post(
+  '/api/pricing/marketplace/governance/run',
+  authenticateInternal,
+  [body('cityCode').optional().isString()],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const cityCode = req.body.cityCode ? (req.body.cityCode as string).toLowerCase().trim() : undefined;
+    const result = await runMarketplaceGovernance(cityCode);
+    res.status(200).json({ success: true, data: result });
+  })
+);
+
+// ============================================================
 // Promo endpoints
 // ============================================================
 
@@ -423,6 +522,18 @@ app.use(errorHandler);
 const start = async () => {
   await connectDatabase();
   app.listen(PORT, () => logger.info(`Pricing service running on port ${PORT}`));
+
+  // Periodic governance loop for burn control + mode lifecycle.
+  const governanceMs = Number(process.env.MARKETPLACE_GOVERNANCE_INTERVAL_MS ?? 15 * 60 * 1000);
+  setInterval(() => {
+    runMarketplaceGovernance()
+      .then((result) => {
+        logger.info('[MARKETPLACE] Governance cycle completed', result);
+      })
+      .catch((error) => {
+        logger.warn('[MARKETPLACE] Governance cycle failed', { error: (error as Error).message });
+      });
+  }, governanceMs);
 };
 
 start().catch((err) => {

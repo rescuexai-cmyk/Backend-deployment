@@ -473,6 +473,62 @@ model CityPricing {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Marketplace pricing policy v2
+// ─────────────────────────────────────────────────────────────
+
+model PricingCityPolicy {
+  id                String   @id @default(cuid())
+  cityCode          String   @unique
+  marketplaceMode   String   @default("scale") // launch | scale
+  launchSubsidyPct  Float    @default(0.25)
+  launchSubsidyCap  Float    @default(80)
+  burnCap           Float    @default(0.22)
+  contributionFloor Float    @default(-40)
+  etaTargetMin      Float    @default(8)
+  supplyThreshold   Float    @default(0.9)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([isActive])
+  @@index([marketplaceMode])
+  @@map("pricing_city_policy")
+}
+
+model PricingBurnMetric {
+  id         String   @id @default(cuid())
+  cityCode   String
+  date       DateTime
+  gmv        Float    @default(0)
+  subsidy    Float    @default(0)
+  incentives Float    @default(0)
+  burnRate   Float    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([cityCode, date])
+  @@index([cityCode, date])
+  @@map("pricing_burn_metrics")
+}
+
+model PricingZoneHealth {
+  id          String   @id @default(cuid())
+  zoneId      String
+  cityCode    String
+  fulfillment Float    @default(0)
+  etaP90      Float    @default(0)
+  acceptRate  Float    @default(0)
+  healthScore Float    @default(0)
+  observedAt  DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([zoneId, cityCode])
+  @@index([cityCode, healthScore])
+  @@index([observedAt])
+  @@map("pricing_zone_health")
+}
+
+// ─────────────────────────────────────────────────────────────
 // Promotions and discounts
 // ─────────────────────────────────────────────────────────────
 

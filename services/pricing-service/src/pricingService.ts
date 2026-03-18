@@ -27,9 +27,17 @@ import {
   getWeatherCondition,
   isAirportPickup,
   isSpecialEventActive,
+  getZoneRealtimeSnapshot,
 } from './dataSourcing';
 import { estimateTollsFromRoute } from './tollService';
 import { getCityFromCoordinates, getCityPricing, getMinimumFare } from './cityPricingService';
+import {
+  applyPricingPolicyV2,
+  getCurrentBurnRate,
+  getMarketplacePolicy,
+  MarketplaceMode,
+  recordBurnMetricDelta,
+} from './marketplacePolicy';
 
 const logger = createLogger('pricing-service');
 
@@ -65,6 +73,29 @@ export interface EstimateResponse {
     ratePerMin: number;
     vehicleMultiplier: number;
     dynamicMultiplier: number;
+  };
+  marketplace?: {
+    mode: MarketplaceMode;
+    riderFinalFare: number;
+    subsidyAmount: number;
+    driverBoostAmount: number;
+    questIncentiveAmount: number;
+    burnRate: number;
+    contribution: number;
+    zoneHealth: number;
+    supplyRate: number;
+    etaP90: number;
+    liquidityActions: string[];
+    effectiveSubsidyPct: number;
+    guarantee: {
+      enabled: boolean;
+      hourlyAmount: number;
+    };
+    driverTripFloor: number;
+    questPlan: {
+      milestones: Array<{ rides: number; payout: number }>;
+      perRidePeakBonus: number;
+    };
   };
 }
 
@@ -134,14 +165,34 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
     getWeatherCondition(pickupLat, pickupLng),
     isSpecialEventActive(),
   ]);
+  const [policy, burnRate, zoneSnapshot] = await Promise.all([
+    getMarketplacePolicy(city),
+    getCurrentBurnRate(city),
+    getZoneRealtimeSnapshot(pickupLat, pickupLng, city, 5),
+  ]);
 
   const { isPeakHour, isNight, isWeekend } = getTimeBasedFlags(date);
 
   // Pass city pricing to base fare calculation
   const base = calculateBaseFare({ distanceKm, timeMin, vehicleType: vehicle, cityPricing });
+  const v2Pre = applyPricingPolicyV2({
+    vehicleType: vehicle,
+    riderFinalFare: base.baseFare,
+    policy,
+    burnRate,
+    zone: {
+      fulfillment: zoneSnapshot.fulfillment,
+      acceptRate: zoneSnapshot.acceptRate,
+      etaP90: zoneSnapshot.etaP90,
+      supplyRate: zoneSnapshot.supplyRate,
+      zoneHealth: zoneSnapshot.zoneHealth,
+    },
+    platformFeeRate: 0.2,
+    isPeakHour,
+  });
   const dynamic = calculateDynamicFare({
     baseFare: base.baseFare,
-    demandSupplyRatio,
+    demandSupplyRatio: demandSupplyRatio * v2Pre.surgeSensitivity,
     isPeakHour,
     isNight,
     isWeekend,
@@ -150,7 +201,33 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
   });
 
   // Use per-vehicle minimum fare
-  const totalFare = Math.max(base.minimumFare, round2(dynamic.dynamicFare));
+  const riderFinalFare = Math.max(base.minimumFare, round2(dynamic.dynamicFare));
+  const v2 = applyPricingPolicyV2({
+    vehicleType: vehicle,
+    riderFinalFare,
+    policy,
+    burnRate,
+    zone: {
+      fulfillment: zoneSnapshot.fulfillment,
+      acceptRate: zoneSnapshot.acceptRate,
+      etaP90: zoneSnapshot.etaP90,
+      supplyRate: zoneSnapshot.supplyRate,
+      zoneHealth: zoneSnapshot.zoneHealth,
+    },
+    platformFeeRate: 0.2,
+    isPeakHour,
+  });
+  const totalFare = Math.max(base.minimumFare, v2.riderFare);
+
+  // Track burn on quoted demand (approximate but real-time for guardrails).
+  await recordBurnMetricDelta({
+    cityCode: city,
+    gmvDelta: totalFare,
+    subsidyDelta: v2.riderSubsidy,
+    incentivesDelta: v2.driverBoost + v2.questIncentive,
+  }).catch(() => {
+    // Keep quote path resilient even if metrics write fails.
+  });
 
   logger.info(
     `[PRICING] ${city}/${vehicle} | ${round2(distanceKm)}km | ${timeMin}min | base=₹${base.baseFare} | surge=${dynamic.surgeMultiplier}x | total=₹${totalFare}`
@@ -176,6 +253,23 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
       ratePerMin: base.breakdown.ratePerMin,
       vehicleMultiplier: base.breakdown.vehicleMultiplier,
       dynamicMultiplier: dynamic.totalDynamicMultiplier,
+    },
+    marketplace: {
+      mode: policy.marketplaceMode,
+      riderFinalFare,
+      subsidyAmount: v2.riderSubsidy,
+      driverBoostAmount: v2.driverBoost,
+      questIncentiveAmount: v2.questIncentive,
+      burnRate: v2.burnRate,
+      contribution: v2.contribution,
+      zoneHealth: zoneSnapshot.zoneHealth,
+      supplyRate: round2(zoneSnapshot.supplyRate),
+      etaP90: round2(zoneSnapshot.etaP90),
+      liquidityActions: v2.liquidityActions,
+      effectiveSubsidyPct: v2.effectiveSubsidyPct,
+      guarantee: v2.guarantee,
+      driverTripFloor: v2.driverTripFloor,
+      questPlan: v2.questPlan,
     },
   };
 }
@@ -210,6 +304,31 @@ export async function calculateAllFares(
       vehicleType: vt,
       scheduledTime,
     });
+  }
+
+  // Cheapest visible option: eco_pickup (virtual category, 10-18% lower).
+  const cheapest = Object.values(results).sort((a, b) => a.totalFare - b.totalFare)[0];
+  if (cheapest) {
+    const ecoDiscountPct = 0.12;
+    const ecoFare = round2(Math.max(cheapest.minimumFare, cheapest.totalFare * (1 - ecoDiscountPct)));
+    results.eco_pickup = {
+      ...cheapest,
+      vehicleType: 'eco_pickup',
+      totalFare: ecoFare,
+      marketplace: cheapest.marketplace
+        ? {
+            ...cheapest.marketplace,
+            riderFinalFare: cheapest.marketplace.riderFinalFare,
+            subsidyAmount: round2(
+              cheapest.marketplace.subsidyAmount + (cheapest.totalFare - ecoFare)
+            ),
+            liquidityActions: [
+              ...cheapest.marketplace.liquidityActions,
+              'eco_pickup_applied',
+            ],
+          }
+        : undefined,
+    };
   }
   return results;
 }
@@ -284,11 +403,14 @@ export async function finalizeFare(request: FinalizeRequest): Promise<FinalizeRe
 
 export function getPricingRules() {
   return {
-    algorithmVersion: 'cab_pricing_v1',
-    vehicleTypes: ['bike_rescue', 'auto', 'cab_mini', 'cab_xl', 'cab_premium', 'personal_driver'],
+    algorithmVersion: 'pricing_policy_v2',
+    vehicleTypes: ['bike_rescue', 'auto', 'cab_mini', 'cab_xl', 'cab_premium', 'personal_driver', 'eco_pickup'],
     surgeEnabled: true,
     peakHourEnabled: true,
     weatherEnabled: true,
+    marketplaceModes: ['launch', 'scale'],
+    burnGuardEnabled: true,
+    contributionGuardEnabled: true,
   };
 }
 

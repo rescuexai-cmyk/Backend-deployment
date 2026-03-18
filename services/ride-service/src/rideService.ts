@@ -670,6 +670,129 @@ export interface FareAdjustments {
   discountPercent?: number;
 }
 
+const QUEST_MIN_ACCEPTANCE = 0.65;
+const QUEST_MAX_CANCELLATION = 0.15;
+const QUEST_PEAK_BONUS_PER_RIDE = 20;
+const QUEST_MILESTONES: Array<{ rides: number; payout: number }> = [
+  { rides: 6, payout: 80 },
+  { rides: 10, payout: 180 },
+];
+
+function getIstDayBounds(date: Date): { dayStartUtc: Date; dayEndUtc: Date; dayKeyIst: string } {
+  const shifted = new Date(date.getTime() + 5.5 * 60 * 60 * 1000); // IST local wall clock
+  const y = shifted.getUTCFullYear();
+  const m = shifted.getUTCMonth();
+  const d = shifted.getUTCDate();
+  const dayStartUtc = new Date(Date.UTC(y, m, d, 0, 0, 0) - 5.5 * 60 * 60 * 1000);
+  const dayEndUtc = new Date(dayStartUtc.getTime() + 24 * 60 * 60 * 1000);
+  const dayKeyIst = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  return { dayStartUtc, dayEndUtc, dayKeyIst };
+}
+
+function isPeakHourIst(date: Date): boolean {
+  const shifted = new Date(date.getTime() + 5.5 * 60 * 60 * 1000);
+  const hour = shifted.getUTCHours();
+  return hour >= 17 && hour < 21;
+}
+
+async function applyQuestSettlement(
+  db: any,
+  params: { driverId: string; rideId: string; completedAt: Date }
+): Promise<{ totalAwarded: number; awards: Array<{ type: string; amount: number }> }> {
+  const { driverId, rideId, completedAt } = params;
+  const { dayStartUtc, dayEndUtc, dayKeyIst } = getIstDayBounds(completedAt);
+
+  const [completedRidesToday, driverCancelledToday] = await Promise.all([
+    db.ride.count({
+      where: {
+        driverId,
+        status: 'RIDE_COMPLETED',
+        completedAt: { gte: dayStartUtc, lt: dayEndUtc },
+      },
+    }),
+    db.ride.count({
+      where: {
+        driverId,
+        status: 'CANCELLED',
+        cancelledBy: 'driver',
+        cancelledAt: { gte: dayStartUtc, lt: dayEndUtc },
+      },
+    }),
+  ]);
+
+  const denominator = completedRidesToday + driverCancelledToday;
+  const acceptanceRate = denominator > 0 ? completedRidesToday / denominator : 1;
+  const cancellationRate = denominator > 0 ? driverCancelledToday / denominator : 0;
+  const eligible = acceptanceRate >= QUEST_MIN_ACCEPTANCE && cancellationRate <= QUEST_MAX_CANCELLATION;
+
+  if (!eligible) {
+    return { totalAwarded: 0, awards: [] };
+  }
+
+  let totalAwarded = 0;
+  const awards: Array<{ type: string; amount: number }> = [];
+
+  const creditWallet = async (amount: number, referenceType: string, referenceId: string, description: string) => {
+    const existing = await db.walletTransaction.findFirst({
+      where: { driverId, type: 'ADJUSTMENT', referenceType, referenceId },
+    });
+    if (existing) return false;
+
+    const wallet = await db.driverWallet.upsert({
+      where: { driverId },
+      create: {
+        driverId,
+        availableBalance: amount,
+        totalEarned: amount,
+      },
+      update: {
+        availableBalance: { increment: amount },
+        totalEarned: { increment: amount },
+      },
+    });
+    const balanceBefore = wallet.availableBalance - amount;
+    const balanceAfter = wallet.availableBalance;
+    await db.walletTransaction.create({
+      data: {
+        driverId,
+        type: 'ADJUSTMENT',
+        amount,
+        balanceBefore,
+        balanceAfter,
+        referenceType,
+        referenceId,
+        description,
+      },
+    });
+    totalAwarded += amount;
+    return true;
+  };
+
+  for (const milestone of QUEST_MILESTONES) {
+    if (completedRidesToday >= milestone.rides) {
+      const didCredit = await creditWallet(
+        milestone.payout,
+        'quest_daily',
+        `${driverId}:${dayKeyIst}:m${milestone.rides}`,
+        `Quest reward: ${milestone.rides} rides completed (${dayKeyIst})`
+      );
+      if (didCredit) awards.push({ type: `daily_${milestone.rides}`, amount: milestone.payout });
+    }
+  }
+
+  if (isPeakHourIst(completedAt)) {
+    const didCreditPeak = await creditWallet(
+      QUEST_PEAK_BONUS_PER_RIDE,
+      'quest_peak',
+      rideId,
+      `Quest reward: peak-hour ride bonus (${dayKeyIst})`
+    );
+    if (didCreditPeak) awards.push({ type: 'peak_bonus', amount: QUEST_PEAK_BONUS_PER_RIDE });
+  }
+
+  return { totalAwarded, awards };
+}
+
 export async function updateRideStatus(
   rideId: string,
   status: 'CONFIRMED' | 'DRIVER_ARRIVED' | 'RIDE_STARTED' | 'RIDE_COMPLETED' | 'CANCELLED',
@@ -877,6 +1000,21 @@ export async function updateRideStatus(
           walletBalanceAfter,
         });
       }
+
+      // Quest settlement (idempotent): daily milestones + peak-hour bonus.
+      const questSettlement = await applyQuestSettlement(prisma as any, {
+        driverId: currentRide.driverId,
+        rideId,
+        completedAt: updateData.completedAt || new Date(),
+      });
+      if (questSettlement.totalAwarded > 0) {
+        logger.info('[QUEST] Credited quest rewards', {
+          rideId,
+          driverId: currentRide.driverId,
+          totalAwarded: questSettlement.totalAwarded,
+          awards: questSettlement.awards,
+        });
+      }
     } else {
       // ATOMIC TRANSACTION: Update ride status AND create earnings together
       ride = await prisma.$transaction(async (tx) => {
@@ -969,6 +1107,21 @@ export async function updateRideStatus(
             driverEarning: netAmount,
             walletBalanceBefore,
             walletBalanceAfter,
+          });
+        }
+
+        // Step 6: Quest settlement inside same transaction for consistency.
+        const questSettlement = await applyQuestSettlement(tx as any, {
+          driverId: updatedRide.driverId!,
+          rideId: updatedRide.id,
+          completedAt: updatedRide.completedAt || new Date(),
+        });
+        if (questSettlement.totalAwarded > 0) {
+          logger.info('[QUEST] Credited quest rewards', {
+            rideId: updatedRide.id,
+            driverId: updatedRide.driverId!,
+            totalAwarded: questSettlement.totalAwarded,
+            awards: questSettlement.awards,
           });
         }
         

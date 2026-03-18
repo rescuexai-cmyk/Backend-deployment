@@ -5,6 +5,7 @@
 import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import type { WeatherCondition } from './algorithms';
+import { computeZoneHealthScore } from './marketplacePolicy';
 
 const logger = createLogger('pricing-data');
 
@@ -206,4 +207,112 @@ export async function isSpecialEventActive(): Promise<boolean> {
     // ignore
   }
   return false;
+}
+
+function getPercentile(values: number[], percentile: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
+export interface ZoneRealtimeSnapshot {
+  fulfillment: number;
+  acceptRate: number;
+  etaP90: number;
+  supplyRate: number;
+  zoneHealth: number;
+  totalRequests: number;
+  onlineDrivers: number;
+}
+
+/**
+ * Real-time liquidity health snapshot for marketplace controls.
+ * Kept intentionally lightweight so it can run per pricing call.
+ */
+export async function getZoneRealtimeSnapshot(
+  lat: number,
+  lng: number,
+  cityCode: string,
+  radiusKm: number = 5
+): Promise<ZoneRealtimeSnapshot> {
+  const delta = 0.045 * radiusKm;
+  const latMin = lat - delta;
+  const latMax = lat + delta;
+  const lngMin = lng - delta;
+  const lngMax = lng + delta;
+  const lookback = new Date(Date.now() - 60 * 60 * 1000);
+
+  const [rides, onlineDrivers] = await Promise.all([
+    prisma.ride.findMany({
+      where: {
+        pickupLatitude: { gte: latMin, lte: latMax },
+        pickupLongitude: { gte: lngMin, lte: lngMax },
+        createdAt: { gte: lookback },
+      },
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        driverAssignedAt: true,
+      },
+      take: 500,
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.driver.count({
+      where: {
+        isOnline: true,
+        isActive: true,
+        currentLatitude: { gte: latMin, lte: latMax },
+        currentLongitude: { gte: lngMin, lte: lngMax },
+      },
+    }),
+  ]);
+
+  const totalRequests = rides.length;
+  const completed = rides.filter((r) => r.status === 'RIDE_COMPLETED').length;
+  const accepted = rides.filter((r) => r.driverAssignedAt != null).length;
+  const fulfillment = totalRequests > 0 ? completed / totalRequests : 1;
+  const acceptRate = totalRequests > 0 ? accepted / totalRequests : 1;
+  const etaSamples = rides
+    .filter((r) => r.driverAssignedAt != null)
+    .map((r) => (r.driverAssignedAt!.getTime() - r.createdAt.getTime()) / (1000 * 60))
+    .filter((m) => Number.isFinite(m) && m >= 0);
+  const etaP90 = getPercentile(etaSamples, 90);
+  const supplyRate = onlineDrivers / Math.max(1, totalRequests);
+  const zoneHealth = computeZoneHealthScore({ fulfillment, acceptRate, etaP90 });
+
+  // Opportunistically persist latest zone score (upsert by zone_id + city).
+  const zoneId = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const db = prisma as any;
+  await db.pricingZoneHealth?.upsert({
+    where: { zoneId_cityCode: { zoneId, cityCode } },
+    update: {
+      fulfillment,
+      etaP90,
+      acceptRate,
+      healthScore: zoneHealth,
+      observedAt: new Date(),
+    },
+    create: {
+      zoneId,
+      cityCode,
+      fulfillment,
+      etaP90,
+      acceptRate,
+      healthScore: zoneHealth,
+    },
+  }).catch(() => {
+    // Keep pricing path resilient if persistence fails.
+  });
+
+  return {
+    fulfillment,
+    acceptRate,
+    etaP90,
+    supplyRate,
+    zoneHealth,
+    totalRequests,
+    onlineDrivers,
+  };
 }
