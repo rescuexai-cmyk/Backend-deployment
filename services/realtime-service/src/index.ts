@@ -1127,8 +1127,21 @@ app.post('/internal/ride-status-update', authenticateInternal, express.json(), a
     return;
   }
   logger.info(`[INTERNAL] ride-status-update called: ride=${rideId}, status=${status}`);
-  broadcastRideStatusUpdate(rideId, status, data);
-  res.status(200).json({ success: true });
+  try {
+    broadcastRideStatusUpdate(rideId, status, data);
+    res.status(200).json({ success: true });
+  } catch (error) {
+    // Status broadcast is best-effort: do not block ride lifecycle on realtime fanout issues.
+    logger.error('[INTERNAL] ride-status-update broadcast failed (non-fatal)', {
+      rideId,
+      status,
+      error,
+    });
+    res.status(200).json({
+      success: true,
+      warning: 'Realtime status broadcast failed but lifecycle update continues',
+    });
+  }
 }));
 
 app.post('/internal/driver-assigned', authenticateInternal, express.json(), asyncHandler(async (req, res) => {

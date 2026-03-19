@@ -653,7 +653,7 @@ router.post(
     // Get driver profile
     const driver = await prisma.driver.findUnique({ 
       where: { userId: req.user!.id },
-      select: { id: true }
+      select: { id: true, currentLatitude: true, currentLongitude: true }
     });
     
     if (!driver) {
@@ -681,12 +681,23 @@ router.post(
       return;
     }
     
-    // Verify ride is in correct status (DRIVER_ARRIVED)
-    if (ride.status !== 'DRIVER_ARRIVED') {
+    // Idempotent success: if ride already started, don't fail retried taps.
+    if (ride.status === 'RIDE_STARTED') {
+      const alreadyStartedRide = await rideService.getRideById(rideId, req.user!.id);
+      res.status(200).json({
+        success: true,
+        message: 'Ride already started',
+        data: alreadyStartedRide,
+      });
+      return;
+    }
+
+    const startableStatuses = ['DRIVER_ASSIGNED', 'CONFIRMED', 'DRIVER_ARRIVED'];
+    if (!startableStatuses.includes(ride.status)) {
       console.log(`[RIDE_START] ❌ REJECTED: Ride status is ${ride.status}, expected DRIVER_ARRIVED`);
       res.status(400).json({ 
         success: false, 
-        message: `Cannot start ride with status: ${ride.status}. Driver must arrive first.`,
+        message: `Cannot start ride with status: ${ride.status}.`,
         code: 'INVALID_STATUS',
         currentStatus: ride.status
       });
@@ -705,7 +716,59 @@ router.post(
     }
     
     console.log(`[RIDE_START] ✅ OTP verified successfully`);
+
+    // Enforce pickup geofence in /start as well, so malformed client flows
+    // cannot bypass the 120m "I've Arrived" requirement.
+    if (ride.status !== 'DRIVER_ARRIVED') {
+      if (driver.currentLatitude == null || driver.currentLongitude == null) {
+        res.status(400).json({
+          success: false,
+          message: 'Unable to verify your location. Please enable location and try again.',
+          code: 'DRIVER_LOCATION_UNAVAILABLE',
+        });
+        return;
+      }
+
+      const rideWithPickup = await prisma.ride.findUnique({
+        where: { id: rideId },
+        select: { pickupLatitude: true, pickupLongitude: true },
+      });
+
+      if (!rideWithPickup) {
+        res.status(404).json({ success: false, message: 'Ride not found', code: 'NOT_FOUND' });
+        return;
+      }
+
+      const distanceToPickupMeters = haversineDistanceMeters(
+        driver.currentLatitude,
+        driver.currentLongitude,
+        rideWithPickup.pickupLatitude,
+        rideWithPickup.pickupLongitude,
+      );
+
+      if (distanceToPickupMeters > ARRIVAL_RADIUS_METERS) {
+        res.status(400).json({
+          success: false,
+          message: 'Move closer to pickup location before starting the ride.',
+          code: 'ARRIVAL_RADIUS_NOT_REACHED',
+          data: {
+            distanceToPickupMeters: Math.round(distanceToPickupMeters),
+            arrivalRadiusMeters: ARRIVAL_RADIUS_METERS,
+          },
+        });
+        return;
+      }
+    }
     
+    // Auto-progress lifecycle so OTP flow remains resilient even if "arrived"
+    // button/state did not sync in time on client.
+    if (ride.status === 'DRIVER_ASSIGNED') {
+      await rideService.updateRideStatus(rideId, 'CONFIRMED', req.user!.id);
+    }
+    if (ride.status === 'DRIVER_ASSIGNED' || ride.status === 'CONFIRMED') {
+      await rideService.updateRideStatus(rideId, 'DRIVER_ARRIVED', req.user!.id);
+    }
+
     // Start the ride
     const updatedRide = await rideService.updateRideStatus(rideId, 'RIDE_STARTED', req.user!.id);
     
@@ -756,6 +819,17 @@ router.put(
     
     if (!ride) {
       res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+
+    // Idempotent no-op: repeated same status updates should not hard-fail.
+    if (ride.status === status) {
+      const currentRide = await rideService.getRideById(rideId, req.user!.id);
+      res.status(200).json({
+        success: true,
+        message: `Ride already in status ${status}`,
+        data: currentRide,
+      });
       return;
     }
     

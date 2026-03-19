@@ -723,22 +723,30 @@ export function broadcastRideStatusUpdate(rideId: string, status: string, data?:
   const timestamp = new Date().toISOString();
 
   // ── Primary: Broadcast via EventBus (SSE + MQTT + Socket.io) ─────────────
-  eventBus.publish(CHANNELS.ride(rideId), {
-    type: 'ride-status-update',
-    rideId,
-    status,
-    data,
-    timestamp,
-  });
+  try {
+    eventBus.publish(CHANNELS.ride(rideId), {
+      type: 'ride-status-update',
+      rideId,
+      status,
+      data,
+      timestamp,
+    });
+  } catch (error) {
+    logger.error('[REALTIME] EventBus publish failed for ride status', { error, rideId, status });
+  }
 
   // ── Also publish via MQTT directly for QoS 1 delivery guarantee ──────────
-  mqttBroker.deliver(CHANNELS.ride(rideId), {
-    type: 'ride-status-update',
-    rideId,
-    status,
-    data,
-    timestamp,
-  });
+  try {
+    mqttBroker.deliver(CHANNELS.ride(rideId), {
+      type: 'ride-status-update',
+      rideId,
+      status,
+      data,
+      timestamp,
+    });
+  } catch (error) {
+    logger.error('[REALTIME] MQTT direct deliver failed for ride status', { error, rideId, status });
+  }
 
   // ── Legacy Socket.io broadcast (backward compatibility) ──────────────────
   if (io) {
