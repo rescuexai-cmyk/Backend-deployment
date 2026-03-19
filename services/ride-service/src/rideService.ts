@@ -386,19 +386,44 @@ export async function createRide(req: CreateRideRequest) {
     // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
     logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
     logger.info(`[RIDE] Ride vehicleType: ${req.vehicleType}, normalized=${normalizeVehicleType(req.vehicleType)}`);
-    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10);
+    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, req.vehicleType);
     
-    if (!nearbyDrivers) {
+    if (!nearbyDrivers || nearbyDrivers.length === 0) {
       logger.info(`[RIDE] RAMEN unavailable, falling back to DB query...`);
-      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10);
+      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, req.vehicleType);
     } else {
       logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
     }
 
-    const typeFilteredDrivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
+    let typeFilteredDrivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
       isDriverCompatibleForRide(req.vehicleType, (d.vehicleType as string | null | undefined) ?? null),
     );
-    const driverIds = typeFilteredDrivers.map((d: { id: string }) => d.id);
+
+    // P0 fallback: when geospatial matching returns zero, fan out to all online drivers.
+    // This fail-open guard prevents silent dispatch blackholes while matching is being stabilized.
+    if (typeFilteredDrivers.length === 0) {
+      logger.warn('[RIDE] [FALLBACK] No nearby compatible drivers found. Falling back to ALL online verified drivers');
+      const onlineDrivers = await prisma.driver.findMany({
+        where: {
+          isOnline: true,
+          isActive: true,
+          isVerified: true,
+        },
+        select: {
+          id: true,
+          vehicleType: true,
+        },
+        take: 200,
+      });
+
+      typeFilteredDrivers = onlineDrivers.filter((d) =>
+        isDriverCompatibleForRide(req.vehicleType, d.vehicleType),
+      );
+
+      logger.warn(`[RIDE] [FALLBACK] Using ${typeFilteredDrivers.length} online compatible drivers for ride ${ride.id}`);
+    }
+
+    const driverIds = Array.from(new Set(typeFilteredDrivers.map((d: { id: string }) => d.id)));
     
     logger.info(`[RIDE] Found ${driverIds.length} nearby drivers: ${JSON.stringify(driverIds)}`);
     

@@ -6,7 +6,7 @@ import { body, query, validationResult } from 'express-validator';
 import { connectDatabase, optionalAuth, authenticate, AuthRequest, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
-import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
+import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS, latLngToH3 } from '@raahi/shared';
 import {
   setIo,
   setDriverMaps,
@@ -174,7 +174,21 @@ io.on('connection', (socket) => {
         onboardingStatus: true,
         currentLatitude: true,
         currentLongitude: true,
+        h3Index: true,
         vehicleType: true,
+        vehicleNumber: true,
+        vehicleModel: true,
+        rating: true,
+        ratingCount: true,
+        totalRides: true,
+        user: {
+          select: {
+            firstName: true,
+            lastName: true,
+            phone: true,
+            profileImage: true,
+          },
+        },
       },
     });
     
@@ -264,28 +278,41 @@ io.on('connection', (socket) => {
     await driverStateStore.addTransport(driverId, 'socketio');
     
     // Ensure driver is registered in RAMEN (if not already from hydration)
-    if (!(await driverStateStore.getDriver(driverId))) {
+    const ramenState = await driverStateStore.getDriver(driverId);
+    if (!ramenState) {
+      const h3Index =
+        dbDriver.h3Index ||
+        (dbDriver.currentLatitude != null && dbDriver.currentLongitude != null
+          ? latLngToH3(dbDriver.currentLatitude, dbDriver.currentLongitude)
+          : null);
       await driverStateStore.registerDriver({
         id: driverId,
         userId: dbDriver.userId,
-        isOnline: dbDriver.isOnline,
+        isOnline: true,
         isActive: dbDriver.isActive,
         isVerified: dbDriver.isVerified,
         currentLatitude: dbDriver.currentLatitude,
         currentLongitude: dbDriver.currentLongitude,
-        h3Index: null,
-        firstName: '',
-        lastName: '',
-        phone: null,
-        profileImage: null,
-        vehicleNumber: null,
-        vehicleModel: null,
+        h3Index,
+        firstName: dbDriver.user?.firstName || '',
+        lastName: dbDriver.user?.lastName || '',
+        phone: dbDriver.user?.phone || null,
+        profileImage: dbDriver.user?.profileImage || null,
+        vehicleNumber: dbDriver.vehicleNumber ?? null,
+        vehicleModel: dbDriver.vehicleModel ?? null,
         vehicleType: dbDriver.vehicleType ?? null,
-        rating: 0,
-        ratingCount: 0,
-        totalRides: 0,
+        rating: dbDriver.rating ?? 0,
+        ratingCount: dbDriver.ratingCount ?? 0,
+        totalRides: dbDriver.totalRides ?? 0,
       });
+      logger.info(`[RAMEN] Driver added to memory store: ${driverId}`);
     }
+
+    await driverStateStore.setOnlineStatus(driverId, true);
+    if (dbDriver.currentLatitude != null && dbDriver.currentLongitude != null) {
+      await driverStateStore.updateLocation(driverId, dbDriver.currentLatitude, dbDriver.currentLongitude);
+    }
+    logger.info(`[RAMEN] Total drivers in memory: ${await driverStateStore.getOnlineDriverCount()}`);
     
     logger.info(`[SOCKET] ✅ Driver REGISTERED SUCCESSFULLY`);
     logger.info(`[SOCKET]   - Driver ID: ${driverId}`);
@@ -294,6 +321,9 @@ io.on('connection', (socket) => {
     logger.info(`[SOCKET]   - In available-drivers room: ${inAvailableRoom} (size: ${availableRoom?.size})`);
     logger.info(`[SOCKET]   - DB isOnline: ${dbDriver.isOnline}`);
     logger.info(`[SOCKET]   - RAMEN registered: true`);
+    logger.info(`[SOCKET] Driver connected: ${driverId}`);
+    logger.info(`[SOCKET] Driver joined room: driver-${driverId}`);
+    logger.info(`[SOCKET] Connected drivers count: ${driverSockets.size}`);
     logger.info(`[SOCKET] ========== DRIVER REGISTRATION COMPLETE ==========`);
     
     // Confirm registration to client with full state
@@ -390,6 +420,7 @@ io.on('connection', (socket) => {
       }
     }
     
+    await driverStateStore.setOnlineStatus(driverId, false);
     currentDriverId = null;
     logger.info(`[SOCKET] Driver ${driverId} left driver room (socket: ${socket.id})`);
   });
@@ -413,6 +444,7 @@ io.on('connection', (socket) => {
     const driverId = await resolveDriverId(inputId);
     if (driverId) {
       socket.leave('available-drivers');
+      await driverStateStore.setOnlineStatus(driverId, false);
       logger.info(`[SOCKET] Driver ${driverId} is now offline`);
     }
   });
@@ -1176,6 +1208,73 @@ app.get('/internal/chat-presence', authenticateInternal, asyncHandler(async (req
 // Pattern: Service → HTTP → In-Memory Lookup (0.1ms) vs Service → DB Query (20-100ms)
 // ════════════════════════════════════════════════════════════════════════════════
 
+async function ensureDriverInRamen(inputId: string) {
+  const dbDriver = await prisma.driver.findFirst({
+    where: {
+      OR: [{ id: inputId }, { userId: inputId }],
+    },
+    select: {
+      id: true,
+      userId: true,
+      isOnline: true,
+      isActive: true,
+      isVerified: true,
+      currentLatitude: true,
+      currentLongitude: true,
+      h3Index: true,
+      vehicleType: true,
+      vehicleNumber: true,
+      vehicleModel: true,
+      rating: true,
+      ratingCount: true,
+      totalRides: true,
+      user: {
+        select: {
+          firstName: true,
+          lastName: true,
+          phone: true,
+          profileImage: true,
+        },
+      },
+    },
+  });
+
+  if (!dbDriver) return null;
+
+  const existing = await driverStateStore.getDriver(dbDriver.id);
+  if (!existing) {
+    const h3Index =
+      dbDriver.h3Index ||
+      (dbDriver.currentLatitude != null && dbDriver.currentLongitude != null
+        ? latLngToH3(dbDriver.currentLatitude, dbDriver.currentLongitude)
+        : null);
+    await driverStateStore.registerDriver({
+      id: dbDriver.id,
+      userId: dbDriver.userId,
+      isOnline: dbDriver.isOnline,
+      isActive: dbDriver.isActive,
+      isVerified: dbDriver.isVerified,
+      currentLatitude: dbDriver.currentLatitude,
+      currentLongitude: dbDriver.currentLongitude,
+      h3Index,
+      firstName: dbDriver.user?.firstName || '',
+      lastName: dbDriver.user?.lastName || '',
+      phone: dbDriver.user?.phone || null,
+      profileImage: dbDriver.user?.profileImage || null,
+      vehicleNumber: dbDriver.vehicleNumber ?? null,
+      vehicleModel: dbDriver.vehicleModel ?? null,
+      vehicleType: dbDriver.vehicleType ?? null,
+      rating: dbDriver.rating ?? 0,
+      ratingCount: dbDriver.ratingCount ?? 0,
+      totalRides: dbDriver.totalRides ?? 0,
+    });
+    logger.info(`[RAMEN] Driver added to memory store: ${dbDriver.id}`);
+    logger.info(`[RAMEN] Total drivers in memory: ${await driverStateStore.getOnlineDriverCount()}`);
+  }
+
+  return dbDriver;
+}
+
 /**
  * RAMEN: Find nearby drivers from in-memory H3 geospatial index.
  * Replaces: pricing-service → prisma.driver.findMany({h3Index: {in: cells}})
@@ -1193,7 +1292,18 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
     return;
   }
 
-  const drivers = await driverStateStore.findNearbyDrivers(lat, lng, radius, vehicleType);
+  logger.info(`[RAMEN] Searching drivers near: ${lat},${lng} radius=${radius} vehicleType=${vehicleType || 'any'}`);
+  let drivers = await driverStateStore.findNearbyDrivers(lat, lng, radius, vehicleType);
+
+  if (drivers.length === 0) {
+    const onlineDriverIds = await driverStateStore.getOnlineDriverIds();
+    const onlineDriverStates = await Promise.all(onlineDriverIds.map((id) => driverStateStore.getDriver(id)));
+    drivers = onlineDriverStates.filter((d): d is NonNullable<typeof d> => Boolean(d));
+    logger.warn(
+      `[RAMEN] Fallback activated: no nearby drivers, returning all online drivers (${drivers.length}) for testing`,
+    );
+  }
+  logger.info(`[RAMEN] Drivers found: ${JSON.stringify(drivers.map((d) => d.id))}`);
   
   res.json({
     success: true,
@@ -1269,28 +1379,40 @@ app.get('/internal/driver-state/:driverId', authenticateInternal, asyncHandler(a
  * Replaces: prisma.driver.update() for location updates
  */
 app.post('/internal/driver-location', authenticateInternal, asyncHandler(async (req, res) => {
-  const { driverId, lat, lng, heading, speed } = req.body;
-  if (!driverId || lat === undefined || lng === undefined) {
+  const { driverId: inputId, lat, lng, heading, speed } = req.body;
+  if (!inputId || lat === undefined || lng === undefined) {
     res.status(400).json({ success: false, message: 'driverId, lat, lng required' });
     return;
   }
 
-  const result = await driverStateStore.updateLocation(driverId, lat, lng, heading, speed);
+  const dbDriver = await ensureDriverInRamen(inputId);
+  if (!dbDriver) {
+    res.status(404).json({ success: false, message: 'Driver not found in DB for location update' });
+    return;
+  }
+
+  await driverStateStore.setOnlineStatus(dbDriver.id, true);
+  const result = await driverStateStore.updateLocation(dbDriver.id, lat, lng, heading, speed);
   if (!result) {
-    // Driver not in memory — register them first
-    res.status(404).json({ success: false, message: 'Driver not registered in RAMEN. Call POST /internal/register-driver first.' });
+    res.status(404).json({ success: false, message: 'Driver not registered in RAMEN after bootstrap' });
     return;
   }
 
   // Also update SSE H3 subscriptions if cell changed
   if (result.h3Changed) {
-    sseManager.updateDriverH3(driverId, result.newH3);
+    sseManager.updateDriverH3(dbDriver.id, result.newH3);
   }
 
   // Also publish via MQTT for direct subscribers
-  mqttBroker.publishDriverLocation(driverId, lat, lng, result.newH3, heading, speed);
+  mqttBroker.publishDriverLocation(dbDriver.id, lat, lng, result.newH3, heading, speed);
 
-  res.json({ success: true, h3Index: result.newH3, h3Changed: result.h3Changed, source: 'in-memory-ramen' });
+  res.json({
+    success: true,
+    driverId: dbDriver.id,
+    h3Index: result.newH3,
+    h3Changed: result.h3Changed,
+    source: 'in-memory-ramen',
+  });
 }));
 
 /**
@@ -1312,14 +1434,20 @@ app.post('/internal/register-driver', authenticateInternal, asyncHandler(async (
  * RAMEN: Set driver online/offline status in memory.
  */
 app.post('/internal/driver-status', authenticateInternal, asyncHandler(async (req, res) => {
-  const { driverId, isOnline } = req.body;
-  if (!driverId || isOnline === undefined) {
+  const { driverId: inputId, isOnline } = req.body;
+  if (!inputId || isOnline === undefined) {
     res.status(400).json({ success: false, message: 'driverId, isOnline required' });
     return;
   }
 
-  const result = await driverStateStore.setOnlineStatus(driverId, isOnline);
-  res.json({ success: result });
+  const dbDriver = await ensureDriverInRamen(inputId);
+  if (!dbDriver) {
+    res.status(404).json({ success: false, message: 'Driver not found in DB for status update' });
+    return;
+  }
+
+  const result = await driverStateStore.setOnlineStatus(dbDriver.id, isOnline);
+  res.json({ success: result, driverId: dbDriver.id });
 }));
 
 /**

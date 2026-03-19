@@ -161,6 +161,39 @@ function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number):
   return earthRadius * c;
 }
 
+function normalizeVehicleCategory(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
+  if (!raw) return null;
+  const value = raw.toLowerCase().trim().replace(/-/g, '_');
+  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
+  if (value === 'auto') return 'auto';
+  if (
+    [
+      'cab',
+      'cab_mini',
+      'cab_sedan',
+      'cab_xl',
+      'cab_suv',
+      'cab_premium',
+      'personal_driver',
+      'commercial_car',
+    ].includes(value)
+  ) {
+    return 'cab';
+  }
+  return null;
+}
+
+function isVehicleCompatible(
+  rideVehicleType: string | null | undefined,
+  driverVehicleType: string | null | undefined,
+): boolean {
+  const rideCategory = normalizeVehicleCategory(rideVehicleType);
+  if (!rideCategory) return true;
+  const driverCategory = normalizeVehicleCategory(driverVehicleType);
+  if (!driverCategory) return false;
+  return rideCategory === driverCategory;
+}
+
 // Shared driver tracking maps (set by index.ts)
 let connectedDrivers: Map<string, string> | null = null; // socketId -> driverId
 let driverSockets: Map<string, Set<string>> | null = null; // driverId -> Set of socketIds
@@ -411,18 +444,15 @@ export async function findNearbyDrivers(lat: number, lng: number, radius: number
       isActive: true,
     };
     
-    if (vehicleType) {
-      whereClause.vehicleType = vehicleType;
-    }
-    
     const drivers = await prisma.driver.findMany({
       where: whereClause,
-      select: { id: true, currentLatitude: true, currentLongitude: true },
+      select: { id: true, currentLatitude: true, currentLongitude: true, vehicleType: true },
     });
     
     // Filter by actual distance
     const nearbyDrivers = drivers.filter(d => {
       if (!d.currentLatitude || !d.currentLongitude) return false;
+      if (!isVehicleCompatible(vehicleType, d.vehicleType)) return false;
       const dist = Math.sqrt(
         Math.pow((d.currentLatitude - lat) * 111, 2) + 
         Math.pow((d.currentLongitude - lng) * 111 * Math.cos(lat * Math.PI / 180), 2)
@@ -436,8 +466,24 @@ export async function findNearbyDrivers(lat: number, lng: number, radius: number
     }
   }
   
-  logger.debug(`[H3-REALTIME] No drivers found after k=${h3Config.maxKRing}`);
-  return [];
+  logger.warn(`[H3-REALTIME] No nearby drivers found via H3 ring expansion, using online-driver fallback`);
+  const fallbackDrivers = await prisma.driver.findMany({
+    where: {
+      isOnline: true,
+      isActive: true,
+    },
+    select: { id: true, vehicleType: true },
+    take: 200,
+  });
+
+  const compatible = fallbackDrivers
+    .filter((driver) => isVehicleCompatible(vehicleType, driver.vehicleType))
+    .map((driver) => driver.id);
+
+  logger.info(
+    `[H3-REALTIME] Fallback online drivers returned: ${compatible.length} (vehicleType=${vehicleType || 'any'})`,
+  );
+  return compatible;
 }
 
 /**
@@ -573,10 +619,24 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     }),
   );
   
-  // STEP 2: DO NOT broadcast ride requests to generic available-drivers room.
-  // This prevents cross-vehicle leakage (e.g., bike requests reaching cab drivers).
-  result.availableDrivers = 0;
-  logger.info(`[BROADCAST] Step 2: Skipped generic available-drivers broadcast (vehicle-safe mode)`);
+  // STEP 2: Fallback generic broadcast when targeted list is empty/unreachable.
+  // This fail-open mode avoids P0 dispatch blackholes during matching drift.
+  const shouldFallbackToGeneric = driverIds.length === 0 || result.targetedDrivers === 0;
+  if (shouldFallbackToGeneric) {
+    const availableRoomSize = io!.sockets.adapter.rooms.get('available-drivers')?.size || 0;
+    result.availableDrivers = availableRoomSize;
+    if (availableRoomSize > 0) {
+      io!.to('available-drivers').emit('new-ride-request', payload);
+      logger.warn(
+        `[BROADCAST] Step 2: Fallback broadcast to available-drivers room (${availableRoomSize} sockets)`,
+      );
+    } else {
+      logger.warn('[BROADCAST] Step 2: Fallback requested but available-drivers room is empty');
+    }
+  } else {
+    result.availableDrivers = 0;
+    logger.info('[BROADCAST] Step 2: Skipped generic fallback (targeted broadcast already delivered)');
+  }
   
   // ── STEP 3: Broadcast via EventBus to SSE + MQTT transports ──────────────
   // This is the key improvement - SSE and MQTT provide reliable delivery
@@ -589,10 +649,21 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     payload,
   };
   
-  // 3a: Skip generic available-drivers EventBus broadcast for ride requests.
-  // Keep only targeted driver channels for strict vehicle matching.
-  const sseAvailableSize = 0;
-  logger.info(`[BROADCAST]   ⏭️ EventBus available-drivers broadcast skipped (vehicle-safe mode)`);
+  // 3a: EventBus fallback fanout to available-drivers channel
+  let sseAvailableSize = 0;
+  if (shouldFallbackToGeneric) {
+    sseAvailableSize = eventBus.getTotalListeners(CHANNELS.availableDrivers);
+    if (sseAvailableSize > 0) {
+      eventBus.publish(CHANNELS.availableDrivers, rideRequestEvent);
+      logger.warn(
+        `[BROADCAST]   ✅ EventBus fallback → available-drivers listeners: ${sseAvailableSize}`,
+      );
+    } else {
+      logger.warn('[BROADCAST]   ⚠️ EventBus fallback requested but available-drivers has 0 listeners');
+    }
+  } else {
+    logger.info('[BROADCAST]   ⏭️ EventBus available-drivers fallback skipped');
+  }
   
   // 3b: Publish to individual driver channels (SSE + MQTT)
   let eventBusDriversReached = 0;
