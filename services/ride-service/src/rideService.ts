@@ -21,6 +21,12 @@ import { calculateCancellationFee, CancellationContext } from './cancellationSer
 
 const logger = createLogger('ride-service');
 
+function isWalletTransactionsTableMissing(error: unknown): boolean {
+  const e = error as { code?: string; message?: string } | null;
+  const message = e?.message || '';
+  return e?.code === 'P2021' && message.includes('wallet_transactions');
+}
+
 // ==================== NOTIFICATION HELPER ====================
 interface NotificationData {
   userId: string;
@@ -979,51 +985,63 @@ export async function updateRideStatus(
         },
       });
 
-      // Idempotent wallet credit for existing earning records
-      const existingWalletCredit = await prisma.walletTransaction.findFirst({
-        where: {
-          driverId: currentRide.driverId,
-          type: 'RIDE_EARNING',
-          referenceType: 'ride',
-          referenceId: rideId,
-        },
-      });
-      if (!existingWalletCredit) {
-        const wallet = await prisma.driverWallet.upsert({
-          where: { driverId: currentRide.driverId },
-          create: {
-            driverId: currentRide.driverId,
-            availableBalance: existingEarning.netAmount,
-            totalEarned: existingEarning.netAmount,
-          },
-          update: {
-            availableBalance: { increment: existingEarning.netAmount },
-            totalEarned: { increment: existingEarning.netAmount },
-          },
-        });
-        const walletBalanceBefore = wallet.availableBalance - existingEarning.netAmount;
-        const walletBalanceAfter = wallet.availableBalance;
-        await prisma.walletTransaction.create({
-          data: {
+      // Idempotent wallet credit for existing earning records.
+      // If wallet_transactions table is missing in this environment, do not block ride completion.
+      try {
+        const existingWalletCredit = await prisma.walletTransaction.findFirst({
+          where: {
             driverId: currentRide.driverId,
             type: 'RIDE_EARNING',
-            amount: existingEarning.netAmount,
-            balanceBefore: walletBalanceBefore,
-            balanceAfter: walletBalanceAfter,
             referenceType: 'ride',
             referenceId: rideId,
-            description: `Ride earning credit for ride ${rideId}`,
           },
         });
-        logger.info('[WALLET] Credited existing earning to wallet', {
-          rideId,
-          driverId: currentRide.driverId,
-          fare: ride.totalFare,
-          commission: existingEarning.commission,
-          driverEarning: existingEarning.netAmount,
-          walletBalanceBefore,
-          walletBalanceAfter,
-        });
+        if (!existingWalletCredit) {
+          const wallet = await prisma.driverWallet.upsert({
+            where: { driverId: currentRide.driverId },
+            create: {
+              driverId: currentRide.driverId,
+              availableBalance: existingEarning.netAmount,
+              totalEarned: existingEarning.netAmount,
+            },
+            update: {
+              availableBalance: { increment: existingEarning.netAmount },
+              totalEarned: { increment: existingEarning.netAmount },
+            },
+          });
+          const walletBalanceBefore = wallet.availableBalance - existingEarning.netAmount;
+          const walletBalanceAfter = wallet.availableBalance;
+          await prisma.walletTransaction.create({
+            data: {
+              driverId: currentRide.driverId,
+              type: 'RIDE_EARNING',
+              amount: existingEarning.netAmount,
+              balanceBefore: walletBalanceBefore,
+              balanceAfter: walletBalanceAfter,
+              referenceType: 'ride',
+              referenceId: rideId,
+              description: `Ride earning credit for ride ${rideId}`,
+            },
+          });
+          logger.info('[WALLET] Credited existing earning to wallet', {
+            rideId,
+            driverId: currentRide.driverId,
+            fare: ride.totalFare,
+            commission: existingEarning.commission,
+            driverEarning: existingEarning.netAmount,
+            walletBalanceBefore,
+            walletBalanceAfter,
+          });
+        }
+      } catch (walletError) {
+        if (isWalletTransactionsTableMissing(walletError)) {
+          logger.warn('[WALLET] wallet_transactions table missing, skipping wallet transaction logs', {
+            rideId,
+            driverId: currentRide.driverId,
+          });
+        } else {
+          throw walletError;
+        }
       }
 
       // Quest settlement (idempotent): daily milestones + peak-hour bonus.
@@ -1088,15 +1106,31 @@ export async function updateRideStatus(
           },
         });
 
-        // Step 5: Credit driver wallet and create wallet transaction log (idempotent by reference lookup)
-        const existingWalletCredit = await tx.walletTransaction.findFirst({
-          where: {
-            driverId: updatedRide.driverId!,
-            type: 'RIDE_EARNING',
-            referenceType: 'ride',
-            referenceId: updatedRide.id,
-          },
-        });
+        // Step 5: Credit driver wallet and create wallet transaction log (idempotent).
+        // Degrade gracefully if wallet_transactions table is missing in this DB.
+        let shouldSkipWalletTransactionLog = false;
+        let existingWalletCredit: any = null;
+        try {
+          existingWalletCredit = await tx.walletTransaction.findFirst({
+            where: {
+              driverId: updatedRide.driverId!,
+              type: 'RIDE_EARNING',
+              referenceType: 'ride',
+              referenceId: updatedRide.id,
+            },
+          });
+        } catch (walletError) {
+          if (isWalletTransactionsTableMissing(walletError)) {
+            shouldSkipWalletTransactionLog = true;
+            logger.warn('[WALLET] wallet_transactions table missing during completion transaction; continuing without transaction logs', {
+              rideId: updatedRide.id,
+              driverId: updatedRide.driverId!,
+            });
+          } else {
+            throw walletError;
+          }
+        }
+
         if (!existingWalletCredit) {
           const wallet = await tx.driverWallet.upsert({
             where: { driverId: updatedRide.driverId! },
@@ -1112,18 +1146,22 @@ export async function updateRideStatus(
           });
           const walletBalanceBefore = wallet.availableBalance - netAmount;
           const walletBalanceAfter = wallet.availableBalance;
-          await tx.walletTransaction.create({
-            data: {
-              driverId: updatedRide.driverId!,
-              type: 'RIDE_EARNING',
-              amount: netAmount,
-              balanceBefore: walletBalanceBefore,
-              balanceAfter: walletBalanceAfter,
-              referenceType: 'ride',
-              referenceId: updatedRide.id,
-              description: `Ride earning credit for ride ${updatedRide.id}`,
-            },
-          });
+
+          if (!shouldSkipWalletTransactionLog) {
+            await tx.walletTransaction.create({
+              data: {
+                driverId: updatedRide.driverId!,
+                type: 'RIDE_EARNING',
+                amount: netAmount,
+                balanceBefore: walletBalanceBefore,
+                balanceAfter: walletBalanceAfter,
+                referenceType: 'ride',
+                referenceId: updatedRide.id,
+                description: `Ride earning credit for ride ${updatedRide.id}`,
+              },
+            });
+          }
+
           logger.info('[WALLET] Credited ride earning to wallet', {
             rideId: updatedRide.id,
             driverId: updatedRide.driverId!,
@@ -1132,6 +1170,7 @@ export async function updateRideStatus(
             driverEarning: netAmount,
             walletBalanceBefore,
             walletBalanceAfter,
+            skippedTransactionLog: shouldSkipWalletTransactionLog,
           });
         }
 

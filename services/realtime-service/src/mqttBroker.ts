@@ -337,18 +337,24 @@ class MQTTBrokerTransport implements RealtimeTransport {
       t: Date.now(),  // Compact timestamp for bandwidth efficiency
     });
 
-    this.aedes.publish({
-      topic,
-      payload: Buffer.from(payload),
-      qos: 0,  // Fire and forget for location updates
-      retain: true,  // Retain last known location for new subscribers
-      cmd: 'publish',
-      dup: false,
-    }, (err) => {
-      if (err) {
-        logger.debug(`[MQTT] Location publish failed for ${driverId}`, { error: err });
-      }
-    });
+    try {
+      this.aedes.publish({
+        topic,
+        payload: Buffer.from(payload),
+        qos: 0, // Fire and forget for location updates
+        // Avoid retained-path crashes seen in production with aedes persistence.
+        retain: false,
+        cmd: 'publish',
+        dup: false,
+      }, (err) => {
+        if (err) {
+          logger.debug(`[MQTT] Location publish failed for ${driverId}`, { error: err });
+        }
+      });
+    } catch (error) {
+      // Non-fatal: location updates must not fail the API request path.
+      logger.warn(`[MQTT] Location publish threw for ${driverId}`, { error });
+    }
   }
 
   /**
@@ -367,14 +373,18 @@ class MQTTBrokerTransport implements RealtimeTransport {
       t: Date.now(),
     });
 
-    this.aedes.publish({
-      topic,
-      payload: Buffer.from(payload),
-      qos: 1,  // At least once - important for ride tracking
-      retain: true,
-      cmd: 'publish',
-      dup: false,
-    }, () => {});
+    try {
+      this.aedes.publish({
+        topic,
+        payload: Buffer.from(payload),
+        qos: 1, // At least once - important for ride tracking
+        retain: false,
+        cmd: 'publish',
+        dup: false,
+      }, () => {});
+    } catch (error) {
+      logger.warn(`[MQTT] Ride location publish threw for ride ${rideId}`, { error });
+    }
   }
 
   // ─── Stats ───────────────────────────────────────────────────────────────
