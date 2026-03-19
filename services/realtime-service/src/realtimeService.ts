@@ -297,25 +297,39 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
   // Convert lat/lng to H3 index for efficient geospatial queries
   const h3Index = latLngToH3(lat, lng);
   const config = getH3Config();
-  
+
+  // Accept both driver record id and user id from clients and normalize.
+  const dbDriver = await prisma.driver.findFirst({
+    where: {
+      OR: [{ id: driverId }, { userId: driverId }],
+    },
+    select: { id: true },
+  });
+
+  if (!dbDriver) {
+    logger.warn(`[H3] updateDriverLocation skipped: driver not found for input=${driverId}`);
+    return;
+  }
+
   await prisma.driver.update({
-    where: { id: driverId },
-    data: { 
-      currentLatitude: lat, 
-      currentLongitude: lng, 
-      h3Index,  // Store H3 index for geospatial matching
-      lastActiveAt: new Date() 
+    where: { id: dbDriver.id },
+    data: {
+      currentLatitude: lat,
+      currentLongitude: lng,
+      h3Index, // Store H3 index for geospatial matching
+      lastActiveAt: new Date(),
     },
   });
-  
-  logger.debug(`[H3] Driver ${driverId} location updated: h3Index=${h3Index}, res=${config.resolution}`);
+
+  const canonicalDriverId = dbDriver.id;
+  logger.debug(`[H3] Driver ${canonicalDriverId} location updated: h3Index=${h3Index}, res=${config.resolution}`);
   
   const timestamp = new Date().toISOString();
 
   // ── Broadcast via EventBus (reaches SSE + Socket.io + MQTT) ──────────────
   eventBus.publish(CHANNELS.driverLocations, {
     type: 'driver-location',
-    driverId,
+    driverId: canonicalDriverId,
     lat,
     lng,
     h3Index,
@@ -325,15 +339,15 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
   });
 
   // ── Direct MQTT publish for high-frequency location (bypass EventBus for perf) ──
-  mqttBroker.publishDriverLocation(driverId, lat, lng, h3Index, heading, speed);
+  mqttBroker.publishDriverLocation(canonicalDriverId, lat, lng, h3Index, heading, speed);
 
   // ── Update SSE H3 subscriptions if driver moved to new cell ──────────────
-  sseManager.updateDriverH3(driverId, h3Index);
+  sseManager.updateDriverH3(canonicalDriverId, h3Index);
 
   // ── Legacy Socket.io broadcast (backward compatibility) ──────────────────
   if (io) {
     io.emit('driver-location-update', {
-      driverId,
+      driverId: canonicalDriverId,
       lat,
       lng,
       h3Index,
@@ -347,7 +361,7 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
   try {
     const activePrePickupRide = await prisma.ride.findFirst({
       where: {
-        driverId,
+        driverId: canonicalDriverId,
         status: { in: ['DRIVER_ASSIGNED', 'CONFIRMED'] },
       },
       select: {
@@ -405,12 +419,12 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
 
       logger.info('[ARRIVAL_RADIUS] Driver entered pickup radius', {
         rideId,
-        driverId,
+        driverId: canonicalDriverId,
         distanceToPickupMeters: Math.round(meterDistance),
       });
     }
   } catch (error) {
-    logger.warn('[ARRIVAL_RADIUS] Geofence detection failed', { driverId, error });
+    logger.warn('[ARRIVAL_RADIUS] Geofence detection failed', { driverId: canonicalDriverId, error });
   }
 }
 

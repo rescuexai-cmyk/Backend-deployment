@@ -928,6 +928,12 @@ router.put(
         return;
       }
     }
+
+    // Resilience: some clients may mark arrival directly from DRIVER_ASSIGNED.
+    // Auto-progress to CONFIRMED first so DRIVER_ASSIGNED -> DRIVER_ARRIVED doesn't hard-fail.
+    if (status === 'DRIVER_ARRIVED' && ride.status === 'DRIVER_ASSIGNED') {
+      await rideService.updateRideStatus(rideId, 'CONFIRMED', req.user!.id);
+    }
     
     const fareAdjustments =
       status === 'RIDE_COMPLETED' &&
