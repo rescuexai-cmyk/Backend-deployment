@@ -3,6 +3,7 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
@@ -10,14 +11,16 @@ datasources:
 
   - name: PostgreSQL
     type: postgres
+    uid: postgres
     url: postgres:5432
     database: raahi
     user: raahi
     secureJsonData:
-      password: ${POSTGRES_PASSWORD:-raahi_prod_2024_secure}
+      password: ${POSTGRES_PASSWORD}
     jsonData:
       sslmode: disable
       maxOpenConns: 5
       maxIdleConns: 2
       connMaxLifetime: 14400
+      postgresVersion: 1600
     editable: false

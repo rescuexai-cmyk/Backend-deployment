@@ -67,3 +67,18 @@ scrape_configs:
   - job_name: 'cadvisor'
     static_configs:
       - targets: ['cadvisor:8080']
+
+  # ============================================
+  # BUSINESS KPI METRICS
+  # ============================================
+
+  # Raahi Business Metrics - Driver, Ride, Revenue KPIs
+  - job_name: 'raahi_business'
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    metrics_path: /metrics/business
+    static_configs:
+      - targets: ['metrics-service:5010']
+        labels:
+          service: 'business-kpi'
+          environment: 'production'

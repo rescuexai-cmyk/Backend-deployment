@@ -1,12 +1,11 @@
 # ============================================
-# RAAHI - PRODUCTION STACK (Crash-resistant)
+# RAAHI - DROPLET / SMALL VPS (1-2GB RAM)
 # ============================================
-# - All services: restart always (auto-recover on crash)
-# - mem_limit on all: prevents OOM cascade (one service can't kill others)
-# - Health checks: proper startup order
-# - Monitoring: docker compose --profile monitoring up -d
-# - Minimal (no monitoring): docker compose up -d
-# - Recommended: 4GB+ RAM for full stack
+# Core app ONLY - NO monitoring stack
+# 12 containers instead of 21
+# ============================================
+# Usage: docker compose -f docker-compose.droplet.yml up -d
+# For monitoring: use docker-compose.prod.yml on a bigger server
 # ============================================
 
 version: "3.9"
@@ -16,12 +15,7 @@ services:
     image: postgres:16-alpine
     container_name: raahi-postgres
     restart: always
-    mem_limit: 512m
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U raahi -d raahi"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    mem_limit: 256m
     environment:
       POSTGRES_DB: raahi
       POSTGRES_USER: raahi
@@ -29,12 +23,17 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raahi -d raahi"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     container_name: raahi-redis
     restart: always
-    mem_limit: 128m
+    mem_limit: 64m
     volumes:
       - redisdata:/data
     healthcheck:
@@ -49,9 +48,9 @@ services:
       dockerfile: services/gateway/Dockerfile
     container_name: raahi-gateway
     restart: always
-    mem_limit: 256m
+    mem_limit: 128m
     ports:
-      - "127.0.0.1:3000:3000"
+      - "3000:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -64,27 +63,19 @@ services:
       REALTIME_SERVICE_URL: http://realtime-service:5007
       ADMIN_SERVICE_URL: http://admin-service:5008
     depends_on:
-      auth-service:
-        condition: service_healthy
-      user-service:
-        condition: service_healthy
-      driver-service:
-        condition: service_healthy
-      ride-service:
-        condition: service_healthy
-      pricing-service:
-        condition: service_healthy
-      notification-service:
-        condition: service_healthy
-      realtime-service:
-        condition: service_healthy
-      admin-service:
-        condition: service_healthy
+      auth-service: { condition: service_healthy }
+      user-service: { condition: service_healthy }
+      driver-service: { condition: service_healthy }
+      ride-service: { condition: service_healthy }
+      pricing-service: { condition: service_healthy }
+      notification-service: { condition: service_healthy }
+      realtime-service: { condition: service_healthy }
+      admin-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 90s
 
   auth-service:
@@ -93,7 +84,7 @@ services:
       dockerfile: services/auth-service/Dockerfile
     container_name: raahi-auth-service
     restart: always
-    mem_limit: 256m
+    mem_limit: 128m
     environment:
       NODE_ENV: production
       PORT: 5001
@@ -108,8 +99,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       ALLOW_DEV_OTP: ${ALLOW_DEV_OTP:-false}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/health"]
       interval: 15s
@@ -123,7 +113,7 @@ services:
       dockerfile: services/user-service/Dockerfile
     container_name: raahi-user-service
     restart: always
-    mem_limit: 256m
+    mem_limit: 128m
     environment:
       NODE_ENV: production
       PORT: 5002
@@ -131,8 +121,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5002/health"]
       interval: 15s
@@ -146,7 +135,7 @@ services:
       dockerfile: services/driver-service/Dockerfile
     container_name: raahi-driver-service
     restart: always
-    mem_limit: 256m
+    mem_limit: 128m
     environment:
       NODE_ENV: production
       PORT: 5003
@@ -165,10 +154,8 @@ services:
       GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY}
       VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5003/health"]
       interval: 15s
@@ -182,7 +169,7 @@ services:
       dockerfile: services/ride-service/Dockerfile
     container_name: raahi-ride-service
     restart: always
-    mem_limit: 256m
+    mem_limit: 128m
     environment:
       NODE_ENV: production
       PORT: 5004
@@ -193,12 +180,9 @@ services:
       REALTIME_SERVICE_URL: http://realtime-service:5007
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
     depends_on:
-      postgres:
-        condition: service_healthy
-      pricing-service:
-        condition: service_healthy
-      realtime-service:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      pricing-service: { condition: service_healthy }
+      realtime-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5004/health"]
       interval: 15s
@@ -212,7 +196,7 @@ services:
       dockerfile: services/pricing-service/Dockerfile
     container_name: raahi-pricing-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 64m
     environment:
       NODE_ENV: production
       PORT: 5005
@@ -221,8 +205,7 @@ services:
       PER_KM_RATE: ${PER_KM_RATE:-12}
       PER_MINUTE_RATE: ${PER_MINUTE_RATE:-2}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5005/health"]
       interval: 15s
@@ -236,7 +219,7 @@ services:
       dockerfile: services/notification-service/Dockerfile
     container_name: raahi-notification-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 64m
     environment:
       NODE_ENV: production
       PORT: 5006
@@ -247,8 +230,7 @@ services:
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
       FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5006/health"]
       interval: 15s
@@ -262,9 +244,9 @@ services:
       dockerfile: services/realtime-service/Dockerfile
     container_name: raahi-realtime-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 64m
     ports:
-      - "127.0.0.1:5007:5007"
+      - "5007:5007"
     environment:
       NODE_ENV: production
       PORT: 5007
@@ -273,8 +255,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]
       interval: 15s
@@ -288,7 +269,7 @@ services:
       dockerfile: services/admin-service/Dockerfile
     container_name: raahi-admin-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 64m
     environment:
       NODE_ENV: production
       PORT: 5008
@@ -296,8 +277,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
       interval: 15s
@@ -305,42 +285,16 @@ services:
       retries: 5
       start_period: 60s
 
-  metrics-service:
-    profiles:
-      - monitoring
-    build:
-      context: .
-      dockerfile: services/metrics-service/Dockerfile
-    container_name: raahi-metrics-service
-    restart: always
-    ports:
-      - "127.0.0.1:5010:5010"
-    environment:
-      NODE_ENV: production
-      PORT: 5010
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
-    depends_on:
-      postgres:
-        condition: service_healthy
-    mem_limit: 128m
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5010/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
   nginx:
     image: nginx:alpine
     container_name: raahi-nginx
     restart: always
-    mem_limit: 64m
+    mem_limit: 32m
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     depends_on:
@@ -353,163 +307,6 @@ services:
       retries: 3
       start_period: 30s
 
-  # ============================================
-  # MONITORING STACK (profile: monitoring)
-  # Run with: docker compose --profile monitoring up -d
-  # Skip on Droplet: docker compose up -d (no --profile)
-  # ============================================
-
-  prometheus:
-    profiles:
-      - monitoring
-    image: prom/prometheus:v2.48.0
-    container_name: raahi-prometheus
-    restart: always
-    ports:
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=7d'
-      - '--storage.tsdb.retention.size=500MB'
-      - '--web.enable-lifecycle'
-      - '--query.max-concurrency=5'
-    mem_limit: 256m
-    memswap_limit: 256m
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  grafana:
-    profiles:
-      - monitoring
-    image: grafana/grafana:10.2.0
-    container_name: raahi-grafana
-    restart: always
-    ports:
-      - "127.0.0.1:3001:3000"
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raahi_prod_2024_secure}
-      GF_SECURITY_ADMIN_USER: raahi_admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-R44h1_Gr4f4n4_2024_S3cur3!}
-      GF_SECURITY_SECRET_KEY: ${GRAFANA_SECRET_KEY:-SW2YcwTIb9zpOOhoPsMm}
-      GF_SECURITY_DISABLE_GRAVATAR: "true"
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_USERS_ALLOW_ORG_CREATE: "false"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SECURITY_ALLOW_EMBEDDING: "false"
-      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
-      GF_ALERTING_ENABLED: "false"
-      GF_UNIFIED_ALERTING_ENABLED: "false"
-      GF_LIVE_MAX_CONNECTIONS: "10"
-      GF_LOG_MODE: "console"
-      GF_LOG_LEVEL: "warn"
-      GF_INSTALL_PLUGINS: ""
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    mem_limit: 256m
-    memswap_limit: 256m
-    depends_on:
-      prometheus:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  node-exporter:
-    profiles:
-      - monitoring
-    image: prom/node-exporter:v1.7.0
-    container_name: raahi-node-exporter
-    restart: always
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--path.rootfs=/rootfs'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-    mem_limit: 64m
-
-  postgres-exporter:
-    profiles:
-      - monitoring
-    image: prometheuscommunity/postgres-exporter:v0.15.0
-    container_name: raahi-postgres-exporter
-    restart: always
-    environment:
-      DATA_SOURCE_NAME: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi?sslmode=disable
-    mem_limit: 64m
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9187/metrics"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  redis-exporter:
-    profiles:
-      - monitoring
-    image: oliver006/redis_exporter:v1.55.0
-    container_name: raahi-redis-exporter
-    restart: always
-    environment:
-      REDIS_ADDR: redis://redis:6379
-    mem_limit: 32m
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9121/metrics"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  alertmanager:
-    profiles:
-      - monitoring
-    image: prom/alertmanager:v0.26.0
-    container_name: raahi-alertmanager
-    restart: always
-    ports:
-      - "127.0.0.1:9093:9093"
-    volumes:
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - alertmanager_data:/alertmanager
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
-    mem_limit: 64m
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9093/-/healthy"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
 volumes:
   pgdata:
   redisdata:
-  prometheus_data:
-  grafana_data:
-  alertmanager_data:

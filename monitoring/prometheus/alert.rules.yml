@@ -143,3 +143,121 @@ groups:
         annotations:
           summary: "Container {{ $labels.name }} high CPU"
           description: "Container {{ $labels.name }} CPU usage is above 80%"
+
+  # ============================================
+  # BUSINESS KPI ALERTS - DRIVERS
+  # ============================================
+
+  - name: driver_kpi_alerts
+    rules:
+      # Driver retention rate below threshold
+      - alert: DriverRetentionLow
+        expr: raahi_driver_retention_30d < 70
+        for: 1h
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "Driver retention rate is low"
+          description: "30-day driver retention is {{ $value | printf \"%.1f\" }}% (threshold: 70%)"
+
+      # Average driver rating below threshold
+      - alert: DriverRatingLow
+        expr: raahi_driver_avg_rating < 4.0
+        for: 30m
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "Average driver rating is below threshold"
+          description: "Average driver rating is {{ $value | printf \"%.2f\" }} (threshold: 4.0)"
+
+      # Active drivers significant drop (>20% vs previous value)
+      - alert: ActiveDriversDrop
+        expr: |
+          (
+            raahi_driver_active - raahi_driver_active offset 1h
+          ) / raahi_driver_active offset 1h * -100 > 20
+        for: 15m
+        labels:
+          severity: critical
+          domain: drivers
+        annotations:
+          summary: "Significant drop in active drivers"
+          description: "Active drivers dropped by more than 20% in the last hour"
+
+      # Very few online drivers
+      - alert: OnlineDriversLow
+        expr: raahi_driver_online < 5
+        for: 10m
+        labels:
+          severity: critical
+          domain: drivers
+        annotations:
+          summary: "Very few drivers online"
+          description: "Only {{ $value }} drivers are currently online"
+
+      # Driver verification backlog
+      - alert: DriverVerificationBacklog
+        expr: raahi_driver_documents_status{status="pending"} > 50
+        for: 30m
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "High number of pending document verifications"
+          description: "{{ $value }} documents are pending verification"
+
+      # Driver onboarding stuck
+      - alert: DriverOnboardingStuck
+        expr: raahi_driver_onboarding_status{status="in_progress"} > 20
+        for: 1h
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "Many drivers stuck in onboarding"
+          description: "{{ $value }} drivers are stuck in onboarding process"
+
+      # Low driver utilization
+      - alert: DriverUtilizationLow
+        expr: raahi_driver_utilization_rate < 10
+        for: 30m
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "Low driver utilization rate"
+          description: "Only {{ $value | printf \"%.1f\" }}% of active drivers are online"
+
+      # High churn rate
+      - alert: DriverChurnHigh
+        expr: raahi_driver_churned_30d > raahi_driver_new_30d
+        for: 1d
+        labels:
+          severity: warning
+          domain: drivers
+        annotations:
+          summary: "Driver churn exceeds new signups"
+          description: "{{ $value }} drivers churned vs new signups in last 30 days"
+
+  # Recording rules for complex calculations
+  - name: driver_recording_rules
+    interval: 60s
+    rules:
+      # 30-day average of active drivers (for comparison)
+      - record: raahi_driver_active:avg_30d
+        expr: avg_over_time(raahi_driver_active[30d])
+
+      # Week-over-week growth rate
+      - record: raahi_driver_active:wow_growth
+        expr: |
+          (raahi_driver_active - raahi_driver_active offset 7d) 
+          / raahi_driver_active offset 7d * 100
+
+      # Driver efficiency score (composite metric)
+      - record: raahi_driver_efficiency_score
+        expr: |
+          (raahi_driver_avg_rating / 5 * 40) +
+          (raahi_driver_retention_30d / 100 * 30) +
+          (raahi_driver_verification_rate / 100 * 30)
