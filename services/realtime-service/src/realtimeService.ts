@@ -55,6 +55,8 @@ async function sendRideRequestPushNotification(
     dropLatitude?: number;
     dropLongitude?: number;
     vehicleType?: string;
+    rideType?: string;
+    rescueMultiDriver?: boolean;
   }
 ): Promise<void> {
   try {
@@ -69,6 +71,15 @@ async function sendRideRequestPushNotification(
       return;
     }
 
+    // Determine notification title/body based on ride type
+    const isRescue = rideData.rideType === 'RESCUE';
+    const title = isRescue 
+      ? '🚨 Rescue Request (Priority)' 
+      : 'New Ride Request';
+    const body = isRescue 
+      ? (rideData.rescueMultiDriver ? '🚨 RESCUE (2 Drivers) - Pickup nearby' : '🚨 RESCUE - Pickup nearby')
+      : 'Pickup nearby';
+
     const response = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/push`, {
       method: 'POST',
       headers: {
@@ -77,8 +88,8 @@ async function sendRideRequestPushNotification(
       },
       body: JSON.stringify({
         userId: driver.userId,
-        title: 'New Ride Request',
-        body: 'Pickup nearby',
+        title,
+        body,
         data: {
           type: 'RIDE_UPDATE',
           event: RIDE_OFFER_PUSH_EVENT,
@@ -91,6 +102,9 @@ async function sendRideRequestPushNotification(
           fareEstimate: rideData.totalFare.toString(),
           vehicleType: rideData.vehicleType || '',
           distance: rideData.distance.toString(),
+          rideType: rideData.rideType || 'NORMAL',
+          rescueMultiDriver: rideData.rescueMultiDriver ? 'true' : 'false',
+          priority: isRescue ? 'HIGH' : 'NORMAL',
         },
       }),
     });
@@ -98,7 +112,7 @@ async function sendRideRequestPushNotification(
     if (response.ok) {
       const result = await response.json();
       if (result.success) {
-        logger.info(`[PUSH] Sent ${RIDE_OFFER_PUSH_EVENT} to driver ${driverId}`);
+        logger.info(`[PUSH] Sent ${RIDE_OFFER_PUSH_EVENT} to driver ${driverId}${isRescue ? ' (RESCUE PRIORITY)' : ''}`);
       }
     }
   } catch (error) {
@@ -560,6 +574,9 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     logger.warn(`[BROADCAST] ⚠️ NO DRIVERS CURRENTLY CONNECTED TO SOCKET.IO`);
   }
   
+  // Determine if this is a rescue ride
+  const isRescue = rideData.rideType === 'RESCUE';
+  
   const payload = {
     rideId,
     pickupLocation: {
@@ -578,7 +595,16 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
     vehicleType: rideData.vehicleType || 'SEDAN',
     passengerName: rideData.passengerName || 'Passenger',
     timestamp: new Date().toISOString(),
+    // Rescue service metadata
+    rideType: rideData.rideType || 'NORMAL',
+    rescueMultiDriver: rideData.rescueMultiDriver || false,
+    rescueStage: rideData.rescueStage || 0,
+    priority: rideData.priority || (isRescue ? 'HIGH' : 'NORMAL'),
   };
+  
+  if (isRescue) {
+    logger.info(`[BROADCAST] 🚨 RESCUE RIDE - Priority: HIGH, MultiDriver: ${rideData.rescueMultiDriver}`);
+  }
   
   // STEP 1: Send to specific nearby drivers
   logger.info(`[BROADCAST] Step 1: Targeting ${driverIds.length} specific drivers from nearby search`);
@@ -629,6 +655,8 @@ export function broadcastRideRequest(rideId: string, rideData: any, driverIds: s
         dropLatitude: rideData.dropLatitude,
         dropLongitude: rideData.dropLongitude,
         vehicleType: rideData.vehicleType,
+        rideType: rideData.rideType,
+        rescueMultiDriver: rideData.rescueMultiDriver,
       });
     }),
   );

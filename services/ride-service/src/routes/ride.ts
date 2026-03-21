@@ -205,6 +205,9 @@ router.post(
     body('paymentMethod').isIn(['CASH', 'CARD', 'UPI', 'WALLET']),
     body('scheduledTime').optional().isISO8601(),
     body('vehicleType').optional().isString(),
+    // Rescue service fields
+    body('rideType').optional().isIn(['NORMAL', 'RESCUE']),
+    body('rescueMultiDriver').optional().isBoolean(),
   ],
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const errors = validationResult(req);
@@ -212,7 +215,7 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType } = req.body;
+    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType, rideType, rescueMultiDriver } = req.body;
     const ride = await rideService.createRide({
       passengerId: req.user!.id,
       pickupLat,
@@ -224,6 +227,9 @@ router.post(
       paymentMethod,
       scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
       vehicleType,
+      // Rescue service fields
+      rideType: rideType || 'NORMAL',
+      rescueMultiDriver: rescueMultiDriver || false,
     });
     res.status(201).json({ success: true, message: 'Ride created successfully', data: ride });
   })
@@ -1177,6 +1183,393 @@ router.get('/:id/receipt', authenticate, asyncHandler(async (req: AuthRequest, r
   };
   res.status(200).json({ success: true, data: receipt });
 }));
+
+// ==================== RESCUE SERVICE ENDPOINTS ====================
+
+/**
+ * @openapi
+ * /api/rides/{id}/rescue-stage:
+ *   put:
+ *     tags: [Rides, Rescue]
+ *     summary: Update rescue stage for multi-driver rescue rides
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - stage
+ *             properties:
+ *               stage:
+ *                 type: integer
+ *                 minimum: 0
+ *                 maximum: 5
+ *               updatedBy:
+ *                 type: string
+ *                 enum: [driver1, driver2]
+ *     responses:
+ *       200:
+ *         description: Stage updated successfully
+ *       400:
+ *         description: Invalid stage or not a rescue ride
+ *       403:
+ *         description: Not authorized to update this ride
+ *       404:
+ *         description: Ride not found
+ */
+router.put(
+  '/:id/rescue-stage',
+  authenticate,
+  [
+    body('stage').isInt({ min: 0, max: 5 }).withMessage('Stage must be between 0 and 5'),
+    body('updatedBy').optional().isIn(['driver1', 'driver2']),
+  ],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const rideId = req.params.id;
+    const { stage, updatedBy } = req.body;
+    const userId = req.user!.id;
+
+    // Get ride and verify it's a rescue ride (requires prisma generate after schema update)
+    const ride = await prisma.ride.findUnique({
+      where: { id: rideId },
+      include: {
+        driver: { select: { id: true, userId: true } },
+        driver2: { select: { id: true, userId: true } },
+      } as any,
+    });
+
+    if (!ride) {
+      res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+
+    const rideAny = ride as any;
+    if (rideAny.rideType !== 'RESCUE') {
+      res.status(400).json({ success: false, message: 'This endpoint is only for rescue rides' });
+      return;
+    }
+
+    // Verify the user is driver1 or driver2
+    const isDriver1 = rideAny.driver?.userId === userId;
+    const isDriver2 = rideAny.driver2?.userId === userId;
+    
+    if (!isDriver1 && !isDriver2) {
+      res.status(403).json({ success: false, message: 'Only assigned drivers can update rescue stage' });
+      return;
+    }
+
+    // Update the stage (requires prisma generate after schema update)
+    const updatedRide = await prisma.ride.update({
+      where: { id: rideId },
+      data: { rescueStage: stage } as any,
+    });
+    const updatedRideAny = updatedRide as any;
+
+    // Broadcast via realtime service
+    try {
+      await fetch(`${REALTIME_SERVICE_URL}/internal/broadcast`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-api-key': INTERNAL_API_KEY,
+        },
+        body: JSON.stringify({
+          room: `ride-${rideId}`,
+          event: 'rescue-stage-update',
+          data: {
+            rideId,
+            stage,
+            updatedBy: updatedBy || (isDriver1 ? 'driver1' : 'driver2'),
+            timestamp: new Date().toISOString(),
+          },
+        }),
+      });
+    } catch (error) {
+      console.error('[RESCUE] Failed to broadcast stage update:', error);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Rescue stage updated to ${stage}`,
+      data: {
+        rideId,
+        rescueStage: updatedRideAny.rescueStage,
+        rideType: updatedRideAny.rideType,
+        rescueMultiDriver: updatedRideAny.rescueMultiDriver,
+      },
+    });
+  })
+);
+
+/**
+ * @openapi
+ * /api/rides/{id}/rescue-driver2:
+ *   post:
+ *     tags: [Rides, Rescue]
+ *     summary: Assign second driver for multi-driver rescue
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - driver2Id
+ *             properties:
+ *               driver2Id:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Driver2 assigned successfully
+ *       400:
+ *         description: Not a multi-driver rescue ride
+ *       403:
+ *         description: Not authorized
+ *       404:
+ *         description: Ride not found
+ */
+router.post(
+  '/:id/rescue-driver2',
+  authenticate,
+  [body('driver2Id').isString().notEmpty()],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const rideId = req.params.id;
+    const { driver2Id } = req.body;
+    const userId = req.user!.id;
+
+    // Get ride (requires prisma generate after schema update)
+    const ride = await prisma.ride.findUnique({
+      where: { id: rideId },
+      include: {
+        driver: { select: { id: true, userId: true } },
+      },
+    });
+
+    if (!ride) {
+      res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+
+    const rideAny = ride as any;
+    if (rideAny.rideType !== 'RESCUE' || !rideAny.rescueMultiDriver) {
+      res.status(400).json({ success: false, message: 'This endpoint is only for multi-driver rescue rides' });
+      return;
+    }
+
+    // Only driver1 can assign driver2
+    if (rideAny.driver?.userId !== userId) {
+      res.status(403).json({ success: false, message: 'Only the primary driver can assign a second driver' });
+      return;
+    }
+
+    if (rideAny.driver2Id) {
+      res.status(400).json({ success: false, message: 'Driver2 already assigned' });
+      return;
+    }
+
+    // Verify driver2 exists and is available
+    const driver2 = await prisma.driver.findUnique({
+      where: { id: driver2Id },
+      include: {
+        user: { select: { firstName: true, lastName: true, phone: true, profileImage: true } },
+      },
+    });
+
+    if (!driver2) {
+      res.status(404).json({ success: false, message: 'Driver2 not found' });
+      return;
+    }
+
+    // Update ride with driver2 (requires prisma generate after schema update)
+    const updatedRide = await prisma.ride.update({
+      where: { id: rideId },
+      data: {
+        driver2Id,
+        rescueStage: 1, // Move to stage 1 when driver2 is assigned
+      } as any,
+    });
+    const updatedRideAny = updatedRide as any;
+
+    // Broadcast via realtime service
+    try {
+      await fetch(`${REALTIME_SERVICE_URL}/internal/broadcast`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-api-key': INTERNAL_API_KEY,
+        },
+        body: JSON.stringify({
+          room: `ride-${rideId}`,
+          event: 'rescue-driver-assigned',
+          data: {
+            rideId,
+            driver1Id: ride.driverId,
+            driver2Id,
+            driver2Info: {
+              id: driver2.id,
+              name: `${driver2.user.firstName || ''} ${driver2.user.lastName || ''}`.trim(),
+              phone: driver2.user.phone,
+              profileImage: driver2.user.profileImage,
+              vehicleNumber: driver2.vehicleNumber,
+              vehicleModel: driver2.vehicleModel,
+            },
+            timestamp: new Date().toISOString(),
+          },
+        }),
+      });
+    } catch (error) {
+      console.error('[RESCUE] Failed to broadcast driver2 assignment:', error);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Driver2 assigned successfully',
+      data: {
+        rideId,
+        driver2Id,
+        rescueStage: updatedRideAny.rescueStage,
+      },
+    });
+  })
+);
+
+/**
+ * @openapi
+ * /api/rides/{id}/rescue-status:
+ *   get:
+ *     tags: [Rides, Rescue]
+ *     summary: Get rescue ride status including stage info
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Rescue status retrieved
+ *       404:
+ *         description: Ride not found
+ */
+router.get(
+  '/:id/rescue-status',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const rideId = req.params.id;
+
+    // Get ride with relations (requires prisma generate after schema update)
+    const ride = await prisma.ride.findUnique({
+      where: { id: rideId },
+      include: {
+        passenger: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        driver: {
+          include: {
+            user: { select: { firstName: true, lastName: true, phone: true, profileImage: true } },
+          },
+        },
+        driver2: {
+          include: {
+            user: { select: { firstName: true, lastName: true, phone: true, profileImage: true } },
+          },
+        },
+      } as any,
+    });
+
+    if (!ride) {
+      res.status(404).json({ success: false, message: 'Ride not found' });
+      return;
+    }
+
+    const rideAny = ride as any;
+
+    // Stage descriptions for multi-driver rescue
+    const stageDescriptions: Record<number, string> = {
+      0: 'Waiting for driver assignment',
+      1: 'Driver 1 assigned, picking up Driver 2',
+      2: 'Both drivers en route to passenger',
+      3: 'Arrived at passenger location',
+      4: 'Driver 1 taking passenger, Driver 2 handling vehicle',
+      5: 'Rescue completed',
+    };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        rideId: ride.id,
+        rideType: rideAny.rideType || 'NORMAL',
+        rescueMultiDriver: rideAny.rescueMultiDriver || false,
+        rescueStage: rideAny.rescueStage || 0,
+        stageDescription: stageDescriptions[rideAny.rescueStage || 0] || 'Unknown stage',
+        status: ride.status,
+        passenger: rideAny.passenger ? {
+          id: rideAny.passenger.id,
+          name: `${rideAny.passenger.firstName || ''} ${rideAny.passenger.lastName || ''}`.trim(),
+          phone: rideAny.passenger.phone,
+        } : null,
+        driver1: rideAny.driver ? {
+          id: rideAny.driver.id,
+          name: `${rideAny.driver.user.firstName || ''} ${rideAny.driver.user.lastName || ''}`.trim(),
+          phone: rideAny.driver.user.phone,
+          profileImage: rideAny.driver.user.profileImage,
+          vehicleNumber: rideAny.driver.vehicleNumber,
+          vehicleModel: rideAny.driver.vehicleModel,
+        } : null,
+        driver2: rideAny.driver2 ? {
+          id: rideAny.driver2.id,
+          name: `${rideAny.driver2.user.firstName || ''} ${rideAny.driver2.user.lastName || ''}`.trim(),
+          phone: rideAny.driver2.user.phone,
+          profileImage: rideAny.driver2.user.profileImage,
+          vehicleNumber: rideAny.driver2.vehicleNumber,
+          vehicleModel: rideAny.driver2.vehicleModel,
+        } : null,
+        pickup: {
+          address: ride.pickupAddress,
+          latitude: ride.pickupLatitude,
+          longitude: ride.pickupLongitude,
+        },
+        drop: {
+          address: ride.dropAddress,
+          latitude: ride.dropLatitude,
+          longitude: ride.dropLongitude,
+        },
+        fare: ride.totalFare,
+      },
+    });
+  })
+);
+
+// ==================== END RESCUE SERVICE ENDPOINTS ====================
 
 // Chat messages
 router.get('/:id/messages', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {

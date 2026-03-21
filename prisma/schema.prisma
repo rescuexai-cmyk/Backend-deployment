@@ -142,6 +142,7 @@ model Driver {
   // Relations
   user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   rides             Ride[]    @relation("DriverRides")
+  rescueRides       Ride[]    @relation("Driver2Rides")  // Rides where this driver is driver2 (rescue)
   documents         DriverDocument[]
   earnings          DriverEarning[]
   penalties         DriverPenalty[]
@@ -249,6 +250,13 @@ model Ride {
   paymentStatus     PaymentStatus @default(PENDING)
   vehicleType       String?   // Requested vehicle type (bike_rescue, auto, cab_mini, cab_xl, cab_premium)
   rideOtp           String?   // 4-digit OTP for ride verification (driver must enter to start ride)
+  
+  // Rescue Service fields
+  rideType          String    @default("NORMAL")  // "NORMAL" or "RESCUE"
+  rescueMultiDriver Boolean   @default(false)     // true if rescue needs 2 drivers
+  rescueStage       Int       @default(0)         // 0-5 for multi-driver rescue stages
+  driver2Id         String?                       // Second driver ID for multi-driver rescue
+  
   scheduledAt       DateTime?
   driverAssignedAt  DateTime? // When driver was assigned to ride
   driverArrivedAt   DateTime? // When driver tapped "I've arrived" (for waiting time calc)
@@ -278,6 +286,7 @@ model Ride {
   // Relations
   passenger         User      @relation("PassengerRides", fields: [passengerId], references: [id])
   driver            Driver?   @relation("DriverRides", fields: [driverId], references: [id])
+  driver2           Driver?   @relation("Driver2Rides", fields: [driver2Id], references: [id])
   tracking          RideTracking[]
   messages          RideMessage[]
   chatParticipants  RideChatParticipant[]
@@ -285,10 +294,12 @@ model Ride {
   
   @@index([passengerId])
   @@index([driverId])
+  @@index([driver2Id])
   @@index([status])
   @@index([createdAt])
   @@index([status, driverId])
   @@index([passengerId, status])
+  @@index([rideType])
   @@map("rides")
 }
 
@@ -893,4 +904,69 @@ enum WalletTransactionType {
   HOLD              // Amount put on hold
   RELEASE           // Amount released from hold
   REFUND            // Refund credited
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRIVER SUBSCRIPTION (DAILY PLATFORM FEE)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model DriverSubscription {
+  id              String                    @id @default(cuid())
+  driverId        String                    @unique
+  
+  // Subscription status
+  lastPaidAt      DateTime?                 // When the driver last paid
+  validTill       DateTime?                 // Subscription valid until
+  isActive        Boolean                   @default(false)
+  
+  // Payment tracking
+  totalPayments   Int                       @default(0)
+  totalAmount     Float                     @default(0)
+  
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  
+  // Relations
+  payments        DriverSubscriptionPayment[]
+  
+  @@index([driverId])
+  @@index([validTill])
+  @@index([isActive])
+  @@map("driver_subscriptions")
+}
+
+model DriverSubscriptionPayment {
+  id              String                    @id @default(cuid())
+  subscriptionId  String
+  driverId        String
+  
+  // Payment details
+  amount          Float                     // ₹39
+  paymentMethod   String                    @default("UPI") // UPI, WALLET, etc.
+  transactionId   String?                   // UPI transaction ID
+  
+  // Status
+  status          SubscriptionPaymentStatus @default(PENDING)
+  
+  // Validity period this payment grants
+  validFrom       DateTime
+  validTill       DateTime
+  
+  createdAt       DateTime                  @default(now())
+  verifiedAt      DateTime?
+  
+  subscription    DriverSubscription        @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  @@index([subscriptionId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("driver_subscription_payments")
+}
+
+enum SubscriptionPaymentStatus {
+  PENDING
+  VERIFIED
+  FAILED
+  REFUNDED
 }

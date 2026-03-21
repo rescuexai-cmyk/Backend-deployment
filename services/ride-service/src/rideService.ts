@@ -27,6 +27,23 @@ function isWalletTransactionsTableMissing(error: unknown): boolean {
   return e?.code === 'P2021' && message.includes('wallet_transactions');
 }
 
+/**
+ * Check if wallet_transactions table exists BEFORE entering a transaction.
+ * This prevents PostgreSQL transaction abort (25P02) when the table is missing.
+ */
+async function checkWalletTransactionsTableExists(): Promise<boolean> {
+  try {
+    await prisma.$queryRaw`SELECT 1 FROM wallet_transactions LIMIT 0`;
+    return true;
+  } catch (error) {
+    if (isWalletTransactionsTableMissing(error)) {
+      return false;
+    }
+    // For other errors (e.g., connection issues), assume table exists and let normal flow handle it
+    return true;
+  }
+}
+
 // ==================== NOTIFICATION HELPER ====================
 interface NotificationData {
   userId: string;
@@ -169,6 +186,9 @@ export interface CreateRideRequest {
   paymentMethod: 'CASH' | 'CARD' | 'UPI' | 'WALLET';
   scheduledTime?: Date;
   vehicleType?: string;
+  // Rescue service fields
+  rideType?: 'NORMAL' | 'RESCUE';
+  rescueMultiDriver?: boolean;
 }
 
 function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
@@ -252,6 +272,11 @@ function formatRide(ride: any, includeOtp: boolean = false) {
     cancellationReason: ride.cancellationReason,
     createdAt: ride.createdAt,
     updatedAt: ride.updatedAt,
+    // Rescue service fields
+    rideType: ride.rideType || 'NORMAL',
+    rescueMultiDriver: ride.rescueMultiDriver || false,
+    rescueStage: ride.rescueStage || 0,
+    driver2Id: ride.driver2Id || null,
     driver: ride.driver
       ? {
           id: ride.driver.id,
@@ -310,6 +335,13 @@ export async function createRide(req: CreateRideRequest) {
     logger.warn(`[RIDE] Failed to update user location: ${err.message}`);
   });
 
+  // Determine ride type and rescue settings
+  const rideType = req.rideType || 'NORMAL';
+  const rescueMultiDriver = req.rescueMultiDriver || false;
+  const isRescue = rideType === 'RESCUE';
+  
+  logger.info(`[RIDE] Creating ride: rideType=${rideType}, rescueMultiDriver=${rescueMultiDriver}`);
+
   const ride = await prisma.ride.create({
     data: {
       passengerId: req.passengerId,
@@ -327,10 +359,14 @@ export async function createRide(req: CreateRideRequest) {
       surgeMultiplier: pricing.surgeMultiplier,
       totalFare: pricing.totalFare,
       paymentMethod: req.paymentMethod,
-      vehicleType: req.vehicleType || null,
+      vehicleType: isRescue ? 'bike_rescue' : (req.vehicleType || null), // Force bike_rescue for rescue rides
       scheduledAt: req.scheduledTime,
       rideOtp,
-    },
+      // Rescue service fields (requires prisma generate after schema update)
+      rideType,
+      rescueMultiDriver,
+      rescueStage: 0,
+    } as any,
   });
 
   // Register ride in Fireball in-memory state store (instant push to subscribers)
@@ -357,7 +393,7 @@ export async function createRide(req: CreateRideRequest) {
       duration: pricing.estimatedDuration,
       rideOtp,
       paymentMethod: req.paymentMethod,
-      vehicleType: req.vehicleType || 'SEDAN',
+      vehicleType: isRescue ? 'bike_rescue' : (req.vehicleType || 'SEDAN'),
       driverLat: null,
       driverLng: null,
       driverHeading: null,
@@ -378,6 +414,11 @@ export async function createRide(req: CreateRideRequest) {
       driverVehicleModel: null,
       driverRating: null,
       driverProfileImage: null,
+      // Rescue service fields
+      rideType,
+      rescueMultiDriver,
+      rescueStage: 0,
+      priority: isRescue ? 'HIGH' : 'NORMAL',
     });
   } catch (fireballError) {
     logger.debug('[RIDE] Fireball registration failed (non-critical)', { error: fireballError });
@@ -388,21 +429,25 @@ export async function createRide(req: CreateRideRequest) {
     logger.info(`[RIDE] Ride ID: ${ride.id}`);
     logger.info(`[RIDE] Pickup: ${req.pickupAddress} (${req.pickupLat}, ${req.pickupLng})`);
     logger.info(`[RIDE] Fare: ₹${pricing.totalFare}`);
+    logger.info(`[RIDE] RideType: ${rideType}, RescueMultiDriver: ${rescueMultiDriver}`);
+    
+    // For RESCUE rides, only target BIKE drivers
+    const effectiveVehicleType = isRescue ? 'bike' : req.vehicleType;
     
     // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
     logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
-    logger.info(`[RIDE] Ride vehicleType: ${req.vehicleType}, normalized=${normalizeVehicleType(req.vehicleType)}`);
-    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, req.vehicleType);
+    logger.info(`[RIDE] Ride vehicleType: ${effectiveVehicleType}, normalized=${normalizeVehicleType(effectiveVehicleType)}`);
+    let nearbyDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, effectiveVehicleType);
     
     if (!nearbyDrivers || nearbyDrivers.length === 0) {
       logger.info(`[RIDE] RAMEN unavailable, falling back to DB query...`);
-      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, req.vehicleType);
+      nearbyDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, effectiveVehicleType);
     } else {
       logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
     }
 
     let typeFilteredDrivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
-      isDriverCompatibleForRide(req.vehicleType, (d.vehicleType as string | null | undefined) ?? null),
+      isDriverCompatibleForRide(effectiveVehicleType, (d.vehicleType as string | null | undefined) ?? null),
     );
 
     // P0 fallback: when geospatial matching returns zero, fan out to all online drivers.
@@ -423,7 +468,7 @@ export async function createRide(req: CreateRideRequest) {
       });
 
       typeFilteredDrivers = onlineDrivers.filter((d) =>
-        isDriverCompatibleForRide(req.vehicleType, d.vehicleType),
+        isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType),
       );
 
       logger.warn(`[RIDE] [FALLBACK] Using ${typeFilteredDrivers.length} online compatible drivers for ride ${ride.id}`);
@@ -448,8 +493,13 @@ export async function createRide(req: CreateRideRequest) {
       pickupAddress: req.pickupAddress,
       dropAddress: req.dropAddress,
       totalFare: pricing.totalFare,
-      vehicleType: req.vehicleType,
+      vehicleType: effectiveVehicleType,
       passengerName: 'Passenger',
+      // Rescue service metadata for driver app
+      rideType,
+      rescueMultiDriver,
+      rescueStage: 0,
+      priority: isRescue ? 'HIGH' : 'NORMAL',
     }, driverIds);
     
     // Log broadcast result
@@ -471,6 +521,9 @@ export async function createRide(req: CreateRideRequest) {
         logger.error(`[RIDE] Eligible drivers: ${driverIds.length}, Connected: ${broadcastResult.connectedDrivers}`);
       } else {
         logger.info(`[RIDE] ✅ Ride ${ride.id} broadcast successful`);
+        if (isRescue) {
+          logger.info(`[RIDE] 🚨 RESCUE ride broadcast with HIGH priority to BIKE drivers only`);
+        }
       }
     } else {
       logger.warn(`[RIDE] ⚠️ No broadcast result returned - unable to verify delivery`);
@@ -495,20 +548,43 @@ export async function getRideById(rideId: string, requesterId?: string) {
           user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
         },
       },
-    },
+      // Include driver2 for rescue rides (requires prisma generate after schema update)
+      driver2: {
+        include: {
+          user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
+        },
+      },
+    } as any,
   });
   if (!ride) return null;
+  
+  // Cast ride to any for rescue fields access (requires prisma generate after schema update)
+  const rideAny = ride as any;
   
   // Only include OTP if requester is the passenger
   const includeOtp = requesterId === ride.passengerId;
   
   return {
     ...formatRide(ride, includeOtp),
-    passenger: ride.passenger,
+    passenger: rideAny.passenger,
     pickupLatitude: ride.pickupLatitude,
     pickupLongitude: ride.pickupLongitude,
     dropLatitude: ride.dropLatitude,
     dropLongitude: ride.dropLongitude,
+    // Rescue service fields
+    rideType: rideAny.rideType || 'NORMAL',
+    rescueMultiDriver: rideAny.rescueMultiDriver || false,
+    rescueStage: rideAny.rescueStage || 0,
+    driver2: rideAny.driver2 ? {
+      id: rideAny.driver2.id,
+      firstName: rideAny.driver2.user.firstName,
+      lastName: rideAny.driver2.user.lastName,
+      profileImage: rideAny.driver2.user.profileImage,
+      phone: rideAny.driver2.user.phone,
+      vehicleNumber: rideAny.driver2.vehicleNumber,
+      vehicleModel: rideAny.driver2.vehicleModel,
+      vehicleColor: rideAny.driver2.vehicleColor,
+    } : null,
   };
 }
 
@@ -1059,6 +1135,17 @@ export async function updateRideStatus(
         });
       }
     } else {
+      // CRITICAL: Check if wallet_transactions table exists BEFORE entering the transaction.
+      // This prevents PostgreSQL 25P02 error ("current transaction is aborted") which happens
+      // when a query fails inside a transaction and subsequent queries are attempted.
+      const walletTransactionsTableExists = await checkWalletTransactionsTableExists();
+      if (!walletTransactionsTableExists) {
+        logger.warn('[WALLET] wallet_transactions table does not exist; wallet transaction logging will be skipped for this ride completion', {
+          rideId,
+          driverId: currentRide.driverId,
+        });
+      }
+
       // ATOMIC TRANSACTION: Update ride status AND create earnings together
       ride = await prisma.$transaction(async (tx) => {
         // Step 1: Update ride status
@@ -1107,10 +1194,11 @@ export async function updateRideStatus(
         });
 
         // Step 5: Credit driver wallet and create wallet transaction log (idempotent).
-        // Degrade gracefully if wallet_transactions table is missing in this DB.
-        let shouldSkipWalletTransactionLog = false;
+        // We already checked table existence BEFORE the transaction to avoid 25P02 errors.
         let existingWalletCredit: any = null;
-        try {
+        
+        // Only query wallet_transactions if the table exists
+        if (walletTransactionsTableExists) {
           existingWalletCredit = await tx.walletTransaction.findFirst({
             where: {
               driverId: updatedRide.driverId!,
@@ -1119,16 +1207,6 @@ export async function updateRideStatus(
               referenceId: updatedRide.id,
             },
           });
-        } catch (walletError) {
-          if (isWalletTransactionsTableMissing(walletError)) {
-            shouldSkipWalletTransactionLog = true;
-            logger.warn('[WALLET] wallet_transactions table missing during completion transaction; continuing without transaction logs', {
-              rideId: updatedRide.id,
-              driverId: updatedRide.driverId!,
-            });
-          } else {
-            throw walletError;
-          }
         }
 
         if (!existingWalletCredit) {
@@ -1147,7 +1225,8 @@ export async function updateRideStatus(
           const walletBalanceBefore = wallet.availableBalance - netAmount;
           const walletBalanceAfter = wallet.availableBalance;
 
-          if (!shouldSkipWalletTransactionLog) {
+          // Only create wallet transaction log if the table exists
+          if (walletTransactionsTableExists) {
             await tx.walletTransaction.create({
               data: {
                 driverId: updatedRide.driverId!,
@@ -1170,7 +1249,7 @@ export async function updateRideStatus(
             driverEarning: netAmount,
             walletBalanceBefore,
             walletBalanceAfter,
-            skippedTransactionLog: shouldSkipWalletTransactionLog,
+            skippedTransactionLog: !walletTransactionsTableExists,
           });
         }
 

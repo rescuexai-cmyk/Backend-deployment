@@ -93,6 +93,8 @@ setupSwagger(app, {
  *     description: Service health check
  *   - name: Driver Profile
  *     description: Driver profile and status management
+ *   - name: Subscription
+ *     description: Daily platform fee subscription (₹39/day)
  *   - name: Penalties
  *     description: Driver penalty management
  *   - name: Earnings
@@ -2688,6 +2690,280 @@ app.get('/api/driver/aadhaar/status', authenticate, asyncHandler(async (req: Aut
     },
   });
 }));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRIVER SUBSCRIPTION (DAILY PLATFORM FEE - ₹39/day)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const DAILY_PLATFORM_FEE = parseFloat(process.env.DAILY_PLATFORM_FEE || '39');
+const SUBSCRIPTION_DURATION_HOURS = parseInt(process.env.SUBSCRIPTION_DURATION_HOURS || '24');
+
+/**
+ * @openapi
+ * /api/driver/subscription/status:
+ *   get:
+ *     tags: [Subscription]
+ *     summary: Get driver subscription status
+ *     description: Check if driver has an active subscription and can go online
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Subscription status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     allowOnline:
+ *                       type: boolean
+ *                     validTill:
+ *                       type: string
+ *                       format: date-time
+ *                     status:
+ *                       type: string
+ *                       enum: [active, expired, never_purchased]
+ *                     message:
+ *                       type: string
+ */
+app.get('/api/driver/subscription/status', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  // Get or create subscription record
+  let subscription = await prisma.driverSubscription.findUnique({
+    where: { driverId: driver.id },
+  });
+
+  if (!subscription) {
+    // Create subscription record if it doesn't exist
+    subscription = await prisma.driverSubscription.create({
+      data: {
+        driverId: driver.id,
+        isActive: false,
+      },
+    });
+  }
+
+  const now = new Date();
+  const isActive = subscription.validTill && subscription.validTill > now;
+  
+  let status: 'active' | 'expired' | 'never_purchased';
+  let message: string;
+  
+  if (isActive) {
+    status = 'active';
+    message = 'Your daily pass is active. You can accept rides.';
+  } else if (subscription.lastPaidAt) {
+    status = 'expired';
+    message = 'Your daily pass has expired. Pay ₹39 to continue.';
+  } else {
+    status = 'never_purchased';
+    message = 'Pay ₹39 to start taking rides today.';
+  }
+
+  logger.info(`[SUBSCRIPTION] Status check for driver ${driver.id}: ${status}, validTill: ${subscription.validTill}`);
+
+  res.json({
+    success: true,
+    data: {
+      driverId: driver.id,
+      allowOnline: isActive,
+      isActive,
+      validTill: subscription.validTill?.toISOString() ?? null,
+      lastPaidAt: subscription.lastPaidAt?.toISOString() ?? null,
+      status,
+      message,
+      fee: DAILY_PLATFORM_FEE,
+      durationHours: SUBSCRIPTION_DURATION_HOURS,
+    },
+  });
+}));
+
+/**
+ * @openapi
+ * /api/driver/subscription/activate:
+ *   post:
+ *     tags: [Subscription]
+ *     summary: Activate driver subscription after payment
+ *     description: Call this after driver completes UPI payment to activate 24-hour subscription
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               transactionId:
+ *                 type: string
+ *                 description: UPI transaction ID (optional, for verification)
+ *               paymentMethod:
+ *                 type: string
+ *                 default: UPI
+ *     responses:
+ *       200:
+ *         description: Subscription activated
+ *       400:
+ *         description: Activation failed
+ */
+app.post(
+  '/api/driver/subscription/activate',
+  authenticateDriver,
+  [
+    body('transactionId').optional().isString().trim(),
+    body('paymentMethod').optional().isString().default('UPI'),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const { transactionId, paymentMethod = 'UPI' } = req.body;
+    const now = new Date();
+    const validTill = new Date(now.getTime() + SUBSCRIPTION_DURATION_HOURS * 60 * 60 * 1000);
+
+    // Get or create subscription
+    let subscription = await prisma.driverSubscription.findUnique({
+      where: { driverId: driver.id },
+    });
+
+    if (!subscription) {
+      subscription = await prisma.driverSubscription.create({
+        data: {
+          driverId: driver.id,
+          isActive: false,
+        },
+      });
+    }
+
+    // Update subscription
+    const updatedSubscription = await prisma.driverSubscription.update({
+      where: { id: subscription.id },
+      data: {
+        lastPaidAt: now,
+        validTill,
+        isActive: true,
+        totalPayments: { increment: 1 },
+        totalAmount: { increment: DAILY_PLATFORM_FEE },
+      },
+    });
+
+    // Create payment record
+    await prisma.driverSubscriptionPayment.create({
+      data: {
+        subscriptionId: subscription.id,
+        driverId: driver.id,
+        amount: DAILY_PLATFORM_FEE,
+        paymentMethod,
+        transactionId: transactionId || null,
+        status: 'VERIFIED', // In production, this should be PENDING until verified
+        validFrom: now,
+        validTill,
+        verifiedAt: now,
+      },
+    });
+
+    logger.info(`[SUBSCRIPTION] Activated for driver ${driver.id}, validTill: ${validTill.toISOString()}, txnId: ${transactionId || 'N/A'}`);
+
+    res.json({
+      success: true,
+      message: 'Subscription activated successfully! You can now go online.',
+      data: {
+        driverId: driver.id,
+        validTill: validTill.toISOString(),
+        validFrom: now.toISOString(),
+        durationHours: SUBSCRIPTION_DURATION_HOURS,
+        amountPaid: DAILY_PLATFORM_FEE,
+        transactionId: transactionId || null,
+      },
+    });
+  })
+);
+
+/**
+ * @openapi
+ * /api/driver/subscription/history:
+ *   get:
+ *     tags: [Subscription]
+ *     summary: Get subscription payment history
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Payment history
+ */
+app.get(
+  '/api/driver/subscription/history',
+  authenticateDriver,
+  [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 50 }),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+
+    const [payments, total] = await Promise.all([
+      prisma.driverSubscriptionPayment.findMany({
+        where: { driverId: driver.id },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.driverSubscriptionPayment.count({ where: { driverId: driver.id } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        payments: payments.map((p) => ({
+          id: p.id,
+          amount: p.amount,
+          paymentMethod: p.paymentMethod,
+          transactionId: p.transactionId,
+          status: p.status,
+          validFrom: p.validFrom.toISOString(),
+          validTill: p.validTill.toISOString(),
+          createdAt: p.createdAt.toISOString(),
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNext: page < Math.ceil(total / limit),
+          hasPrev: page > 1,
+        },
+      },
+    });
+  })
+);
 
 app.use(notFound);
 app.use(errorHandler);

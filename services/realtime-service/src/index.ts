@@ -486,6 +486,105 @@ io.on('connection', (socket) => {
     logger.info(`Driver ${data.driverId} arrived for ride ${data.rideId}`);
   });
 
+  // ==================== RESCUE SERVICE SOCKET EVENTS ====================
+  
+  // Rescue stage update - emitted by driver to update rescue progress
+  socket.on('rescue-stage-update', async (data: { 
+    rideId: string; 
+    driverId: string; 
+    stage: number;
+    updatedBy: 'driver1' | 'driver2';
+  }) => {
+    if (!data.rideId || !data.driverId) return;
+    if (typeof data.rideId !== 'string' || typeof data.driverId !== 'string') return;
+    if (typeof data.stage !== 'number' || data.stage < 0 || data.stage > 5) return;
+    updateActivity();
+    
+    logger.info(`[RESCUE] Stage update for ride ${data.rideId}: stage=${data.stage}, updatedBy=${data.updatedBy}`);
+    
+    // Update the ride in database (requires prisma generate after schema update)
+    try {
+      await prisma.ride.update({
+        where: { id: data.rideId },
+        data: { rescueStage: data.stage } as any,
+      });
+      
+      // Broadcast to ride room (passenger and both drivers)
+      io.to(`ride-${data.rideId}`).emit('rescue-stage-update', {
+        rideId: data.rideId,
+        stage: data.stage,
+        updatedBy: data.updatedBy,
+        driverId: data.driverId,
+        timestamp: new Date().toISOString(),
+      });
+      
+      logger.info(`[RESCUE] Stage ${data.stage} broadcast to ride ${data.rideId}`);
+    } catch (error) {
+      logger.error(`[RESCUE] Failed to update stage for ride ${data.rideId}`, { error });
+    }
+  });
+  
+  // Second driver assignment for multi-driver rescue
+  socket.on('rescue-assign-driver2', async (data: { 
+    rideId: string; 
+    driver1Id: string;
+    driver2Id: string;
+  }) => {
+    if (!data.rideId || !data.driver1Id || !data.driver2Id) return;
+    updateActivity();
+    
+    logger.info(`[RESCUE] Assigning driver2 ${data.driver2Id} to ride ${data.rideId}`);
+    
+    try {
+      // Update ride with driver2 (requires prisma generate after schema update)
+      const updatedRide = await prisma.ride.update({
+        where: { id: data.rideId },
+        data: { 
+          driver2Id: data.driver2Id,
+          rescueStage: 1, // Move to stage 1 when driver2 is assigned
+        } as any,
+        include: {
+          driver2: {
+            include: {
+              user: { select: { firstName: true, lastName: true, phone: true, profileImage: true } },
+            },
+          },
+        } as any,
+      });
+      
+      const updatedRideAny = updatedRide as any;
+      
+      // Notify all parties
+      io.to(`ride-${data.rideId}`).emit('rescue-driver-assigned', {
+        rideId: data.rideId,
+        driver1Id: data.driver1Id,
+        driver2Id: data.driver2Id,
+        driver2Info: updatedRideAny.driver2 ? {
+          id: updatedRideAny.driver2.id,
+          name: `${updatedRideAny.driver2.user.firstName || ''} ${updatedRideAny.driver2.user.lastName || ''}`.trim(),
+          phone: updatedRideAny.driver2.user.phone,
+          profileImage: updatedRideAny.driver2.user.profileImage,
+          vehicleNumber: updatedRideAny.driver2.vehicleNumber,
+          vehicleModel: updatedRideAny.driver2.vehicleModel,
+        } : null,
+        timestamp: new Date().toISOString(),
+      });
+      
+      // Also notify driver2 to join the ride room
+      io.to(`driver-${data.driver2Id}`).emit('rescue-ride-assigned', {
+        rideId: data.rideId,
+        role: 'driver2',
+        timestamp: new Date().toISOString(),
+      });
+      
+      logger.info(`[RESCUE] Driver2 ${data.driver2Id} assigned to ride ${data.rideId}`);
+    } catch (error) {
+      logger.error(`[RESCUE] Failed to assign driver2 for ride ${data.rideId}`, { error });
+    }
+  });
+  
+  // ==================== END RESCUE SERVICE SOCKET EVENTS ====================
+
   type RideMessagePayload = {
     rideId?: unknown;
     message?: unknown;
@@ -1209,6 +1308,37 @@ app.get('/internal/chat-presence', authenticateInternal, asyncHandler(async (req
   res.status(200).json({
     success: true,
     data: { rideId, userId, isChatOpen },
+  });
+}));
+
+// Generic broadcast endpoint for rescue service and other internal events
+app.post('/internal/broadcast', authenticateInternal, express.json(), asyncHandler(async (req, res) => {
+  const { room, event, data } = req.body;
+  if (!room || !event || !data) {
+    res.status(400).json({ success: false, message: 'room, event, and data are required' });
+    return;
+  }
+  
+  logger.info(`[INTERNAL] Generic broadcast: event=${event}, room=${room}`);
+  
+  if (!io) {
+    res.status(500).json({ success: false, message: 'Socket.io not initialized' });
+    return;
+  }
+  
+  const roomSize = io.sockets.adapter.rooms.get(room)?.size || 0;
+  io.to(room).emit(event, data);
+  
+  logger.info(`[INTERNAL] Broadcast ${event} to room ${room} (${roomSize} sockets)`);
+  
+  res.status(200).json({ 
+    success: true, 
+    data: { 
+      room, 
+      event, 
+      roomSize,
+      timestamp: new Date().toISOString(),
+    } 
   });
 }));
 
