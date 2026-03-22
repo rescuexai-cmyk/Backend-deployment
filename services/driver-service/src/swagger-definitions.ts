@@ -265,6 +265,44 @@
  *               type: array
  *               items:
  *                 type: string
+ *             pending:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   type:
+ *                     type: string
+ *                   url:
+ *                     type: string
+ *                     nullable: true
+ *                   uploaded_at:
+ *                     type: string
+ *                     format: date-time
+ *             flagged:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   type:
+ *                     type: string
+ *                   url:
+ *                     type: string
+ *                     nullable: true
+ *                   rejection_reason:
+ *                     type: string
+ *                     nullable: true
+ *             details:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   type:
+ *                     type: string
+ *                   url:
+ *                     type: string
+ *                     nullable: true
+ *                   is_verified:
+ *                     type: boolean
  *         verification_progress:
  *           type: integer
  *           minimum: 0

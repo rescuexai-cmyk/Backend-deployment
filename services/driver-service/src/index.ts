@@ -719,8 +719,7 @@ app.get(
         },
       },
     });
-  })
-);
+  }));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAYOUT ACCOUNT MANAGEMENT
@@ -822,8 +821,7 @@ app.post(
     } catch (error: any) {
       res.status(400).json({ success: false, message: error.message });
     }
-  })
-);
+  }));
 
 /**
  * @openapi
@@ -1089,8 +1087,7 @@ app.get(
         pagination: result.pagination,
       },
     });
-  })
-);
+  }));
 
 /**
  * @openapi
@@ -1872,7 +1869,7 @@ app.put(
  */
 const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => {
   // Get documentType from query params (preferred) or body
-  const documentType = (req.query.documentType as string) || req.body?.documentType;
+  const documentType = (req.params?.type as string) || (req.query.documentType as string) || req.body?.documentType;
   
   if (!documentType) {
     res.status(400).json({ 
@@ -1899,22 +1896,27 @@ const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => 
     return;
   }
   
-  // Delete old document if re-uploading
-  try {
-    await deleteOldDocument(driver.id, docType);
-  } catch (err: any) {
-    logger.warn(`[UPLOAD] Failed to delete old document from storage: ${err.message}`);
-    // Continue anyway - old file might not exist
-  }
-  
-  // Also delete from database if re-uploading
-  try {
-    await prisma.driverDocument.deleteMany({
-      where: { driverId: driver.id, documentType: docType as DocumentType },
-    });
-  } catch (err: any) {
-    logger.warn(`[UPLOAD] Failed to delete old document from DB: ${err.message}`);
-    // Continue anyway
+  // For update flow (PUT /api/driver/documents/:type), keep existing approved
+  // document history until new one is verified.
+  const isUpdateRoute = req.method === 'PUT' && Boolean(req.params?.type);
+  if (!isUpdateRoute) {
+    // Delete old document if re-uploading in onboarding flow
+    try {
+      await deleteOldDocument(driver.id, docType);
+    } catch (err: any) {
+      logger.warn(`[UPLOAD] Failed to delete old document from storage: ${err.message}`);
+      // Continue anyway - old file might not exist
+    }
+    
+    // Also delete from database if re-uploading in onboarding flow
+    try {
+      await prisma.driverDocument.deleteMany({
+        where: { driverId: driver.id, documentType: docType as DocumentType },
+      });
+    } catch (err: any) {
+      logger.warn(`[UPLOAD] Failed to delete old document from DB: ${err.message}`);
+      // Continue anyway
+    }
   }
   
   // Set driver info for multer to use in file naming
@@ -1954,12 +1956,7 @@ const handleMulterUpload = (req: AuthRequest, res: express.Response, next: expre
   });
 };
 
-app.post(
-  '/api/driver/onboarding/document/upload',
-  authenticate,
-  preUploadMiddleware,
-  handleMulterUpload,
-  asyncHandler(async (req: AuthRequest, res) => {
+const handleDriverDocumentUpload = asyncHandler(async (req: AuthRequest, res: express.Response) => {
     if (!req.file) {
       logger.error('[UPLOAD] No file in request after multer processing');
       res.status(400).json({ success: false, message: 'No file uploaded' });
@@ -1992,9 +1989,12 @@ app.post(
     
     const driver = await prisma.driver.findUnique({ where: { id: driverId } });
     let newStatus = driver!.onboardingStatus;
-    if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
-    else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
-    await prisma.driver.update({ where: { id: driverId }, data: { onboardingStatus: newStatus } });
+    const isOnboardingUploadRoute = req.path.includes('/onboarding/document/upload');
+    if (isOnboardingUploadRoute) {
+      if (docType === 'LICENSE') newStatus = OnboardingStatus.PROFILE_PHOTO;
+      else if (docType === 'PROFILE_PHOTO') newStatus = OnboardingStatus.PHOTO_CONFIRMATION;
+      await prisma.driver.update({ where: { id: driverId }, data: { onboardingStatus: newStatus } });
+    }
     
     // For PROFILE_PHOTO: also update the user's profileImage field
     if (isProfilePhoto && driver?.userId) {
@@ -2045,7 +2045,9 @@ app.post(
 
     res.status(201).json({ 
       success: true, 
-      message: 'Document uploaded successfully', 
+      message: isOnboardingUploadRoute
+        ? 'Document uploaded successfully'
+        : 'Document updated successfully and sent for verification',
       data: { 
         document_id: document.id, 
         document_type: document.documentType, 
@@ -2058,7 +2060,89 @@ app.post(
         verification_queued: verificationQueued,
       } 
     });
-  })
+  });
+
+app.post(
+  '/api/driver/onboarding/document/upload',
+  authenticate,
+  preUploadMiddleware,
+  handleMulterUpload,
+  handleDriverDocumentUpload
+);
+
+/**
+ * @openapi
+ * /api/driver/documents/{type}:
+ *   put:
+ *     tags: [Driver Onboarding]
+ *     summary: Update an already uploaded driver document
+ *     description: |
+ *       Re-upload a specific document type for an onboarded driver.
+ *       The newly uploaded file is stored as a fresh document entry and sent for verification.
+ *       Existing approved documents remain available in history until the new upload is verified.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: type
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [LICENSE, RC, INSURANCE, PAN_CARD, AADHAAR_CARD, PROFILE_PHOTO]
+ *         description: Document type to replace
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [document]
+ *             properties:
+ *               document:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Document updated and queued for verification
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Document updated successfully and sent for verification
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     document_id:
+ *                       type: string
+ *                     document_type:
+ *                       type: string
+ *                     document_url:
+ *                       type: string
+ *                     uploaded_at:
+ *                       type: string
+ *                       format: date-time
+ *                     verification_status:
+ *                       type: string
+ *                       example: pending
+ *       400:
+ *         description: Invalid document type or no file uploaded
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Driver profile not found
+ */
+app.put(
+  '/api/driver/documents/:type',
+  authenticate,
+  preUploadMiddleware,
+  handleMulterUpload,
+  handleDriverDocumentUpload
 );
 
 app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(async (req: AuthRequest, res) => {
@@ -2255,6 +2339,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
         verified: verifiedDocTypes,
         pending: pendingDocs.map((d) => ({
           type: d.documentType,
+          url: d.documentUrl,
           uploaded_at: d.uploadedAt,
           rejection_reason: d.rejectionReason,
           verification_status: d.verificationStatus,
@@ -2264,6 +2349,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
         })),
         flagged: flaggedDocs.map((d) => ({
           type: d.documentType,
+          url: d.documentUrl,
           uploaded_at: d.uploadedAt,
           rejection_reason: d.rejectionReason,
           verification_status: d.verificationStatus,
@@ -2273,6 +2359,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
         })),
         details: driver.documents.map(d => ({
           type: d.documentType,
+          url: d.documentUrl,
           uploaded_at: d.uploadedAt,
           is_verified: d.isVerified,
           verified_at: d.verifiedAt,
