@@ -2052,7 +2052,7 @@ const handleDriverDocumentUpload = asyncHandler(async (req: AuthRequest, res: ex
         document_id: document.id, 
         document_type: document.documentType, 
         document_url: document.documentUrl, 
-        file_name: `${driverId}_${docType}${path.extname(req.file.originalname).toLowerCase()}`,
+        file_name: (((req.file as any).key as string | undefined)?.split('/').pop()) ?? req.file.filename ?? req.file.originalname,
         uploaded_at: document.uploadedAt, 
         next_step: newStatus,
         storage_type: getStorageConfig().type,

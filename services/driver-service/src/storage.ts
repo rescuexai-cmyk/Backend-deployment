@@ -4,11 +4,11 @@
  * Uses S3-compatible API for document uploads.
  * Falls back to local disk storage if Spaces is not configured.
  * 
- * File naming convention: {driverId}_{DOCUMENT_TYPE}.{extension}
- * Folder structure: /{DOCUMENT_TYPE}/{driverId}_{DOCUMENT_TYPE}.{extension}
+ * File naming convention: {driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
+ * Folder structure: /{DOCUMENT_TYPE}/{driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
  */
 
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import multer from 'multer';
 import multerS3 from 'multer-s3';
@@ -50,17 +50,18 @@ if (isSpacesConfigured()) {
 }
 
 /**
- * Generate filename in format: {driverId}_{DOCUMENT_TYPE}.{extension}
+ * Generate filename in format: {driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
  */
 const generateDriverDocFilename = (driverId: string, documentType: string, originalFilename: string): string => {
   const ext = path.extname(originalFilename).toLowerCase() || '.jpg';
   const docType = documentType.toUpperCase();
-  return `${driverId}_${docType}${ext}`;
+  const timestamp = Date.now();
+  return `${driverId}_${docType}_${timestamp}${ext}`;
 };
 
 /**
  * Generate the full storage key/path
- * Format: {DOCUMENT_TYPE}/{driverId}_{DOCUMENT_TYPE}.{extension}
+ * Format: {DOCUMENT_TYPE}/{driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
  */
 const generateStorageKey = (driverId: string, documentType: string, originalFilename: string): string => {
   const docType = documentType.toUpperCase();
@@ -107,7 +108,7 @@ export const createUploadMiddleware = () => {
       storage: multerS3({
         s3: s3Client,
         bucket: DO_SPACES_BUCKET!,
-        acl: 'private', // Documents are private by default
+        acl: 'public-read', // Expose uploaded files publicly
         contentType: multerS3.AUTO_CONTENT_TYPE,
         key: (req: any, file, cb) => {
           const driverId = req.driverInfo?.id || 'unknown';
@@ -215,19 +216,28 @@ export const deleteOldDocument = async (driverId: string, documentType: string):
   const docType = documentType.toUpperCase();
   
   if (isSpacesConfigured() && s3Client) {
-    // Try common extensions
-    const extensions = ['.jpg', '.jpeg', '.png', '.pdf'];
-    for (const ext of extensions) {
-      const key = `${docType}/${driverId}_${docType}${ext}`;
-      try {
+    // Delete all historical variants for this document type.
+    // Prefix without trailing underscore matches both legacy and timestamped keys.
+    const prefix = `${docType}/${driverId}_${docType}`;
+    try {
+      const listed = await s3Client.send(new ListObjectsV2Command({
+        Bucket: DO_SPACES_BUCKET!,
+        Prefix: prefix,
+      }));
+      for (const obj of listed.Contents ?? []) {
+        if (!obj.Key) continue;
         await s3Client.send(new DeleteObjectCommand({
           Bucket: DO_SPACES_BUCKET!,
-          Key: key,
+          Key: obj.Key,
         }));
-        logger.info(`[STORAGE] Deleted old document: ${key}`);
-      } catch {
-        // Ignore if file doesn't exist
+        logger.info(`[STORAGE] Deleted old document: ${obj.Key}`);
       }
+    } catch (error: any) {
+      logger.warn('[STORAGE] Failed to list/delete old Spaces documents', {
+        driverId,
+        documentType: docType,
+        error: error?.message,
+      });
     }
   } else {
     // Local storage
