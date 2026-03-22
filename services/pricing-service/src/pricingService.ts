@@ -122,8 +122,157 @@ export interface FinalizeResponse {
   breakdown: Record<string, number>;
 }
 
+export interface DriverQuestPayload {
+  id: string;
+  title: string;
+  description: string;
+  target_rides: number;
+  completed_rides: number;
+  reward_amount: number;
+  is_peak_hour: boolean;
+  is_completed: boolean;
+  expires_at: string;
+}
+
+export interface DriverQuestSnapshot {
+  driverId: string;
+  date: string;
+  completedRidesToday: number;
+  peakRidesToday: number;
+  quests: DriverQuestPayload[];
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+function buildQuestPayloads(
+  completedRidesToday: number,
+  peakRidesToday: number,
+  expiresAt: Date
+): DriverQuestPayload[] {
+  const daily6Completed = Math.min(completedRidesToday, 6);
+  const daily10Completed = Math.min(completedRidesToday, 10);
+  const peakCompleted = Math.min(peakRidesToday, 1);
+
+  return [
+    {
+      id: 'daily_6',
+      title: 'Daily Starter',
+      description: 'Complete 6 rides today',
+      target_rides: 6,
+      completed_rides: daily6Completed,
+      reward_amount: 80,
+      is_peak_hour: false,
+      is_completed: daily6Completed >= 6,
+      expires_at: expiresAt.toISOString(),
+    },
+    {
+      id: 'daily_10',
+      title: 'Power Driver',
+      description: 'Complete 10 rides today',
+      target_rides: 10,
+      completed_rides: daily10Completed,
+      reward_amount: 180,
+      is_peak_hour: false,
+      is_completed: daily10Completed >= 10,
+      expires_at: expiresAt.toISOString(),
+    },
+    {
+      id: 'peak_hour',
+      title: 'Peak Hour Hero',
+      description: 'Complete rides during 5-9 PM',
+      target_rides: 1,
+      completed_rides: peakCompleted,
+      reward_amount: 20,
+      is_peak_hour: true,
+      is_completed: peakCompleted >= 1,
+      expires_at: expiresAt.toISOString(),
+    },
+  ];
+}
+
+async function getDriverIdForUser(userId: string): Promise<string> {
+  const driver = await prisma.driver.findUnique({
+    where: { userId },
+    select: { id: true },
+  });
+
+  if (!driver?.id) {
+    throw new Error('Driver profile not found');
+  }
+
+  return driver.id;
+}
+
+export async function getDriverQuestsSnapshot(userId: string): Promise<DriverQuestSnapshot> {
+  const driverId = await getDriverIdForUser(userId);
+  const now = new Date();
+  const dayStart = startOfDay(now);
+  const nextDayStart = new Date(dayStart);
+  nextDayStart.setDate(nextDayStart.getDate() + 1);
+
+  const peakStart = new Date(dayStart);
+  peakStart.setHours(17, 0, 0, 0);
+  const peakEnd = new Date(dayStart);
+  peakEnd.setHours(21, 0, 0, 0);
+
+  const [completedRidesToday, peakRidesToday] = await Promise.all([
+    prisma.ride.count({
+      where: {
+        driverId,
+        status: 'RIDE_COMPLETED',
+        completedAt: { gte: dayStart, lt: nextDayStart },
+      },
+    }),
+    prisma.ride.count({
+      where: {
+        driverId,
+        status: 'RIDE_COMPLETED',
+        completedAt: { gte: peakStart, lt: peakEnd },
+      },
+    }),
+  ]);
+
+  return {
+    driverId,
+    date: dayStart.toISOString(),
+    completedRidesToday,
+    peakRidesToday,
+    quests: buildQuestPayloads(completedRidesToday, peakRidesToday, nextDayStart),
+  };
+}
+
+export async function updateDriverQuestProgress(
+  userId: string,
+  questId: string,
+  completedRides?: number
+): Promise<DriverQuestSnapshot & { updatedQuest?: DriverQuestPayload }> {
+  const snapshot = await getDriverQuestsSnapshot(userId);
+  const normalizedQuestId = questId.trim().toLowerCase();
+
+  let quests = snapshot.quests;
+  if (Number.isFinite(completedRides)) {
+    const safeCompleted = Math.max(0, Math.trunc(completedRides as number));
+    const expiresAt = new Date(snapshot.quests[0]?.expires_at ?? new Date().toISOString());
+    const mergedCompleted = Math.max(snapshot.completedRidesToday, safeCompleted);
+    quests = buildQuestPayloads(mergedCompleted, snapshot.peakRidesToday, expiresAt);
+  }
+
+  const updatedQuest = quests.find((q) => q.id.toLowerCase() == normalizedQuestId);
+
+  return {
+    ...snapshot,
+    quests,
+    completedRidesToday: Number.isFinite(completedRides)
+      ? Math.max(snapshot.completedRidesToday, Math.max(0, Math.trunc(completedRides as number)))
+      : snapshot.completedRidesToday,
+    updatedQuest,
+  };
 }
 
 // ============================================================

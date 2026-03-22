@@ -3,7 +3,15 @@ import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
 import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
-import { calculateFare, calculateAllFares, finalizeFare, getNearbyDrivers, getPricingRules } from './pricingService';
+import {
+  calculateFare,
+  calculateAllFares,
+  finalizeFare,
+  getNearbyDrivers,
+  getPricingRules,
+  getDriverQuestsSnapshot,
+  updateDriverQuestProgress,
+} from './pricingService';
 import { validatePromo, calculatePromoDiscount, getActivePromosForUser } from './promoService';
 import { listZoneHealth, runMarketplaceGovernance, upsertMarketplacePolicy, getMarketplacePolicy } from './marketplacePolicy';
 
@@ -306,6 +314,94 @@ app.get(
     const vehicleType = req.query.vehicleType as string | undefined;
     const drivers = await getNearbyDrivers(lat, lng, radius, vehicleType);
     res.status(200).json({ success: true, data: { drivers, count: drivers.length, radius } });
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/driver-quests:
+ *   get:
+ *     tags: [Pricing]
+ *     summary: Get daily quest progress for the authenticated driver
+ *     responses:
+ *       200:
+ *         description: Driver quests fetched
+ *       401:
+ *         description: Unauthorized
+ */
+app.get(
+  '/api/pricing/driver-quests',
+  authenticate,
+  asyncHandler(async (req: any, res) => {
+    try {
+      const snapshot = await getDriverQuestsSnapshot(req.user.id);
+      res.status(200).json({ success: true, data: snapshot });
+    } catch (error) {
+      const message = (error as Error).message || 'Failed to fetch driver quests';
+      if (message === 'Driver profile not found') {
+        res.status(404).json({ success: false, message });
+        return;
+      }
+      throw error;
+    }
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/driver-quests/progress:
+ *   post:
+ *     tags: [Pricing]
+ *     summary: Update quest progress hint (authoritative progress is ride-derived)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [questId]
+ *             properties:
+ *               questId:
+ *                 type: string
+ *               completedRides:
+ *                 type: integer
+ *                 minimum: 0
+ *     responses:
+ *       200:
+ *         description: Quest progress recalculated
+ *       400:
+ *         description: Validation failed
+ */
+app.post(
+  '/api/pricing/driver-quests/progress',
+  authenticate,
+  [
+    body('questId').isString().notEmpty(),
+    body('completedRides').optional().isInt({ min: 0 }),
+  ],
+  asyncHandler(async (req: any, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    try {
+      const snapshot = await updateDriverQuestProgress(
+        req.user.id,
+        req.body.questId,
+        req.body.completedRides
+      );
+
+      res.status(200).json({ success: true, data: snapshot });
+    } catch (error) {
+      const message = (error as Error).message || 'Failed to update quest progress';
+      if (message === 'Driver profile not found') {
+        res.status(404).json({ success: false, message });
+        return;
+      }
+      throw error;
+    }
   })
 );
 
