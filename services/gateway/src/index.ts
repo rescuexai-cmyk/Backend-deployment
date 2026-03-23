@@ -203,6 +203,7 @@ app.use('/api/auth', createProxyMiddleware({ target: AUTH_SERVICE, ...proxyOptio
 app.use('/api/user', createProxyMiddleware({ target: USER_SERVICE, ...proxyOptions }));
 // File upload endpoint - must come before general /api/driver route
 app.use('/api/driver/onboarding/document/upload', createProxyMiddleware(uploadProxyOptions));
+app.use('/api/driver/documents', createProxyMiddleware(uploadProxyOptions));
 app.use('/api/driver', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
