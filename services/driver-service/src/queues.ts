@@ -88,7 +88,9 @@ export async function addVerificationJob(
 ): Promise<string> {
   const queue = getDocumentVerificationQueue();
   
-  const job = await queue.add(
+  // Timeout after 3 seconds to avoid blocking HTTP response when Redis is down
+  const timeoutMs = 3000;
+  const jobPromise = queue.add(
     'verify-document',
     {
       documentId,
@@ -100,6 +102,12 @@ export async function addVerificationJob(
       jobId: `verify-${documentId}`,
     },
   );
+  
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Queue add timed out (Redis unreachable)')), timeoutMs),
+  );
+
+  const job = await Promise.race([jobPromise, timeoutPromise]);
   
   logger.info(`[QUEUE] Added verification job for document ${documentId}`, {
     jobId: job.id,
