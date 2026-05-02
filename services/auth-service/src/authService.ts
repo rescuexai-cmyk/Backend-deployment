@@ -37,10 +37,34 @@ function isTestDriverPhone(phone: string): boolean {
   return digits === TEST_DRIVER_PHONE_DIGITS || digits === `0${TEST_DRIVER_PHONE_DIGITS}`;
 }
 
-// Override function removed to ensure normal database IDs are used
 async function applyTestDriverOverrides(userId: string, phone: string): Promise<void> {
-  // Logic removed. The app will now fetch the real database IDs for everyone.
-  return;
+  if (!isTestDriverPhone(phone)) return;
+
+  const now = new Date();
+  const driver = await prisma.driver.findFirst({
+    where: { userId },
+    select: { id: true },
+  });
+
+  if (!driver) return;
+
+  const paid = await prisma.driverPenalty.updateMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    data: { status: PenaltyStatus.PAID, paidAt: now },
+  });
+
+  await prisma.driver.update({
+    where: { id: driver.id },
+    data: {
+      onboardingStatus: OnboardingStatus.COMPLETED,
+      isVerified: true,
+      isActive: true,
+      documentsVerifiedAt: now,
+      verificationNotes: 'Auto-test override: onboarding completed and penalties cleared at login.',
+    },
+  });
+
+  logger.info(`[AUTH] Applied test-driver override for ${phone} (driverId=${driver.id}, penalties_cleared=${paid.count})`);
 }
 
 function generateTokens(userId: string): AuthTokens {
