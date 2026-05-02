@@ -146,6 +146,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY}
       VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
     depends_on:
       redis:
         condition: service_healthy

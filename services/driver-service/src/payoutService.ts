@@ -3,13 +3,18 @@ import { PrismaClient, PayoutStatus, PayoutAccountType, WalletTransactionType } 
 
 const prisma = new PrismaClient();
 
-// Initialize Razorpay (use environment variables)
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || '',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || '',
-});
-// Razorpay SDK typings vary across versions; keep runtime calls stable via narrow any-cast bridge.
-const razorpayClient = razorpay as any;
+// Initialize Razorpay lazily (avoid crash if keys not configured)
+let razorpayClient: any = null;
+
+function getRazorpayClient(): any {
+  if (!razorpayClient && process.env.RAZORPAY_KEY_ID) {
+    razorpayClient = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET || '',
+    });
+  }
+  return razorpayClient;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAYOUT ACCOUNT MANAGEMENT
@@ -68,7 +73,7 @@ export async function createPayoutAccount(input: CreatePayoutAccountInput) {
   
   if (!razorpayContactId && process.env.RAZORPAY_KEY_ID) {
     try {
-      const contact: any = await razorpayClient.contacts.create({
+      const contact: any = await getRazorpayClient().contacts.create({
         name: `${driver.user.firstName} ${driver.user.lastName || ''}`.trim(),
         email: driver.user.email || undefined,
         contact: driver.user.phone,
@@ -88,7 +93,7 @@ export async function createPayoutAccount(input: CreatePayoutAccountInput) {
   if (razorpayContactId && process.env.RAZORPAY_KEY_ID) {
     try {
       if (accountType === 'BANK_ACCOUNT') {
-        const fundAccount: any = await razorpayClient.fundAccount.create({
+        const fundAccount: any = await getRazorpayClient().fundAccount.create({
           contact_id: razorpayContactId,
           account_type: 'bank_account',
           bank_account: {
@@ -99,7 +104,7 @@ export async function createPayoutAccount(input: CreatePayoutAccountInput) {
         });
         razorpayFundAccountId = fundAccount.id;
       } else if (accountType === 'UPI') {
-        const fundAccount: any = await razorpayClient.fundAccount.create({
+        const fundAccount: any = await getRazorpayClient().fundAccount.create({
           contact_id: razorpayContactId,
           account_type: 'vpa',
           vpa: {
@@ -480,7 +485,7 @@ async function processPayoutAsync(payoutId: string) {
 
   try {
     // Create Razorpay payout
-    const razorpayPayout: any = await razorpayClient.payouts.create({
+    const razorpayPayout: any = await getRazorpayClient().payouts.create({
       account_number: process.env.RAZORPAY_ACCOUNT_NUMBER!,
       fund_account_id: payout.payoutAccount.razorpayFundAccountId,
       amount: Math.round(payout.netAmount * 100), // Convert to paise
