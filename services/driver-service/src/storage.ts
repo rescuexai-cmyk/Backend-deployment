@@ -109,7 +109,8 @@ export const createUploadMiddleware = () => {
       storage: multerS3({
         s3: s3Client,
         bucket: AWS_S3_BUCKET!,
-        acl: 'public-read', // Expose uploaded files publicly
+        // Note: ACL removed — modern S3 buckets use 'Bucket owner enforced' Object Ownership.
+        // Use presigned URLs or CloudFront for access instead of public-read ACL.
         contentType: multerS3.AUTO_CONTENT_TYPE,
         key: (req: any, file, cb) => {
           const driverId = req.driverInfo?.id || 'unknown';
