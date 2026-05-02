@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================
-# RAAHI BACKEND - DIGITALOCEAN DEPLOYMENT SCRIPT
+# RAAHI BACKEND - AWS DEPLOYMENT SCRIPT
 # ============================================
-# Run this on your DigitalOcean Droplet
+# Run this on your AWS EC2 instance
 
 set -e
 

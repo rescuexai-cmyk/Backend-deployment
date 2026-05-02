@@ -65,7 +65,7 @@ for (const docType of REQUIRED_DOCUMENTS) {
   }
 }
 
-// Document upload middleware (uses DO Spaces if configured, else local disk)
+// Document upload middleware (uses AWS S3 if configured, else local disk)
 const upload = createUploadMiddleware();
 
 // Log storage configuration on startup
@@ -147,12 +147,12 @@ setupSwagger(app, {
  *                   properties:
  *                     type:
  *                       type: string
- *                       example: digitalocean-spaces
+ *                       example: aws-s3
  *                     configured:
  *                       type: boolean
  *                     bucket:
  *                       type: string
- *                     endpoint:
+ *                     region:
  *                       type: string
  */
 app.get('/health', (req, res) => {
@@ -163,9 +163,9 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     storage: {
       type: storage.type,
-      configured: storage.type === 'digitalocean-spaces',
+      configured: storage.type === 'aws-s3',
       bucket: storage.bucket,
-      endpoint: storage.endpoint,
+      region: storage.region,
     },
   });
 });

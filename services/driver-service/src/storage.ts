@@ -1,8 +1,8 @@
 /**
- * DigitalOcean Spaces Storage Module
+ * AWS S3 Storage Module
  * 
- * Uses S3-compatible API for document uploads.
- * Falls back to local disk storage if Spaces is not configured.
+ * Uses AWS S3 for document uploads.
+ * Falls back to local disk storage if S3 is not configured.
  * 
  * File naming convention: {driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
  * Folder structure: /{DOCUMENT_TYPE}/{driverId}_{DOCUMENT_TYPE}_{timestamp}.{extension}
@@ -19,34 +19,35 @@ import { Readable } from 'stream';
 
 const logger = createLogger('driver-service:storage');
 
-// DigitalOcean Spaces configuration
-const DO_SPACES_ENDPOINT = process.env.DO_SPACES_ENDPOINT; // e.g., 'sfo3.digitaloceanspaces.com'
-const DO_SPACES_BUCKET = process.env.DO_SPACES_BUCKET; // e.g., 'raahidriverdocumentation'
-const DO_SPACES_KEY = process.env.DO_SPACES_KEY;
-const DO_SPACES_SECRET = process.env.DO_SPACES_SECRET;
-const DO_SPACES_CDN_ENDPOINT = process.env.DO_SPACES_CDN_ENDPOINT; // Optional CDN endpoint
+// AWS S3 configuration
+const AWS_S3_REGION = process.env.AWS_S3_REGION; // e.g., 'ap-south-1'
+const AWS_S3_BUCKET = process.env.AWS_S3_BUCKET; // e.g., 'raahi-documents'
+const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
+const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
+const AWS_CLOUDFRONT_DOMAIN = process.env.AWS_CLOUDFRONT_DOMAIN; // Optional CloudFront CDN domain
 
-// Check if DO Spaces is configured
-export const isSpacesConfigured = (): boolean => {
-  return !!(DO_SPACES_ENDPOINT && DO_SPACES_BUCKET && DO_SPACES_KEY && DO_SPACES_SECRET);
+// Check if AWS S3 is configured
+export const isS3Configured = (): boolean => {
+  return !!(AWS_S3_REGION && AWS_S3_BUCKET && AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY);
 };
 
-// S3 client for DigitalOcean Spaces
+// Keep legacy export name for backward compatibility
+export const isSpacesConfigured = isS3Configured;
+
+// S3 client for AWS
 let s3Client: S3Client | null = null;
 
-if (isSpacesConfigured()) {
+if (isS3Configured()) {
   s3Client = new S3Client({
-    endpoint: `https://${DO_SPACES_ENDPOINT}`,
-    region: 'us-east-1', // DigitalOcean Spaces requires this even though it's ignored
+    region: AWS_S3_REGION!,
     credentials: {
-      accessKeyId: DO_SPACES_KEY!,
-      secretAccessKey: DO_SPACES_SECRET!,
+      accessKeyId: AWS_ACCESS_KEY_ID!,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY!,
     },
-    forcePathStyle: false,
   });
-  logger.info(`[STORAGE] DigitalOcean Spaces configured: ${DO_SPACES_BUCKET} at ${DO_SPACES_ENDPOINT}`);
+  logger.info(`[STORAGE] AWS S3 configured: ${AWS_S3_BUCKET} in ${AWS_S3_REGION}`);
 } else {
-  logger.warn('[STORAGE] DigitalOcean Spaces not configured, using local disk storage');
+  logger.warn('[STORAGE] AWS S3 not configured, using local disk storage');
 }
 
 /**
@@ -102,12 +103,12 @@ declare global {
  *   - documentType: type of document (LICENSE, RC, etc.)
  */
 export const createUploadMiddleware = () => {
-  if (isSpacesConfigured() && s3Client) {
-    // DigitalOcean Spaces storage
+  if (isS3Configured() && s3Client) {
+    // AWS S3 storage
     return multer({
       storage: multerS3({
         s3: s3Client,
-        bucket: DO_SPACES_BUCKET!,
+        bucket: AWS_S3_BUCKET!,
         acl: 'public-read', // Expose uploaded files publicly
         contentType: multerS3.AUTO_CONTENT_TYPE,
         key: (req: any, file, cb) => {
@@ -115,7 +116,7 @@ export const createUploadMiddleware = () => {
           const documentType = req.driverInfo?.documentType || req.body?.documentType || 'DOCUMENT';
           const key = generateStorageKey(driverId, documentType, file.originalname);
           
-          logger.info(`[STORAGE] Uploading to Spaces: ${key}`);
+          logger.info(`[STORAGE] Uploading to S3: ${key}`);
           cb(null, key);
         },
         metadata: (req: any, file, cb) => {
@@ -164,12 +165,12 @@ export const createUploadMiddleware = () => {
  * Get document URL based on storage type
  */
 export const getDocumentUrl = (file: Express.Multer.File & { key?: string; location?: string }, documentType?: string): string => {
-  if (isSpacesConfigured() && file.key) {
-    // Use CDN endpoint if configured, otherwise construct direct URL
-    if (DO_SPACES_CDN_ENDPOINT) {
-      return `https://${DO_SPACES_CDN_ENDPOINT}/${file.key}`;
+  if (isS3Configured() && file.key) {
+    // Use CloudFront CDN if configured, otherwise construct direct S3 URL
+    if (AWS_CLOUDFRONT_DOMAIN) {
+      return `https://${AWS_CLOUDFRONT_DOMAIN}/${file.key}`;
     }
-    return `https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT}/${file.key}`;
+    return `https://${AWS_S3_BUCKET}.s3.${AWS_S3_REGION}.amazonaws.com/${file.key}`;
   }
   
   // Local storage URL
@@ -178,20 +179,27 @@ export const getDocumentUrl = (file: Express.Multer.File & { key?: string; locat
 };
 
 /**
+ * Check if a document URL is an S3 URL (supports both legacy DO Spaces and AWS S3)
+ */
+const isS3Url = (documentUrl: string): boolean => {
+  return documentUrl.includes('amazonaws.com') || documentUrl.includes('digitaloceanspaces.com');
+};
+
+/**
  * Delete document from storage
  */
 export const deleteDocument = async (documentUrl: string): Promise<boolean> => {
   try {
-    if (isSpacesConfigured() && s3Client && documentUrl.includes(DO_SPACES_ENDPOINT!)) {
+    if (isS3Configured() && s3Client && isS3Url(documentUrl)) {
       // Extract key from URL
       const urlParts = new URL(documentUrl);
       const key = urlParts.pathname.substring(1); // Remove leading slash
       
       await s3Client.send(new DeleteObjectCommand({
-        Bucket: DO_SPACES_BUCKET!,
+        Bucket: AWS_S3_BUCKET!,
         Key: key,
       }));
-      logger.info(`[STORAGE] Deleted from Spaces: ${key}`);
+      logger.info(`[STORAGE] Deleted from S3: ${key}`);
       return true;
     } else if (documentUrl.startsWith('/uploads/')) {
       // Local file deletion
@@ -215,25 +223,25 @@ export const deleteDocument = async (documentUrl: string): Promise<boolean> => {
 export const deleteOldDocument = async (driverId: string, documentType: string): Promise<void> => {
   const docType = documentType.toUpperCase();
   
-  if (isSpacesConfigured() && s3Client) {
+  if (isS3Configured() && s3Client) {
     // Delete all historical variants for this document type.
     // Prefix without trailing underscore matches both legacy and timestamped keys.
     const prefix = `${docType}/${driverId}_${docType}`;
     try {
       const listed = await s3Client.send(new ListObjectsV2Command({
-        Bucket: DO_SPACES_BUCKET!,
+        Bucket: AWS_S3_BUCKET!,
         Prefix: prefix,
       }));
       for (const obj of listed.Contents ?? []) {
         if (!obj.Key) continue;
         await s3Client.send(new DeleteObjectCommand({
-          Bucket: DO_SPACES_BUCKET!,
+          Bucket: AWS_S3_BUCKET!,
           Key: obj.Key,
         }));
         logger.info(`[STORAGE] Deleted old document: ${obj.Key}`);
       }
     } catch (error: any) {
-      logger.warn('[STORAGE] Failed to list/delete old Spaces documents', {
+      logger.warn('[STORAGE] Failed to list/delete old S3 documents', {
         driverId,
         documentType: docType,
         error: error?.message,
@@ -259,10 +267,10 @@ export const deleteOldDocument = async (driverId: string, documentType: string):
  * Get storage configuration status
  */
 export const getStorageConfig = () => ({
-  type: isSpacesConfigured() ? 'digitalocean-spaces' : 'local-disk',
-  bucket: isSpacesConfigured() ? DO_SPACES_BUCKET : null,
-  endpoint: isSpacesConfigured() ? DO_SPACES_ENDPOINT : null,
-  cdnEndpoint: DO_SPACES_CDN_ENDPOINT || null,
+  type: isS3Configured() ? 'aws-s3' : 'local-disk',
+  bucket: isS3Configured() ? AWS_S3_BUCKET : null,
+  region: isS3Configured() ? AWS_S3_REGION : null,
+  cdnDomain: AWS_CLOUDFRONT_DOMAIN || null,
 });
 
 /**
@@ -271,12 +279,13 @@ export const getStorageConfig = () => ({
 export const getS3Client = (): S3Client | null => s3Client;
 
 /**
- * Extract S3 key from a DO Spaces URL
- * Example: https://bucket.sfo3.digitaloceanspaces.com/LICENSE/abc_LICENSE.jpg -> LICENSE/abc_LICENSE.jpg
+ * Extract S3 key from an S3 or legacy DO Spaces URL
+ * Example: https://bucket.s3.ap-south-1.amazonaws.com/LICENSE/abc_LICENSE.jpg -> LICENSE/abc_LICENSE.jpg
+ * Legacy:  https://bucket.sfo3.digitaloceanspaces.com/LICENSE/abc_LICENSE.jpg -> LICENSE/abc_LICENSE.jpg
  */
 export const extractKeyFromUrl = (documentUrl: string): string | null => {
   try {
-    if (!documentUrl.includes('digitaloceanspaces.com')) {
+    if (!isS3Url(documentUrl)) {
       return null;
     }
     const url = new URL(documentUrl);
@@ -287,14 +296,14 @@ export const extractKeyFromUrl = (documentUrl: string): string | null => {
 };
 
 /**
- * Check if a document URL is from DO Spaces
+ * Check if a document URL is from S3 (or legacy DO Spaces)
  */
 export const isSpacesUrl = (documentUrl: string): boolean => {
-  return documentUrl.includes('digitaloceanspaces.com');
+  return isS3Url(documentUrl);
 };
 
 /**
- * Download document from DO Spaces as a Buffer
+ * Download document from S3 as a Buffer
  * Used for sending to Vision API (private files can't be accessed via URL)
  */
 export const downloadDocument = async (documentUrl: string): Promise<Buffer | null> => {
@@ -308,9 +317,9 @@ export const downloadDocument = async (documentUrl: string): Promise<Buffer | nu
     return null;
   }
 
-  // Handle DO Spaces files
-  if (!isSpacesConfigured() || !s3Client) {
-    logger.error('[STORAGE] Cannot download: Spaces not configured');
+  // Handle S3 files
+  if (!isS3Configured() || !s3Client) {
+    logger.error('[STORAGE] Cannot download: S3 not configured');
     return null;
   }
 
@@ -322,7 +331,7 @@ export const downloadDocument = async (documentUrl: string): Promise<Buffer | nu
 
   try {
     const command = new GetObjectCommand({
-      Bucket: DO_SPACES_BUCKET!,
+      Bucket: AWS_S3_BUCKET!,
       Key: key,
     });
 
@@ -345,7 +354,7 @@ export const downloadDocument = async (documentUrl: string): Promise<Buffer | nu
     logger.info(`[STORAGE] Downloaded ${key} (${buffer.length} bytes)`);
     return buffer;
   } catch (error: any) {
-    logger.error('[STORAGE] Failed to download from Spaces', { error: error.message, documentUrl });
+    logger.error('[STORAGE] Failed to download from S3', { error: error.message, documentUrl });
     return null;
   }
 };
@@ -354,7 +363,7 @@ export const downloadDocument = async (documentUrl: string): Promise<Buffer | nu
  * Generate a presigned URL for temporary access to a private document
  * Useful if you need to share the URL temporarily (e.g., admin preview)
  * 
- * @param documentUrl - The document URL (DO Spaces or local)
+ * @param documentUrl - The document URL (S3 or local)
  * @param expiresIn - URL expiry time in seconds (default: 1 hour)
  */
 export const getPresignedUrl = async (documentUrl: string, expiresIn: number = 3600): Promise<string | null> => {
@@ -363,8 +372,8 @@ export const getPresignedUrl = async (documentUrl: string, expiresIn: number = 3
     return documentUrl;
   }
 
-  if (!isSpacesConfigured() || !s3Client) {
-    logger.warn('[STORAGE] Cannot generate presigned URL: Spaces not configured');
+  if (!isS3Configured() || !s3Client) {
+    logger.warn('[STORAGE] Cannot generate presigned URL: S3 not configured');
     return null;
   }
 
@@ -376,7 +385,7 @@ export const getPresignedUrl = async (documentUrl: string, expiresIn: number = 3
 
   try {
     const command = new GetObjectCommand({
-      Bucket: DO_SPACES_BUCKET!,
+      Bucket: AWS_S3_BUCKET!,
       Key: key,
     });
 

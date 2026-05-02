@@ -12,23 +12,11 @@
 version: "3.9"
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: raahi-postgres
-    restart: always
-    mem_limit: 512m
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U raahi -d raahi"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    environment:
-      POSTGRES_DB: raahi
-      POSTGRES_USER: raahi
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raahi_prod_2024_secure}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+  # ============================================
+  # PostgreSQL is now on AWS RDS (external)
+  # Set DATABASE_URL in .env to your RDS endpoint
+  # ============================================
+
 
   redis:
     image: redis:7-alpine
@@ -97,7 +85,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5001
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
@@ -107,9 +95,6 @@ services:
       TRUECALLER_CLIENT_ID: ${TRUECALLER_CLIENT_ID}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       ALLOW_DEV_OTP: ${ALLOW_DEV_OTP:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/health"]
       interval: 15s
@@ -127,12 +112,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5002
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5002/health"]
       interval: 15s
@@ -150,23 +132,21 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5003
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       DIGILOCKER_CLIENT_ID: ${DIGILOCKER_CLIENT_ID}
       DIGILOCKER_CLIENT_SECRET: ${DIGILOCKER_CLIENT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      DO_SPACES_ENDPOINT: ${DO_SPACES_ENDPOINT}
-      DO_SPACES_BUCKET: ${DO_SPACES_BUCKET}
-      DO_SPACES_KEY: ${DO_SPACES_KEY}
-      DO_SPACES_SECRET: ${DO_SPACES_SECRET}
-      DO_SPACES_CDN_ENDPOINT: ${DO_SPACES_CDN_ENDPOINT}
+      AWS_S3_REGION: ${AWS_S3_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_CLOUDFRONT_DOMAIN: ${AWS_CLOUDFRONT_DOMAIN}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       GOOGLE_VISION_API_KEY: ${GOOGLE_VISION_API_KEY}
       VISION_CONFIDENCE_THRESHOLD: ${VISION_CONFIDENCE_THRESHOLD:-0.70}
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -186,15 +166,13 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5004
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       PRICING_SERVICE_URL: http://pricing-service:5005
       REALTIME_SERVICE_URL: http://realtime-service:5007
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
     depends_on:
-      postgres:
-        condition: service_healthy
       pricing-service:
         condition: service_healthy
       realtime-service:
@@ -216,13 +194,10 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5005
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       BASE_FARE: ${BASE_FARE:-25}
       PER_KM_RATE: ${PER_KM_RATE:-12}
       PER_MINUTE_RATE: ${PER_MINUTE_RATE:-2}
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5005/health"]
       interval: 15s
@@ -240,15 +215,12 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5006
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-raahi-5f22e}
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
       FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5006/health"]
       interval: 15s
@@ -268,13 +240,10 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5007
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]
       interval: 15s
@@ -292,12 +261,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5008
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
+      DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
       interval: 15s
@@ -318,10 +284,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5010
-      DATABASE_URL: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL}
     mem_limit: 128m
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5010/health"]
@@ -356,7 +319,7 @@ services:
   # ============================================
   # MONITORING STACK (profile: monitoring)
   # Run with: docker compose --profile monitoring up -d
-  # Skip on Droplet: docker compose up -d (no --profile)
+  # Skip on small instances: docker compose up -d (no --profile)
   # ============================================
 
   prometheus:
@@ -455,11 +418,8 @@ services:
     container_name: raahi-postgres-exporter
     restart: always
     environment:
-      DATA_SOURCE_NAME: postgresql://raahi:${POSTGRES_PASSWORD:-raahi_prod_2024_secure}@postgres:5432/raahi?sslmode=disable
+      DATA_SOURCE_NAME: ${DATABASE_URL}?sslmode=require
     mem_limit: 64m
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9187/metrics"]
       interval: 30s
@@ -508,7 +468,7 @@ services:
       retries: 3
 
 volumes:
-  pgdata:
+  # pgdata: # Removed - using AWS RDS
   redisdata:
   prometheus_data:
   grafana_data:
