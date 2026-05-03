@@ -269,15 +269,6 @@ router.post(
     body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
   ],
   asyncHandler(async (req, res: Response) => {
-    if (process.env.NODE_ENV === 'production') {
-      res.status(403).json({
-        success: false,
-        message: 'Direct phone authentication is disabled in production.',
-        code: 'PHONE_AUTH_DISABLED',
-      });
-      return;
-    }
-
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
@@ -559,6 +550,15 @@ router.post(
     body('phone').isString().notEmpty().withMessage('Phone number is required'),
   ],
   asyncHandler(async (req, res: Response) => {
+    if (process.env.NODE_ENV === 'production') {
+      res.status(403).json({
+        success: false,
+        message: 'Direct phone authentication is disabled in production.',
+        code: 'PHONE_AUTH_DISABLED',
+      });
+      return;
+    }
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       res.status(400).json({
