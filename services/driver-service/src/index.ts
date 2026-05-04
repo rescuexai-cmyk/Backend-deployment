@@ -2321,11 +2321,13 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
       kyc: {
         aadhaar: {
           number: driver.aadhaarNumber ? `XXXX-XXXX-${driver.aadhaarNumber.slice(-4)}` : null,
+          number_full: driver.aadhaarNumber || null,
           verified: driver.aadhaarVerified,
           verified_at: driver.aadhaarVerifiedAt,
         },
         pan: {
           number: driver.panNumber ? `${driver.panNumber.slice(0, 2)}XXXXX${driver.panNumber.slice(-2)}` : null,
+          number_full: driver.panNumber || null,
           verified: driver.panVerified,
           verified_at: driver.panVerifiedAt,
         },
