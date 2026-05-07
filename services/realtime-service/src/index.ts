@@ -3,7 +3,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, optionalAuth, authenticate, AuthRequest, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
+import { connectDatabase, authenticate, AuthRequest, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS, latLngToH3 } from '@raahi/shared';
@@ -1007,8 +1007,8 @@ app.patch('/api/realtime/sse/driver/:driverId/location', authenticate, [
  * - driver-location-update: All driver location updates
  * - ride-status-update: All ride status changes
  */
-app.get('/api/realtime/sse/admin', optionalAuth, asyncHandler(async (req: AuthRequest, res: Response) => {
-  const userId = req.user?.id || 'anonymous-admin';
+app.get('/api/realtime/sse/admin', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
   logger.info(`[SSE] Admin stream requested: user=${userId}`);
   sseManager.handleAdminConnection(req, res, userId);
 }));
@@ -1016,7 +1016,7 @@ app.get('/api/realtime/sse/admin', optionalAuth, asyncHandler(async (req: AuthRe
 /**
  * SSE: Connection Stats (for monitoring)
  */
-app.get('/api/realtime/sse/stats', optionalAuth, asyncHandler(async (req, res) => {
+app.get('/api/realtime/sse/stats', authenticate, asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: {
@@ -1031,7 +1031,7 @@ app.get('/api/realtime/sse/stats', optionalAuth, asyncHandler(async (req, res) =
 /**
  * SSE: Detailed connection debug endpoint
  */
-app.get('/api/realtime/sse/debug', asyncHandler(async (req, res) => {
+app.get('/api/realtime/sse/debug', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
   res.json({
     success: true,
     data: {
@@ -1064,7 +1064,7 @@ app.get('/api/realtime/sse/debug', asyncHandler(async (req, res) => {
  * Accept: application/octet-stream | application/x-raahi-compact | application/json
  */
 app.post('/api/realtime/location/binary',
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const contentType = req.headers['content-type'] || 'application/json';
     
@@ -1701,13 +1701,13 @@ app.get('/internal/state-metrics', authenticateInternal, asyncHandler(async (req
   });
 }));
 
-app.get('/api/realtime/stats', optionalAuth, asyncHandler(async (req, res) => {
+app.get('/api/realtime/stats', authenticate, asyncHandler(async (req, res) => {
   const stats = await getRealTimeStats();
   res.status(200).json({ success: true, data: stats });
 }));
 
 // DEBUG ENDPOINT: Get detailed socket connection state
-app.get('/api/realtime/debug/connections', asyncHandler(async (req, res) => {
+app.get('/api/realtime/debug/connections', authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
   const availableDriversRoom = io.sockets.adapter.rooms.get('available-drivers');
   
   // Get all connected drivers with their socket info
@@ -1779,7 +1779,7 @@ app.get(
     query('lng').isFloat({ min: -180, max: 180 }),
     query('radius').optional().isFloat({ min: 0.1, max: 50 }),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -1803,7 +1803,7 @@ app.post(
     body('heading').optional().isFloat({ min: 0, max: 360 }),
     body('speed').optional().isFloat({ min: 0 }),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -1816,12 +1816,12 @@ app.post(
   })
 );
 
-app.get('/api/realtime/driver-heatmap', optionalAuth, asyncHandler(async (req, res) => {
+app.get('/api/realtime/driver-heatmap', authenticate, asyncHandler(async (req, res) => {
   const data = await getDriverHeatmapData();
   res.status(200).json({ success: true, data: data });
 }));
 
-app.get('/api/realtime/demand-hotspots', optionalAuth, asyncHandler(async (req, res) => {
+app.get('/api/realtime/demand-hotspots', authenticate, asyncHandler(async (req, res) => {
   const data = await getDemandHotspots();
   res.status(200).json({ success: true, data: data });
 }));

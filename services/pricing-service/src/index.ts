@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
-import { connectDatabase, optionalAuth, authenticate, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
+import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import {
   calculateFare,
@@ -106,7 +106,7 @@ app.post(
     body('vehicleType').optional().isString(),
     body('scheduledTime').optional().isISO8601(),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -164,7 +164,7 @@ app.post(
     body('dropLng').isFloat({ min: -180, max: 180 }),
     body('scheduledTime').optional().isISO8601(),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -234,7 +234,7 @@ app.post(
     body('discountPercent').optional().isFloat({ min: 0, max: 100 }),
     body('discountAmount').optional().isFloat({ min: 0 }),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -301,7 +301,7 @@ app.get(
     query('radius').optional().isFloat({ min: 1, max: 50 }),
     query('vehicleType').optional().isString(),
   ],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -421,7 +421,7 @@ app.get('/api/pricing/rules', asyncHandler(async (_req, res) => {
 app.get(
   '/api/pricing/marketplace/policy',
   [query('cityCode').isString().notEmpty()],
-  optionalAuth,
+  authenticate,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
