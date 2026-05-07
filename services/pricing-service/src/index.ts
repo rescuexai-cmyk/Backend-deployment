@@ -32,6 +32,21 @@ function authenticateInternal(req: express.Request, res: express.Response, next:
   next();
 }
 
+/**
+ * Accept EITHER a valid user JWT OR a valid internal API key.
+ * Use on endpoints that are called both by clients (with JWT) and by
+ * other services internally (with x-internal-api-key).
+ */
+function authenticateOrInternal(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const internalApiKey = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+  const provided = req.headers['x-internal-api-key'] as string | undefined;
+  if (provided && provided === internalApiKey) {
+    return next();
+  }
+  // Fall through to JWT auth
+  return authenticate(req, res, next);
+}
+
 // Setup Swagger documentation
 setupSwagger(app, {
   title: 'Pricing Service API',
@@ -106,7 +121,7 @@ app.post(
     body('vehicleType').optional().isString(),
     body('scheduledTime').optional().isISO8601(),
   ],
-  authenticate,
+  authenticateOrInternal,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -164,7 +179,7 @@ app.post(
     body('dropLng').isFloat({ min: -180, max: 180 }),
     body('scheduledTime').optional().isISO8601(),
   ],
-  authenticate,
+  authenticateOrInternal,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -234,7 +249,7 @@ app.post(
     body('discountPercent').optional().isFloat({ min: 0, max: 100 }),
     body('discountAmount').optional().isFloat({ min: 0 }),
   ],
-  authenticate,
+  authenticateOrInternal,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -301,7 +316,7 @@ app.get(
     query('radius').optional().isFloat({ min: 1, max: 50 }),
     query('vehicleType').optional().isString(),
   ],
-  authenticate,
+  authenticateOrInternal,
   asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {

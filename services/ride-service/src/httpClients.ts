@@ -5,6 +5,7 @@ const logger = createLogger('ride-service-http');
 
 const PRICING_SERVICE_URL = process.env.PRICING_SERVICE_URL || 'http://localhost:5005';
 const REALTIME_SERVICE_URL = process.env.REALTIME_SERVICE_URL || 'http://localhost:5007';
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 
 // Retry configuration
 const MAX_RETRIES = 3;
@@ -74,6 +75,7 @@ export async function calculateFare(body: {
   return withRetry(async () => {
     const { data } = await axios.post(`${PRICING_SERVICE_URL}/api/pricing/calculate`, body, {
       timeout: 5000,
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
     });
     return data.data;
   }, 'calculateFare', MAX_RETRIES, true);
@@ -100,6 +102,7 @@ export async function finalizeFare(body: {
   return withRetry(async () => {
     const { data } = await axios.post(`${PRICING_SERVICE_URL}/api/pricing/finalize`, body, {
       timeout: 5000,
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
     });
     return data.data;
   }, 'finalizeFare', MAX_RETRIES, true);
@@ -110,6 +113,7 @@ export async function getNearbyDrivers(lat: number, lng: number, radius: number 
     const { data } = await axios.get(`${PRICING_SERVICE_URL}/api/pricing/nearby-drivers`, {
       params: { lat, lng, radius, ...(vehicleType ? { vehicleType } : {}) },
       timeout: 5000,
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
     });
     return data.data.drivers as Array<{ id: string }>;
   }, 'getNearbyDrivers', MAX_RETRIES, true);
@@ -231,8 +235,6 @@ export async function updateDriverLocationRealtime(driverId: string, lat: number
 }
 
 // ─── RAMEN/Fireball In-Memory State APIs ──────────────────────────────────────
-
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 
 /**
  * Find nearby drivers from RAMEN in-memory H3 index (0.01ms vs 20-100ms DB query).
