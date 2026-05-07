@@ -208,6 +208,7 @@ services:
       PORT: 5005
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       postgres:
         condition: service_healthy
