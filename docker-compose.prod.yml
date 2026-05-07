@@ -51,6 +51,7 @@ services:
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
       REALTIME_SERVICE_URL: http://realtime-service:5007
       ADMIN_SERVICE_URL: http://admin-service:5008
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       auth-service:
         condition: service_healthy
@@ -93,7 +94,7 @@ services:
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       TRUECALLER_CLIENT_ID: ${TRUECALLER_CLIENT_ID}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       ALLOW_DEV_OTP: ${ALLOW_DEV_OTP:-false}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/health"]
@@ -114,7 +115,7 @@ services:
       PORT: 5002
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5002/health"]
       interval: 15s
@@ -134,7 +135,7 @@ services:
       PORT: 5003
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       DIGILOCKER_CLIENT_ID: ${DIGILOCKER_CLIENT_ID}
       DIGILOCKER_CLIENT_SECRET: ${DIGILOCKER_CLIENT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -170,7 +171,7 @@ services:
       PORT: 5004
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       PRICING_SERVICE_URL: http://pricing-service:5005
       REALTIME_SERVICE_URL: http://realtime-service:5007
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
@@ -198,7 +199,7 @@ services:
       PORT: 5005
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       BASE_FARE: ${BASE_FARE:-25}
       PER_KM_RATE: ${PER_KM_RATE:-12}
       PER_MINUTE_RATE: ${PER_MINUTE_RATE:-2}
@@ -221,7 +222,7 @@ services:
       PORT: 5006
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-raahi-5f22e}
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
       FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
@@ -246,7 +247,7 @@ services:
       PORT: 5007
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]
@@ -267,7 +268,7 @@ services:
       PORT: 5008
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
       interval: 15s
