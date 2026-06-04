@@ -96,6 +96,7 @@ services:
       TWILIO_VERIFY_SERVICE_SID: ${TWILIO_VERIFY_SERVICE_SID:-}
       # Firebase configuration
       FIREBASE_SERVICE_ACCOUNT_PATH: /app/credentials/firebase-service-account.json
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     volumes:
       - ./credentials:/app/credentials:ro
     depends_on:
@@ -119,6 +120,7 @@ services:
       PORT: 5002
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -158,6 +160,7 @@ services:
       RAZORPAY_ACCOUNT_NUMBER: ${RAZORPAY_ACCOUNT_NUMBER:-}
       PAYOUT_FEE_RATE: ${PAYOUT_FEE_RATE:-0}
       PAYOUT_FLAT_FEE: ${PAYOUT_FLAT_FEE:-0}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -183,6 +186,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
       PRICING_SERVICE_URL: http://pricing-service:5005
       REALTIME_SERVICE_URL: http://realtime-service:5007
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -232,6 +236,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
       # Firebase configuration
       FIREBASE_SERVICE_ACCOUNT_PATH: /app/credentials/firebase-service-account.json
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     volumes:
       - ./credentials:/app/credentials:ro
     depends_on:
@@ -250,11 +255,17 @@ services:
       dockerfile: services/realtime-service/Dockerfile
     container_name: raahi-realtime-service
     restart: unless-stopped
+    ports:
+      - "1883:1883"   # MQTT TCP
+      - "8883:8883"   # MQTT WebSocket
     environment:
       NODE_ENV: development
       PORT: 5007
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       REDIS_URL: redis://redis:6379
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
+      MQTT_TCP_PORT: 1883
+      MQTT_WS_PORT: 8883
     depends_on:
       postgres:
         condition: service_healthy
@@ -278,6 +289,7 @@ services:
       PORT: 5008
       DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
       JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       postgres:
         condition: service_healthy

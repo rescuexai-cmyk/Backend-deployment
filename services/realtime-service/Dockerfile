@@ -5,5 +5,5 @@ COPY . .
 RUN npm install && npx prisma generate
 RUN npm run build --workspace=@raahi/shared && npm run build --workspace=@raahi/realtime-service
 ENV NODE_ENV=production
-EXPOSE 5007
+EXPOSE 5007 1883 8883
 CMD ["node", "services/realtime-service/dist/index.js"]

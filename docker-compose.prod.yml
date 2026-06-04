@@ -239,9 +239,11 @@ services:
       dockerfile: services/realtime-service/Dockerfile
     container_name: raahi-realtime-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 256m
     ports:
       - "127.0.0.1:5007:5007"
+      - "1883:1883"   # MQTT TCP (for native mobile clients)
+      - "8883:8883"   # MQTT WebSocket (for browser/Flutter clients)
     environment:
       NODE_ENV: production
       PORT: 5007
@@ -249,6 +251,12 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MQTT_TCP_PORT: 1883
+      MQTT_WS_PORT: 8883
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5007/health"]
       interval: 15s
