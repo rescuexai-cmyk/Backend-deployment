@@ -19,6 +19,41 @@ import { eventBus, CHANNELS } from './eventBus';
 
 const logger = createLogger('driver-state-store');
 
+// ─── Vehicle Type Normalization ───────────────────────────────────────────────
+
+function normalizeVehicleCategory(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
+  if (!raw) return null;
+  const value = raw.toLowerCase().trim().replace(/-/g, '_');
+  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
+  if (value === 'auto') return 'auto';
+  if (
+    [
+      'cab',
+      'cab_mini',
+      'cab_sedan',
+      'cab_xl',
+      'cab_suv',
+      'cab_premium',
+      'personal_driver',
+      'commercial_car',
+    ].includes(value)
+  ) {
+    return 'cab';
+  }
+  return null;
+}
+
+function isVehicleCompatible(
+  rideVehicleType: string | null | undefined,
+  driverVehicleType: string | null | undefined,
+): boolean {
+  const rideCategory = normalizeVehicleCategory(rideVehicleType);
+  if (!rideCategory) return true; // Unknown ride type: keep legacy behavior
+  const driverCategory = normalizeVehicleCategory(driverVehicleType);
+  if (!driverCategory) return false; // Unknown driver type should not receive typed ride
+  return rideCategory === driverCategory;
+}
+
 // ─── Redis Keys ───────────────────────────────────────────────────────────────
 
 const KEYS = {
@@ -472,7 +507,7 @@ class DriverStateStoreImpl {
         if (!d.isOnline || !d.isActive) return false;
         if (!d.lat || !d.lng) return false;
         if (d.lastActiveAt < heartbeatThreshold) return false;
-        if (vehicleType && d.vehicleType !== vehicleType) return false;
+        if (vehicleType && !isVehicleCompatible(vehicleType, d.vehicleType)) return false;
         return true;
       })
       .map(d => ({

@@ -605,7 +605,26 @@ export async function getNearbyDrivers(
     };
 
     if (!isDev) whereClause.isVerified = true;
-    if (vehicleType) whereClause.vehicleType = vehicleType;
+    if (vehicleType) {
+      // Normalize to vehicle category and match all sub-types in the same category.
+      // e.g., 'cab' should match drivers with 'cab_mini', 'cab_sedan', 'cab_xl', etc.
+      const bikeTypes = ['bike', 'bike_rescue', 'motorbike'];
+      const autoTypes = ['auto'];
+      const cabTypes = ['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'];
+      
+      const vt = vehicleType.toLowerCase().trim().replace(/-/g, '_');
+      let matchTypes: string[];
+      if (bikeTypes.includes(vt)) {
+        matchTypes = bikeTypes;
+      } else if (autoTypes.includes(vt)) {
+        matchTypes = autoTypes;
+      } else if (cabTypes.includes(vt)) {
+        matchTypes = cabTypes;
+      } else {
+        matchTypes = [vehicleType]; // Unknown type: exact match fallback
+      }
+      whereClause.vehicleType = { in: matchTypes };
+    }
 
     const drivers = await prisma.driver.findMany({
       where: whereClause,

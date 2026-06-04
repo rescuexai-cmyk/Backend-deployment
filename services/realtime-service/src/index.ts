@@ -1441,9 +1441,28 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
   if (drivers.length === 0) {
     const onlineDriverIds = await driverStateStore.getOnlineDriverIds();
     const onlineDriverStates = await Promise.all(onlineDriverIds.map((id) => driverStateStore.getDriver(id)));
-    drivers = onlineDriverStates.filter((d): d is NonNullable<typeof d> => Boolean(d));
+    let allOnline = onlineDriverStates.filter((d): d is NonNullable<typeof d> => Boolean(d));
+    
+    // CRITICAL: Apply vehicle type filter even in fallback mode.
+    // Without this, cab requests can reach bike drivers and vice versa.
+    if (vehicleType) {
+      const normalizeCategory = (raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null => {
+        if (!raw) return null;
+        const v = raw.toLowerCase().trim().replace(/-/g, '_');
+        if (['bike', 'bike_rescue', 'motorbike'].includes(v)) return 'bike';
+        if (v === 'auto') return 'auto';
+        if (['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'].includes(v)) return 'cab';
+        return null;
+      };
+      const rideCategory = normalizeCategory(vehicleType);
+      if (rideCategory) {
+        allOnline = allOnline.filter((d) => normalizeCategory(d.vehicleType) === rideCategory);
+      }
+    }
+    
+    drivers = allOnline;
     logger.warn(
-      `[RAMEN] Fallback activated: no nearby drivers, returning all online drivers (${drivers.length}) for testing`,
+      `[RAMEN] Fallback activated: no nearby drivers, returning ${drivers.length} online vehicle-compatible drivers (vehicleType=${vehicleType || 'any'})`,
     );
   }
   logger.info(`[RAMEN] Drivers found: ${JSON.stringify(drivers.map((d) => d.id))}`);
