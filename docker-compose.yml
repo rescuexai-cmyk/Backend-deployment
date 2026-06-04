@@ -187,12 +187,15 @@ services:
       PRICING_SERVICE_URL: http://pricing-service:5005
       REALTIME_SERVICE_URL: http://realtime-service:5007
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
+      REDIS_URL: redis://redis:6379
     depends_on:
       postgres:
         condition: service_healthy
       pricing-service:
         condition: service_healthy
       realtime-service:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5004/health"]

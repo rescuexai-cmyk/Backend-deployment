@@ -18,6 +18,7 @@ import {
   updateRideLocationViaFireball,
 } from './httpClients';
 import { calculateCancellationFee, CancellationContext } from './cancellationService';
+import { enqueueScheduledRide, cancelScheduledRideJob } from './scheduledRideQueue';
 
 const logger = createLogger('ride-service');
 
@@ -366,7 +367,10 @@ export async function createRide(req: CreateRideRequest) {
   const rescueMultiDriver = req.rescueMultiDriver || false;
   const isRescue = rideType === 'RESCUE';
   
-  logger.info(`[RIDE] Creating ride: rideType=${rideType}, rescueMultiDriver=${rescueMultiDriver}`);
+  // Determine if this is a scheduled ride (>5 min in the future)
+  const isScheduled = !isRescue && req.scheduledTime && req.scheduledTime.getTime() > Date.now() + 5 * 60 * 1000;
+  
+  logger.info(`[RIDE] Creating ride: rideType=${rideType}, rescueMultiDriver=${rescueMultiDriver}, isScheduled=${!!isScheduled}`);
 
   const ride = await prisma.ride.create({
     data: {
@@ -385,15 +389,30 @@ export async function createRide(req: CreateRideRequest) {
       surgeMultiplier: pricing.surgeMultiplier,
       totalFare: pricing.totalFare,
       paymentMethod: req.paymentMethod,
-      vehicleType: isRescue ? 'bike_rescue' : (req.vehicleType || null), // Force bike_rescue for rescue rides
+      vehicleType: isRescue ? 'bike_rescue' : (req.vehicleType || null),
       scheduledAt: req.scheduledTime,
+      status: isScheduled ? 'SCHEDULED' : 'PENDING',
       rideOtp,
-      // Rescue service fields (requires prisma generate after schema update)
+      // Rescue service fields
       rideType,
       rescueMultiDriver,
       rescueStage: 0,
     } as any,
   });
+
+  // ─── Scheduled Ride: Enqueue for deferred dispatch, skip broadcast ──────
+  if (isScheduled) {
+    try {
+      await enqueueScheduledRide(ride.id, req.scheduledTime!);
+      logger.info(`[RIDE] ⏰ Ride ${ride.id} scheduled for ${req.scheduledTime!.toISOString()} — no immediate broadcast`);
+    } catch (scheduleError) {
+      logger.error(`[RIDE] Failed to enqueue scheduled ride ${ride.id}`, { error: scheduleError });
+      // Fallback: transition to PENDING so it doesn't get stuck
+      await prisma.ride.update({ where: { id: ride.id }, data: { status: 'PENDING' } });
+      logger.warn(`[RIDE] Fallback: ride ${ride.id} set to PENDING for immediate dispatch`);
+    }
+    return formatRide(ride, true);
+  }
 
   // Register ride in Fireball in-memory state store (instant push to subscribers)
   try {
@@ -910,6 +929,7 @@ export async function assignDriver(rideId: string, driverId: string) {
 
 // Valid status transitions to prevent invalid state changes
 const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+  'SCHEDULED': ['PENDING', 'CANCELLED'], // Timer fires → PENDING, or user cancels
   'PENDING': ['DRIVER_ASSIGNED', 'CANCELLED'],
   'DRIVER_ASSIGNED': ['CONFIRMED', 'CANCELLED'],
   'CONFIRMED': ['DRIVER_ARRIVED', 'CANCELLED'],
@@ -1617,6 +1637,13 @@ export async function cancelRide(rideId: string, cancelledBy: 'passenger' | 'dri
   });
   
   logger.info(`[RIDE_CANCEL] Ride ${rideId} cancelled by ${cancelledBy}${reason ? `: ${reason}` : ''}`);
+
+  // Remove BullMQ jobs for scheduled rides (no-op if ride wasn't scheduled)
+  try {
+    await cancelScheduledRideJob(rideId);
+  } catch (e) {
+    logger.debug('[RIDE_CANCEL] Failed to remove scheduled ride jobs (non-critical)', { error: e });
+  }
   
   try {
     await broadcastRideCancelled(rideId, cancelledBy, reason);

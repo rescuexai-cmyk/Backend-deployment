@@ -686,6 +686,7 @@ enum OnboardingStatus {
 }
 
 enum RideStatus {
+  SCHEDULED
   PENDING
   CONFIRMED
   DRIVER_ASSIGNED

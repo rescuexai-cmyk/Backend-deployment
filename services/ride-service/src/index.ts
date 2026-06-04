@@ -5,6 +5,8 @@ import { connectDatabase, errorHandler, notFound, setupSwagger } from '@raahi/sh
 import { createLogger } from '@raahi/shared';
 import rideRoutes from './routes/ride';
 
+import { initScheduledRideWorker, shutdownScheduledRideWorker } from './scheduledRideQueue';
+
 const logger = createLogger('ride-service');
 const app = express();
 const PORT = process.env.PORT || 5004;
@@ -43,6 +45,7 @@ app.use(errorHandler);
 
 const start = async () => {
   await connectDatabase();
+  await initScheduledRideWorker();
   app.listen(PORT, () => logger.info(`Ride service running on port ${PORT}`));
 };
 

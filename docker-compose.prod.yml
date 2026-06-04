@@ -175,10 +175,15 @@ services:
       PRICING_SERVICE_URL: http://pricing-service:5005
       REALTIME_SERVICE_URL: http://realtime-service:5007
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SCHEDULE_PRE_ASSIGN_MINUTES: ${SCHEDULE_PRE_ASSIGN_MINUTES:-10}
+      SCHEDULE_EXPIRE_MINUTES: ${SCHEDULE_EXPIRE_MINUTES:-15}
     depends_on:
       pricing-service:
         condition: service_healthy
       realtime-service:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5004/health"]

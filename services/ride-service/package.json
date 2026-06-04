@@ -10,6 +10,7 @@
   "dependencies": {
     "@raahi/shared": "file:../../packages/shared",
     "axios": "^1.6.2",
+    "bullmq": "^5.78.0",
     "express": "^4.18.2",
     "express-validator": "^7.0.1",
     "geolib": "^3.3.4"
