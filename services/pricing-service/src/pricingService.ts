@@ -606,11 +606,18 @@ export async function getNearbyDrivers(
 
     if (!isDev) whereClause.isVerified = true;
     if (vehicleType) {
-      // Normalize to vehicle category and match all sub-types in the same category.
-      // e.g., 'cab' should match drivers with 'cab_mini', 'cab_sedan', 'cab_xl', etc.
+      // Downward-compatible dispatch for cab types:
+      // A cab_mini request includes cab_mini, cab_xl, and cab_premium drivers.
+      // A cab_premium request only includes cab_premium drivers.
+      // Bike/auto remain strictly isolated.
       const bikeTypes = ['bike', 'bike_rescue', 'motorbike'];
       const autoTypes = ['auto'];
-      const cabTypes = ['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'];
+      
+      // Cab types grouped by rank (higher rank can accept lower rank requests)
+      const cabRank1 = ['cab', 'cab_mini', 'cab_sedan', 'commercial_car'];
+      const cabRank2 = ['cab_xl', 'cab_suv'];
+      const cabRank3 = ['cab_premium', 'personal_driver'];
+      const allCabTypes = [...cabRank1, ...cabRank2, ...cabRank3];
       
       const vt = vehicleType.toLowerCase().trim().replace(/-/g, '_');
       let matchTypes: string[];
@@ -618,8 +625,18 @@ export async function getNearbyDrivers(
         matchTypes = bikeTypes;
       } else if (autoTypes.includes(vt)) {
         matchTypes = autoTypes;
-      } else if (cabTypes.includes(vt)) {
-        matchTypes = cabTypes;
+      } else if (allCabTypes.includes(vt)) {
+        // Determine the ride's rank and include all drivers with rank >= ride rank
+        if (cabRank3.includes(vt)) {
+          // Premium request: only premium drivers
+          matchTypes = cabRank3;
+        } else if (cabRank2.includes(vt)) {
+          // XL request: XL + Premium drivers
+          matchTypes = [...cabRank2, ...cabRank3];
+        } else {
+          // Mini/Standard request: all cab drivers (Mini + XL + Premium)
+          matchTypes = allCabTypes;
+        }
       } else {
         matchTypes = [vehicleType]; // Unknown type: exact match fallback
       }

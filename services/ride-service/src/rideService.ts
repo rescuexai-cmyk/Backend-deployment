@@ -214,12 +214,38 @@ function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' |
   return null;
 }
 
+/**
+ * Downward-Compatible Dispatch: Vehicle Ranking
+ *
+ * Rank 3 (Premium): cab_premium, personal_driver
+ * Rank 2 (XL):      cab_xl, cab_suv
+ * Rank 1 (Mini):    cab, cab_mini, cab_sedan, commercial_car
+ * Rank 0:           non-cab types (no cross-category dispatch)
+ *
+ * Rule: A driver can accept a ride if Rank_Driver >= Rank_Request.
+ */
+function getVehicleRank(vehicleType: string | null | undefined): number {
+  if (!vehicleType) return 0;
+  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
+  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
+  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
+  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
+  return 0;
+}
+
 function isDriverCompatibleForRide(rideVehicleType: string | null | undefined, driverVehicleType: string | null | undefined): boolean {
   const rideKind = normalizeVehicleType(rideVehicleType);
   if (!rideKind) return true; // Unknown ride type: keep legacy behavior.
   const driverKind = normalizeVehicleType(driverVehicleType);
   if (!driverKind) return false; // Be safe: unknown driver type should not receive typed ride.
-  return rideKind === driverKind;
+
+  // Non-cab categories: strict match (bike, auto unchanged)
+  if (rideKind !== 'cab' || driverKind !== 'cab') {
+    return rideKind === driverKind;
+  }
+
+  // Cab category: downward-compatible — driver rank must be >= ride request rank
+  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
 }
 
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -434,6 +460,16 @@ export async function createRide(req: CreateRideRequest) {
     // For RESCUE rides, only target BIKE drivers
     const effectiveVehicleType = isRescue ? 'bike' : req.vehicleType;
     
+    // ─── Downward-Compatible Two-Phase Broadcast ────────────────────────────
+    // Phase 1 (immediate): Same-tier drivers only (e.g., cab_mini → cab_mini)
+    // Phase 2 (delayed 15s): Higher-tier drivers (e.g., cab_mini → cab_xl, cab_premium)
+    // Non-cab types and rescue rides: single-phase (no downward compat)
+    const rideRank = getVehicleRank(effectiveVehicleType);
+    const isCabRide = normalizeVehicleType(effectiveVehicleType) === 'cab' && rideRank > 0;
+    const SPILLOVER_DELAY_MS = parseInt(process.env.SPILLOVER_DELAY_MS || '15000', 10);
+    
+    logger.info(`[RIDE] Vehicle: ${effectiveVehicleType}, rank=${rideRank}, isCab=${isCabRide}`);
+    
     // Try RAMEN first (in-memory, 0.01ms) then fall back to DB query (20-100ms)
     logger.info(`[RIDE] Fetching nearby drivers (trying RAMEN in-memory first)...`);
     logger.info(`[RIDE] Ride vehicleType: ${effectiveVehicleType}, normalized=${normalizeVehicleType(effectiveVehicleType)}`);
@@ -446,9 +482,24 @@ export async function createRide(req: CreateRideRequest) {
       logger.info(`[RIDE] ✅ Got ${nearbyDrivers.length} drivers from RAMEN (in-memory)`);
     }
 
-    let typeFilteredDrivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
-      isDriverCompatibleForRide(effectiveVehicleType, (d.vehicleType as string | null | undefined) ?? null),
-    );
+    // For Phase 1 of cab rides: filter to SAME-RANK drivers only
+    // For non-cab or Phase 1 failure: use all compatible drivers (isDriverCompatibleForRide already handles ranking)
+    let phase1Drivers: typeof nearbyDrivers;
+    if (isCabRide) {
+      // Phase 1: strict same-rank match (e.g., only cab_mini for cab_mini request)
+      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) => {
+        const driverRank = getVehicleRank((d.vehicleType as string | null | undefined) ?? null);
+        return driverRank === rideRank;
+      });
+      logger.info(`[RIDE] Phase 1 (same-tier): ${phase1Drivers.length} drivers with rank=${rideRank}`);
+    } else {
+      // Non-cab: single-phase strict match
+      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
+        isDriverCompatibleForRide(effectiveVehicleType, (d.vehicleType as string | null | undefined) ?? null),
+      );
+    }
+
+    let typeFilteredDrivers = phase1Drivers;
 
     // P0 fallback: when geospatial matching returns zero, fan out to all online drivers.
     // This fail-open guard prevents silent dispatch blackholes while matching is being stabilized.
@@ -467,9 +518,14 @@ export async function createRide(req: CreateRideRequest) {
         take: 200,
       });
 
-      typeFilteredDrivers = onlineDrivers.filter((d) =>
-        isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType),
-      );
+      if (isCabRide) {
+        // Phase 1 fallback: same-rank only from all online
+        typeFilteredDrivers = onlineDrivers.filter((d) => getVehicleRank(d.vehicleType) === rideRank);
+      } else {
+        typeFilteredDrivers = onlineDrivers.filter((d) =>
+          isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType),
+        );
+      }
 
       logger.warn(`[RIDE] [FALLBACK] Using ${typeFilteredDrivers.length} online compatible drivers for ride ${ride.id}`);
     }
@@ -483,7 +539,7 @@ export async function createRide(req: CreateRideRequest) {
       logger.warn(`[RIDE] This ride will be broadcast to available-drivers room only`);
     }
     
-    logger.info(`[RIDE] Broadcasting ride request to realtime service...`);
+    logger.info(`[RIDE] Broadcasting ride request to realtime service (Phase 1: same-tier)...`);
     const broadcastResult = await httpBroadcastRideRequest(ride.id, {
       ...ride,
       pickupLatitude: req.pickupLat,
@@ -500,6 +556,7 @@ export async function createRide(req: CreateRideRequest) {
       rescueMultiDriver,
       rescueStage: 0,
       priority: isRescue ? 'HIGH' : 'NORMAL',
+      isSpilloverTrip: false,
     }, driverIds);
     
     // Log broadcast result
@@ -520,13 +577,106 @@ export async function createRide(req: CreateRideRequest) {
         logger.error(`[RIDE] Passenger will be waiting but no driver will see this ride`);
         logger.error(`[RIDE] Eligible drivers: ${driverIds.length}, Connected: ${broadcastResult.connectedDrivers}`);
       } else {
-        logger.info(`[RIDE] ✅ Ride ${ride.id} broadcast successful`);
+        logger.info(`[RIDE] ✅ Ride ${ride.id} Phase 1 broadcast successful`);
         if (isRescue) {
           logger.info(`[RIDE] 🚨 RESCUE ride broadcast with HIGH priority to BIKE drivers only`);
         }
       }
     } else {
       logger.warn(`[RIDE] ⚠️ No broadcast result returned - unable to verify delivery`);
+    }
+
+    // ─── Phase 2: Delayed Spillover Broadcast to Higher-Tier Drivers ──────
+    // Only for cab rides where downward compatibility applies.
+    // After SPILLOVER_DELAY_MS (default 15s), if ride is still PENDING,
+    // broadcast to higher-tier drivers with isSpilloverTrip: true.
+    if (isCabRide && rideRank < 3) {
+      const rideIdForSpillover = ride.id;
+      logger.info(`[RIDE] ⏱️ Phase 2 spillover scheduled in ${SPILLOVER_DELAY_MS}ms for ride ${rideIdForSpillover}`);
+      
+      setTimeout(async () => {
+        try {
+          // Check if ride is still PENDING (not yet accepted)
+          const currentRide = await prisma.ride.findUnique({
+            where: { id: rideIdForSpillover },
+            select: { status: true, driverId: true },
+          });
+
+          if (!currentRide || currentRide.status !== 'PENDING' || currentRide.driverId) {
+            logger.info(`[RIDE] ⏱️ Phase 2 skipped: ride ${rideIdForSpillover} is ${currentRide?.status || 'not found'} (already assigned: ${!!currentRide?.driverId})`);
+            return;
+          }
+
+          logger.info(`[RIDE] ⏱️ ========== PHASE 2 SPILLOVER BROADCAST ==========`);
+          logger.info(`[RIDE] ⏱️ Ride ${rideIdForSpillover} still PENDING after ${SPILLOVER_DELAY_MS}ms — expanding to higher-tier drivers`);
+
+          // Fetch ALL compatible drivers (rank >= ride rank, includes higher tiers)
+          let spilloverDrivers = await getNearbyDriversFromMemory(req.pickupLat, req.pickupLng, 10, effectiveVehicleType);
+          if (!spilloverDrivers || spilloverDrivers.length === 0) {
+            spilloverDrivers = await httpGetNearbyDrivers(req.pickupLat, req.pickupLng, 10, effectiveVehicleType);
+          }
+
+          // Filter to ONLY higher-tier drivers (exclude same-rank since Phase 1 already covered them)
+          let higherTierDrivers = (spilloverDrivers || []).filter((d: { id: string; [key: string]: any }) => {
+            const driverRank = getVehicleRank((d.vehicleType as string | null | undefined) ?? null);
+            return driverRank > rideRank;
+          });
+
+          // Fallback to DB if no higher-tier nearby
+          if (higherTierDrivers.length === 0) {
+            const onlineHigherTier = await prisma.driver.findMany({
+              where: {
+                isOnline: true,
+                isActive: true,
+                isVerified: true,
+              },
+              select: { id: true, vehicleType: true },
+              take: 200,
+            });
+            higherTierDrivers = onlineHigherTier.filter((d) => {
+              const driverRank = getVehicleRank(d.vehicleType);
+              return normalizeVehicleType(d.vehicleType) === 'cab' && driverRank > rideRank;
+            });
+          }
+
+          const spilloverDriverIds = Array.from(new Set(higherTierDrivers.map((d: { id: string }) => d.id)));
+          
+          if (spilloverDriverIds.length === 0) {
+            logger.warn(`[RIDE] ⏱️ Phase 2: No higher-tier drivers available for ride ${rideIdForSpillover}`);
+            return;
+          }
+
+          logger.info(`[RIDE] ⏱️ Phase 2: Broadcasting to ${spilloverDriverIds.length} higher-tier drivers: ${JSON.stringify(spilloverDriverIds)}`);
+
+          const spilloverResult = await httpBroadcastRideRequest(rideIdForSpillover, {
+            ...ride,
+            pickupLatitude: req.pickupLat,
+            pickupLongitude: req.pickupLng,
+            dropLatitude: req.dropLat,
+            dropLongitude: req.dropLng,
+            pickupAddress: req.pickupAddress,
+            dropAddress: req.dropAddress,
+            totalFare: pricing.totalFare,
+            vehicleType: effectiveVehicleType,
+            passengerName: 'Passenger',
+            rideType,
+            rescueMultiDriver,
+            rescueStage: 0,
+            priority: 'NORMAL',
+            // Spillover flag: tells driver app to show "Spillover Trip: Cab Mini Fare Applied"
+            isSpilloverTrip: true,
+            originalVehicleType: effectiveVehicleType,
+          }, spilloverDriverIds);
+
+          if (spilloverResult) {
+            logger.info(`[RIDE] ⏱️ Phase 2 result: success=${spilloverResult.success}, targeted=${spilloverResult.targetedDrivers}`);
+          }
+
+          logger.info(`[RIDE] ⏱️ ========== PHASE 2 SPILLOVER COMPLETE ==========`);
+        } catch (spilloverError) {
+          logger.error(`[RIDE] ⏱️ Phase 2 spillover failed for ride ${rideIdForSpillover}`, { error: spilloverError });
+        }
+      }, SPILLOVER_DELAY_MS);
     }
     
     logger.info(`[RIDE] ========== RIDE BROADCAST END ==========`);

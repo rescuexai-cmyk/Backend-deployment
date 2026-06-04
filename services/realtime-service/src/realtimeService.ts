@@ -197,6 +197,15 @@ function normalizeVehicleCategory(raw: string | null | undefined): 'bike' | 'aut
   return null;
 }
 
+function getVehicleRank(vehicleType: string | null | undefined): number {
+  if (!vehicleType) return 0;
+  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
+  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
+  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
+  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
+  return 0;
+}
+
 function isVehicleCompatible(
   rideVehicleType: string | null | undefined,
   driverVehicleType: string | null | undefined,
@@ -205,7 +214,14 @@ function isVehicleCompatible(
   if (!rideCategory) return true;
   const driverCategory = normalizeVehicleCategory(driverVehicleType);
   if (!driverCategory) return false;
-  return rideCategory === driverCategory;
+
+  // Non-cab categories: strict match (bike, auto unchanged)
+  if (rideCategory !== 'cab' || driverCategory !== 'cab') {
+    return rideCategory === driverCategory;
+  }
+
+  // Cab category: downward-compatible — driver rank must be >= ride request rank
+  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
 }
 
 // Shared driver tracking maps (set by index.ts)

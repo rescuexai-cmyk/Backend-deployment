@@ -1443,8 +1443,8 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
     const onlineDriverStates = await Promise.all(onlineDriverIds.map((id) => driverStateStore.getDriver(id)));
     let allOnline = onlineDriverStates.filter((d): d is NonNullable<typeof d> => Boolean(d));
     
-    // CRITICAL: Apply vehicle type filter even in fallback mode.
-    // Without this, cab requests can reach bike drivers and vice versa.
+    // CRITICAL: Apply vehicle type filter with downward-compatible dispatch.
+    // Cab requests include higher-tier cab drivers (Premium can accept Mini).
     if (vehicleType) {
       const normalizeCategory = (raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null => {
         if (!raw) return null;
@@ -1454,9 +1454,28 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
         if (['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'].includes(v)) return 'cab';
         return null;
       };
+      const getRank = (raw: string | null | undefined): number => {
+        if (!raw) return 0;
+        const v = raw.toLowerCase().trim().replace(/-/g, '_');
+        if (['cab_premium', 'personal_driver'].includes(v)) return 3;
+        if (['cab_xl', 'cab_suv'].includes(v)) return 2;
+        if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
+        return 0;
+      };
       const rideCategory = normalizeCategory(vehicleType);
       if (rideCategory) {
-        allOnline = allOnline.filter((d) => normalizeCategory(d.vehicleType) === rideCategory);
+        if (rideCategory === 'cab') {
+          // Downward-compatible: include drivers with rank >= ride rank
+          const rideRank = getRank(vehicleType);
+          allOnline = allOnline.filter((d) => {
+            const driverCategory = normalizeCategory(d.vehicleType);
+            if (driverCategory !== 'cab') return false;
+            return getRank(d.vehicleType) >= rideRank;
+          });
+        } else {
+          // Non-cab: strict category match
+          allOnline = allOnline.filter((d) => normalizeCategory(d.vehicleType) === rideCategory);
+        }
       }
     }
     
