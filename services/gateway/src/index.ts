@@ -18,6 +18,7 @@ const PRICING_SERVICE = process.env.PRICING_SERVICE_URL || 'http://localhost:500
 const NOTIFICATION_SERVICE = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:5006';
 const REALTIME_SERVICE = process.env.REALTIME_SERVICE_URL || 'http://localhost:5007';
 const ADMIN_SERVICE = process.env.ADMIN_SERVICE_URL || 'http://localhost:5008';
+const RESCUE_SERVICE = process.env.RESCUE_SERVICE_URL || 'http://localhost:5009';
 
 app.use(helmet());
 app.use(compression({
@@ -195,6 +196,7 @@ app.use('/api/pricing/api-docs', createProxyMiddleware({ target: PRICING_SERVICE
 app.use('/api/notifications/api-docs', createProxyMiddleware({ target: NOTIFICATION_SERVICE, pathRewrite: { '^/api/notifications/api-docs': '/api-docs' }, ...proxyOptions }));
 app.use('/api/realtime/api-docs', createProxyMiddleware({ target: REALTIME_SERVICE, pathRewrite: { '^/api/realtime/api-docs': '/api-docs' }, ...proxyOptions }));
 app.use('/api/admin/api-docs', createProxyMiddleware({ target: ADMIN_SERVICE, pathRewrite: { '^/api/admin/api-docs': '/api-docs' }, ...proxyOptions }));
+app.use('/api/rescue/api-docs', createProxyMiddleware({ target: RESCUE_SERVICE, pathRewrite: { '^/api/rescue/api-docs': '/api-docs' }, ...proxyOptions }));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // API ROUTES
@@ -213,6 +215,7 @@ app.use('/api/realtime/sse', createProxyMiddleware(sseProxyOptions));
 // Other realtime endpoints use standard proxy
 app.use('/api/realtime', createProxyMiddleware({ target: REALTIME_SERVICE, ...proxyOptions }));
 app.use('/api/admin', createProxyMiddleware({ target: ADMIN_SERVICE, ...proxyOptions }));
+app.use('/api/rescue', createProxyMiddleware({ target: RESCUE_SERVICE, ...proxyOptions }));
 app.use('/uploads', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 // WebSocket proxy for Socket.io (legacy, backward compatibility)
 app.use('/socket.io', createProxyMiddleware(wsProxyOptions));
@@ -237,5 +240,6 @@ app.listen(PORT, () => {
   logger.info(`    Notify   : /api/notifications/api-docs`);
   logger.info(`    Realtime : /api/realtime/api-docs`);
   logger.info(`    Admin    : /api/admin/api-docs`);
+  logger.info(`    Rescue   : /api/rescue/api-docs`);
   logger.info(`════════════════════════════════════════════════════════════════`);
 });

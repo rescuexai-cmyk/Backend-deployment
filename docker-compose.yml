@@ -303,6 +303,43 @@ services:
       retries: 3
       start_period: 30s
 
+  rescue-service:
+    build:
+      context: .
+      dockerfile: services/rescue-service/Dockerfile
+    container_name: raahi-rescue-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      PORT: 5009
+      DATABASE_URL: postgresql://raahi:raahi_dev_2024@postgres:5432/raahi
+      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret}
+      PRICING_SERVICE_URL: http://pricing-service:5005
+      RIDE_SERVICE_URL: http://ride-service:5004
+      REALTIME_SERVICE_URL: http://realtime-service:5007
+      NOTIFICATION_SERVICE_URL: http://notification-service:5006
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pricing-service:
+        condition: service_healthy
+      ride-service:
+        condition: service_healthy
+      realtime-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5009/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
 volumes:
   pgdata:
   redisdata:

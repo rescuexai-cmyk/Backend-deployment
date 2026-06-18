@@ -44,6 +44,7 @@ model User {
   notifications     Notification[]
   savedPlaces       SavedPlace[]
   supportTickets    SupportTicket[]
+  rescueRequests    RescueRequest[]
   
   @@index([lastLatitude, lastLongitude])
   @@index([firebaseUid])
@@ -150,6 +151,8 @@ model Driver {
   payoutAccounts    DriverPayoutAccount[]
   payouts           DriverPayout[]
   wallet            DriverWallet?
+  rescueDriver1     RescueRequest[]  @relation("RescueDriver1")
+  rescueDriver2     RescueRequest[]  @relation("RescueDriver2")
   
   @@index([isOnline, isActive])
   @@index([currentLatitude, currentLongitude])
@@ -970,4 +973,89 @@ enum SubscriptionPaymentStatus {
   VERIFIED
   FAILED
   REFUNDED
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESCUE SERVICE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+model RescueRequest {
+  id                    String        @id @default(cuid())
+  userId                String        // The user requesting rescue
+  
+  // Pickup & User Drop
+  pickupAddress         String
+  pickupLatitude        Float
+  pickupLongitude       Float
+  dropAddress           String
+  dropLatitude          Float
+  dropLongitude         Float
+  
+  // Vehicle Details
+  hasVehicle            Boolean       @default(false)
+  vehicleType           String?       // "TWO_WHEELER" or "FOUR_WHEELER"
+  vehicleDropAddress    String?       // Where to drop the vehicle
+  vehicleDropLatitude   Float?
+  vehicleDropLongitude  Float?
+  vehicleDropSameAsDrop Boolean       @default(false)
+  
+  // Driver Assignments
+  driver1Id             String?       // Primary driver (drops the user)
+  driver2Id             String?       // Secondary driver (drops the vehicle)
+  
+  // Linked Rides (created in ride-service)
+  userRideId            String?       @unique  // Ride for user drop
+  vehicleRideId         String?       @unique  // Ride for vehicle drop
+  
+  // Rescue OTP (shared with both drivers)
+  rescueOtp             String?       // 4-digit OTP
+  
+  // Status & Stage Tracking
+  status                RescueStatus  @default(PENDING)
+  rescueStage           Int           @default(0)
+  // Stage 0: PENDING — Waiting for drivers
+  // Stage 1: DRIVER1_ACCEPTED — First driver accepted, waiting for second
+  // Stage 2: BOTH_ACCEPTED — Both drivers accepted (or single driver if no vehicle)
+  // Stage 3: DRIVERS_EN_ROUTE — Driver1 picked up Driver2, heading to user
+  // Stage 4: DRIVERS_ARRIVED — Drivers arrived at user pickup
+  // Stage 5: IN_PROGRESS — OTP verified, rides started
+  // Stage 6: COMPLETED — All rides completed
+  
+  paymentMethod         String        @default("CASH")  // CASH, UPI, etc.
+  
+  // Timestamps
+  driver1AcceptedAt     DateTime?
+  driver2AcceptedAt     DateTime?
+  driversEnRouteAt      DateTime?
+  driversArrivedAt      DateTime?
+  startedAt             DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
+  cancelledBy           String?
+  cancellationReason    String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  
+  // Relations
+  user                  User          @relation(fields: [userId], references: [id])
+  driver1               Driver?       @relation("RescueDriver1", fields: [driver1Id], references: [id])
+  driver2               Driver?       @relation("RescueDriver2", fields: [driver2Id], references: [id])
+  
+  @@index([userId])
+  @@index([status])
+  @@index([driver1Id])
+  @@index([driver2Id])
+  @@index([createdAt])
+  @@map("rescue_requests")
+}
+
+enum RescueStatus {
+  PENDING
+  DRIVER1_ACCEPTED
+  BOTH_ACCEPTED
+  DRIVERS_EN_ROUTE
+  DRIVERS_ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
 }
