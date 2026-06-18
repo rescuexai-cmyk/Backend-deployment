@@ -52,6 +52,7 @@ export interface PricingRequest {
   dropLng: number;
   vehicleType?: string;
   scheduledTime?: Date;
+  stops?: Array<{ lat: number; lng: number; address?: string }>;
 }
 
 export interface EstimateResponse {
@@ -297,7 +298,7 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
   const city = await getCityFromCoordinates(pickupLat, pickupLng);
   const cityPricing = await getCityPricing(city, vehicle);
 
-  const route = await getRouteDistanceAndTime(pickupLat, pickupLng, dropLat, dropLng, date);
+  const route = await getRouteDistanceAndTime(pickupLat, pickupLng, dropLat, dropLng, date, request.stops);
   let { distanceKm, timeMin } = route;
 
   if (distanceKm < 0 || !Number.isFinite(distanceKm)) distanceKm = 0;
@@ -441,7 +442,8 @@ export async function calculateAllFares(
   pickupLng: number,
   dropLat: number,
   dropLng: number,
-  scheduledTime?: Date
+  scheduledTime?: Date,
+  stops?: Array<{ lat: number; lng: number; address?: string }>
 ): Promise<Record<string, EstimateResponse>> {
   const results: Record<string, EstimateResponse> = {};
   for (const vt of ALL_VEHICLE_TYPES) {
@@ -452,6 +454,7 @@ export async function calculateAllFares(
       dropLng,
       vehicleType: vt,
       scheduledTime,
+      stops,
     });
   }
 

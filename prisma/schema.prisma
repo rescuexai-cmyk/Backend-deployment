@@ -294,6 +294,7 @@ model Ride {
   messages          RideMessage[]
   chatParticipants  RideChatParticipant[]
   shareTokens       RideShareToken[]
+  stops             RideStop[]
   
   @@index([passengerId])
   @@index([driverId])
@@ -304,6 +305,21 @@ model Ride {
   @@index([passengerId, status])
   @@index([rideType])
   @@map("rides")
+}
+
+model RideStop {
+  id        String   @id @default(cuid())
+  rideId    String
+  latitude  Float
+  longitude Float
+  address   String
+  sequence  Int      // Order of stops (0, 1, 2, ...)
+  createdAt DateTime @default(now())
+
+  ride      Ride     @relation(fields: [rideId], references: [id], onDelete: Cascade)
+
+  @@index([rideId])
+  @@map("ride_stops")
 }
 
 model RideShareToken {

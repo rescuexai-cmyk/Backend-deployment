@@ -190,6 +190,7 @@ export interface CreateRideRequest {
   // Rescue service fields
   rideType?: 'NORMAL' | 'RESCUE';
   rescueMultiDriver?: boolean;
+  stops?: Array<{ lat: number; lng: number; address: string }>;
 }
 
 function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
@@ -278,6 +279,15 @@ function formatRide(ride: any, includeOtp: boolean = false) {
     dropLng: ride.dropLongitude,
     pickupAddress: ride.pickupAddress,
     dropAddress: ride.dropAddress,
+    stops: ride.stops
+      ? ride.stops.map((s: any) => ({
+          id: s.id,
+          address: s.address,
+          lat: s.latitude,
+          lng: s.longitude,
+          sequence: s.sequence,
+        })).sort((a: any, b: any) => a.sequence - b.sequence)
+      : [],
     distance: ride.distance,
     duration: ride.duration,
     baseFare: ride.baseFare,
@@ -343,6 +353,7 @@ export async function createRide(req: CreateRideRequest) {
     dropLng: req.dropLng,
     vehicleType: req.vehicleType,
     scheduledTime: req.scheduledTime?.toISOString(),
+    stops: req.stops,
   });
 
   // Generate 4-digit OTP for ride verification
@@ -397,7 +408,19 @@ export async function createRide(req: CreateRideRequest) {
       rideType,
       rescueMultiDriver,
       rescueStage: 0,
+      stops: req.stops && req.stops.length > 0 ? {
+        create: req.stops.map((s, idx) => ({
+          latitude: s.lat,
+          longitude: s.lng,
+          address: s.address,
+          sequence: idx,
+        }))
+      } : undefined
     } as any,
+    include: {
+      passenger: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
+      stops: true,
+    },
   });
 
   // ─── Scheduled Ride: Enqueue for deferred dispatch, skip broadcast ──────
@@ -723,7 +746,8 @@ export async function getRideById(rideId: string, requesterId?: string) {
           user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
         },
       },
-    } as any,
+      stops: true,
+    },
   });
   if (!ride) return null;
   
@@ -767,6 +791,7 @@ export async function getUserRides(userId: string, page: number = 1, limit: numb
             user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
           },
         },
+        stops: true,
       },
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
@@ -856,6 +881,7 @@ export async function assignDriver(rideId: string, driverId: string) {
             user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
           },
         },
+        stops: true,
       },
     });
 
@@ -1228,6 +1254,7 @@ export async function updateRideStatus(
               user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
             },
           },
+          stops: true,
         },
       });
 
@@ -1456,6 +1483,7 @@ export async function updateRideStatus(
             user: { select: { firstName: true, lastName: true, profileImage: true, phone: true } },
           },
         },
+        stops: true,
       },
     });
   }
@@ -1633,6 +1661,7 @@ export async function cancelRide(rideId: string, cancelledBy: 'passenger' | 'dri
         },
       },
       passenger: { select: { id: true, firstName: true, lastName: true } },
+      stops: true,
     },
   });
   

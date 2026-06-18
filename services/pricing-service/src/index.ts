@@ -120,6 +120,10 @@ app.post(
     body('dropLng').isFloat({ min: -180, max: 180 }),
     body('vehicleType').optional().isString(),
     body('scheduledTime').optional().isISO8601(),
+    body('stops').optional().isArray(),
+    body('stops.*.lat').isFloat({ min: -90, max: 90 }),
+    body('stops.*.lng').isFloat({ min: -180, max: 180 }),
+    body('stops.*.address').optional().isString(),
   ],
   authenticateOrInternal,
   asyncHandler(async (req, res) => {
@@ -128,7 +132,7 @@ app.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { pickupLat, pickupLng, dropLat, dropLng, vehicleType, scheduledTime } = req.body;
+    const { pickupLat, pickupLng, dropLat, dropLng, vehicleType, scheduledTime, stops } = req.body;
     const pricing = await calculateFare({
       pickupLat,
       pickupLng,
@@ -136,6 +140,7 @@ app.post(
       dropLng,
       vehicleType,
       scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
+      stops,
     });
     res.status(200).json({ success: true, data: pricing });
   })
@@ -178,6 +183,10 @@ app.post(
     body('dropLat').isFloat({ min: -90, max: 90 }),
     body('dropLng').isFloat({ min: -180, max: 180 }),
     body('scheduledTime').optional().isISO8601(),
+    body('stops').optional().isArray(),
+    body('stops.*.lat').isFloat({ min: -90, max: 90 }),
+    body('stops.*.lng').isFloat({ min: -180, max: 180 }),
+    body('stops.*.address').optional().isString(),
   ],
   authenticateOrInternal,
   asyncHandler(async (req, res) => {
@@ -186,13 +195,14 @@ app.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { pickupLat, pickupLng, dropLat, dropLng, scheduledTime } = req.body;
+    const { pickupLat, pickupLng, dropLat, dropLng, scheduledTime, stops } = req.body;
     const allFares = await calculateAllFares(
       pickupLat,
       pickupLng,
       dropLat,
       dropLng,
-      scheduledTime ? new Date(scheduledTime) : undefined
+      scheduledTime ? new Date(scheduledTime) : undefined,
+      stops
     );
     res.status(200).json({ success: true, data: allFares });
   })

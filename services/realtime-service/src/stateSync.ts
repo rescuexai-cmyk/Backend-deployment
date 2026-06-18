@@ -97,6 +97,7 @@ export async function initializeStateSync(): Promise<void> {
             lastName: true,
           },
         },
+        stops: true,
       },
     });
 

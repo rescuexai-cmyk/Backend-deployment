@@ -71,6 +71,7 @@ export async function calculateFare(body: {
   dropLng: number;
   vehicleType?: string;
   scheduledTime?: string;
+  stops?: Array<{ lat: number; lng: number; address?: string }>;
 }) {
   return withRetry(async () => {
     const { data } = await axios.post(`${PRICING_SERVICE_URL}/api/pricing/calculate`, body, {

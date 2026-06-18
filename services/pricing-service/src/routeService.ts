@@ -45,7 +45,8 @@ export async function getRouteDistanceAndTime(
   pickupLng: number,
   dropLat: number,
   dropLng: number,
-  departureTime?: Date
+  departureTime?: Date,
+  stops?: Array<{ lat: number; lng: number }>
 ): Promise<RouteResult> {
   const now = departureTime || new Date();
   const isPeak = isPeakHour(now);
@@ -56,21 +57,37 @@ export async function getRouteDistanceAndTime(
       const dest = `${dropLat},${dropLng}`;
       // Add departure_time=now for traffic-aware routing
       const departureTimestamp = Math.floor(now.getTime() / 1000);
-      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${dest}&key=${GOOGLE_MAPS_API_KEY}&mode=driving&departure_time=${departureTimestamp}`;
+      let url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${dest}&key=${GOOGLE_MAPS_API_KEY}&mode=driving&departure_time=${departureTimestamp}`;
       
+      if (stops && stops.length > 0) {
+        const waypoints = stops.map(s => `${s.lat},${s.lng}`).join('|');
+        url += `&waypoints=${waypoints}`;
+      }
+
       const res = await fetch(url);
       const data = await res.json();
       
       if (data.status === 'OK' && data.routes?.[0]) {
-        const leg = data.routes[0].legs[0];
-        const distanceM = leg.distance?.value ?? 0;
+        const legs = data.routes[0].legs;
+        let distanceM = 0;
+        let baseDurationS = 0;
+        let trafficDurationS = 0;
+        let hasTraffic = false;
+
+        for (const leg of legs) {
+          distanceM += leg.distance?.value ?? 0;
+          baseDurationS += leg.duration?.value ?? 0;
+          if (leg.duration_in_traffic?.value) {
+            trafficDurationS += leg.duration_in_traffic.value;
+            hasTraffic = true;
+          } else {
+            trafficDurationS += leg.duration?.value ?? 0;
+          }
+        }
+
         const distanceKm = distanceM / 1000;
         
-        // Prefer duration_in_traffic if available (requires departure_time)
-        const trafficDurationS = leg.duration_in_traffic?.value;
-        const baseDurationS = leg.duration?.value ?? 0;
-        
-        if (trafficDurationS) {
+        if (hasTraffic) {
           const trafficTimeMin = Math.ceil(trafficDurationS / 60);
           const baseTimeMin = Math.ceil(baseDurationS / 60);
           logger.debug(`[ROUTE] Google Maps (traffic): ${distanceKm.toFixed(2)} km, ${trafficTimeMin} min (base: ${baseTimeMin} min)`);
@@ -94,7 +111,20 @@ export async function getRouteDistanceAndTime(
     }
   }
 
-  const distanceKm = haversineDistanceKm(pickupLat, pickupLng, dropLat, dropLng);
+  let distanceKm = 0;
+  if (stops && stops.length > 0) {
+    let currentLat = pickupLat;
+    let currentLng = pickupLng;
+    for (const stop of stops) {
+      distanceKm += haversineDistanceKm(currentLat, currentLng, stop.lat, stop.lng);
+      currentLat = stop.lat;
+      currentLng = stop.lng;
+    }
+    distanceKm += haversineDistanceKm(currentLat, currentLng, dropLat, dropLng);
+  } else {
+    distanceKm = haversineDistanceKm(pickupLat, pickupLng, dropLat, dropLng);
+  }
+
   const timeMin = estimateDurationMin(distanceKm, isPeak);
   logger.debug(`[ROUTE] Haversine fallback: ${distanceKm.toFixed(2)} km, ${timeMin} min${isPeak ? ' (peak buffer applied)' : ''}`);
   return { distanceKm, timeMin, source: 'haversine' };

@@ -63,6 +63,7 @@ export interface RideState {
   rideOtp: string;
   paymentMethod: string;
   vehicleType: string;
+  stops?: Array<{ id: string; address: string; lat: number; lng: number; sequence: number }>;
   
   driverLat: number | null;
   driverLng: number | null;
@@ -603,6 +604,7 @@ class RideStateStoreImpl {
     cancellationReason: string | null;
     driver?: any;
     passenger?: any;
+    stops?: any[];
   }>): Promise<void> {
     const startTime = Date.now();
     const { latLngToH3 } = require('@raahi/shared');
@@ -654,6 +656,13 @@ class RideStateStoreImpl {
         driverVehicleModel: ride.driver?.vehicleModel || null,
         driverRating: ride.driver?.rating || null,
         driverProfileImage: ride.driver?.user?.profileImage || null,
+        stops: ride.stops ? ride.stops.map((s: any) => ({
+          id: s.id,
+          address: s.address,
+          lat: s.latitude,
+          lng: s.longitude,
+          sequence: s.sequence,
+        })).sort((a: any, b: any) => a.sequence - b.sequence) : [],
         _dirty: false,
         _lastSyncedAt: Date.now(),
         _version: 1,
