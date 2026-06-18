@@ -51,6 +51,7 @@ services:
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
       REALTIME_SERVICE_URL: http://realtime-service:5007
       ADMIN_SERVICE_URL: http://admin-service:5008
+      RESCUE_SERVICE_URL: http://rescue-service:5009
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
     depends_on:
       auth-service:
@@ -68,6 +69,8 @@ services:
       realtime-service:
         condition: service_healthy
       admin-service:
+        condition: service_healthy
+      rescue-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
@@ -289,6 +292,41 @@ services:
       retries: 5
       start_period: 60s
 
+  rescue-service:
+    build:
+      context: .
+      dockerfile: services/rescue-service/Dockerfile
+    container_name: raahi-rescue-service
+    restart: always
+    mem_limit: 256m
+    environment:
+      NODE_ENV: production
+      PORT: 5009
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
+      PRICING_SERVICE_URL: http://pricing-service:5005
+      RIDE_SERVICE_URL: http://ride-service:5004
+      REALTIME_SERVICE_URL: http://realtime-service:5007
+      NOTIFICATION_SERVICE_URL: http://notification-service:5006
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      pricing-service:
+        condition: service_healthy
+      ride-service:
+        condition: service_healthy
+      realtime-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5009/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
   metrics-service:
     profiles:
       - monitoring
