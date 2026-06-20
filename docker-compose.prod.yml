@@ -310,6 +310,11 @@ services:
       REALTIME_SERVICE_URL: http://realtime-service:5007
       NOTIFICATION_SERVICE_URL: http://notification-service:5006
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      AWS_S3_REGION: ${AWS_S3_REGION}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_CLOUDFRONT_DOMAIN: ${AWS_CLOUDFRONT_DOMAIN}
     depends_on:
       pricing-service:
         condition: service_healthy
