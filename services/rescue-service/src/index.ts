@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import { connectDatabase, errorHandler, notFound, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import rescueRoutes from './routes/rescue';
@@ -9,8 +10,15 @@ const logger = createLogger('rescue-service');
 const app = express();
 const PORT = process.env.PORT || 5009;
 
+// Local uploads directory (for fallback or serving existing local files)
+const uploadsBaseDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsBaseDir)) {
+  fs.mkdirSync(uploadsBaseDir, { recursive: true });
+}
+
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
+app.use('/uploads', express.static(uploadsBaseDir));
 
 // Setup Swagger documentation
 setupSwagger(app, {

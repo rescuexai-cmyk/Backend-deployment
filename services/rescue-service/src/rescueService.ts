@@ -23,12 +23,80 @@ export interface CreateRescueInput {
   dropLng: number;
   dropAddress: string;
   paymentMethod: 'CASH' | 'CARD' | 'UPI' | 'WALLET';
+
+  // Screen ① — Service type
+  rescueServiceType?: 'TRAFFIC_RESCUE' | 'VEHICLE_RESCUE' | 'PASSENGER_VEHICLE_RESCUE' | 'BREAKDOWN_RESCUE' | 'EMERGENCY_ASSISTANCE';
+
+  // Screen ② — What's happening
+  reason?: string;
+  reasonDetails?: string;
+
+  // Screen ③ — Vehicle presence
+  isVehicleWithUser?: boolean;
+
+  // Screen ④ — Vehicle details
   hasVehicle: boolean;
   vehicleType?: 'TWO_WHEELER' | 'FOUR_WHEELER';
+  vehicleSubType?: 'BIKE' | 'SCOOTER' | 'HATCHBACK' | 'SEDAN' | 'SUV';
+  vehicleRegistrationNumber?: string;
+  vehicleRegistrationState?: string;
+  vehicleTransmission?: 'MANUAL' | 'AUTOMATIC';
+  vehicleIssues?: string[];
+
+  // Screen ⑤ — Vehicle drop
   vehicleDropAddress?: string;
   vehicleDropLat?: number;
   vehicleDropLng?: number;
   vehicleDropSameAsDrop?: boolean;
+}
+
+export interface RescueFareEstimateInput {
+  pickupLat: number;
+  pickupLng: number;
+  dropLat: number;
+  dropLng: number;
+  hasVehicle: boolean;
+  vehicleDropLat?: number;
+  vehicleDropLng?: number;
+  vehicleDropSameAsDrop?: boolean;
+}
+
+export interface VehicleDeliveryInput {
+  status: 'ACCEPTED' | 'ISSUE_REPORTED';
+  conditionPhotos?: string[];
+  notes?: string;
+  issue?: string;
+}
+
+export interface RescueRatingInput {
+  targetType: 'RIDER_DRIVER' | 'VEHICLE_DRIVER' | 'SUPPORT';
+  rating: number;
+  feedback?: string;
+}
+
+export interface SubmitRatingsInput {
+  ratings: RescueRatingInput[];
+  problemSolved?: boolean;
+}
+
+// ─── Platform Config Constants ────────────────────────────────────────────────
+// These are rescue-specific fees shown on the Review & Confirm screen.
+// Configurable via PlatformConfig table; defaults used if not set.
+
+const DEFAULT_PLATFORM_FEE = 20;    // ₹20 platform fee
+const DEFAULT_INSURANCE_FEE = 17;   // ₹17 insurance fee
+
+async function getPlatformConfigValue(key: string, defaultValue: number): Promise<number> {
+  try {
+    const config = await prisma.platformConfig.findUnique({ where: { key } });
+    if (config?.value) {
+      const parsed = parseFloat(config.value);
+      return isNaN(parsed) ? defaultValue : parsed;
+    }
+    return defaultValue;
+  } catch {
+    return defaultValue;
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -57,13 +125,52 @@ async function getDriverUserId(driverId: string): Promise<string | null> {
 }
 
 /**
+ * Add a timeline event to a rescue request.
+ * This powers the Timeline tab in the Journey Hub (Screen ⑨).
+ */
+async function addTimelineEvent(
+  rescueId: string,
+  event: string,
+  title: string,
+  options?: {
+    description?: string;
+    actor?: string;
+    metadata?: Record<string, any>;
+  }
+): Promise<void> {
+  try {
+    await (prisma as any).rescueTimelineEvent.create({
+      data: {
+        rescueId,
+        event,
+        title,
+        description: options?.description || null,
+        actor: options?.actor || 'system',
+        metadata: options?.metadata || null,
+      },
+    });
+    logger.info(`[TIMELINE] ${event}: ${title} (rescue: ${rescueId})`);
+  } catch (error) {
+    // Timeline is non-critical — log but don't throw
+    logger.warn(`[TIMELINE] Failed to create event ${event} for rescue ${rescueId}`, { error });
+  }
+}
+
+/**
  * Format rescue request for API response
  */
 function formatRescueRequest(rescue: any) {
   return {
     id: rescue.id,
     userId: rescue.userId,
-    
+
+    // Screen ① — Service type
+    rescueServiceType: rescue.rescueServiceType,
+
+    // Screen ② — Reason
+    reason: rescue.reason,
+    reasonDetails: rescue.reasonDetails,
+
     // Pickup & Drop
     pickupAddress: rescue.pickupAddress,
     pickupLat: rescue.pickupLatitude,
@@ -71,15 +178,21 @@ function formatRescueRequest(rescue: any) {
     dropAddress: rescue.dropAddress,
     dropLat: rescue.dropLatitude,
     dropLng: rescue.dropLongitude,
-    
+    isVehicleWithUser: rescue.isVehicleWithUser,
+
     // Vehicle
     hasVehicle: rescue.hasVehicle,
     vehicleType: rescue.vehicleType,
+    vehicleSubType: rescue.vehicleSubType,
+    vehicleRegistrationNumber: rescue.vehicleRegistrationNumber,
+    vehicleRegistrationState: rescue.vehicleRegistrationState,
+    vehicleTransmission: rescue.vehicleTransmission,
+    vehicleIssues: rescue.vehicleIssues,
     vehicleDropAddress: rescue.vehicleDropAddress,
     vehicleDropLat: rescue.vehicleDropLatitude,
     vehicleDropLng: rescue.vehicleDropLongitude,
     vehicleDropSameAsDrop: rescue.vehicleDropSameAsDrop,
-    
+
     // Drivers
     driver1Id: rescue.driver1Id,
     driver2Id: rescue.driver2Id,
@@ -103,17 +216,35 @@ function formatRescueRequest(rescue: any) {
       vehicleModel: rescue.driver2.vehicleModel,
       rating: rescue.driver2.rating,
     } : null,
-    
+
     // Rides
     userRideId: rescue.userRideId,
     vehicleRideId: rescue.vehicleRideId,
-    
+
     // Status
     status: rescue.status,
     rescueStage: rescue.rescueStage,
     rescueOtp: rescue.rescueOtp, // Only sent to user (not drivers)
     paymentMethod: rescue.paymentMethod,
-    
+
+    // Fare estimates
+    estimatedPassengerFare: rescue.estimatedPassengerFare,
+    estimatedVehicleFare: rescue.estimatedVehicleFare,
+    estimatedPlatformFee: rescue.estimatedPlatformFee,
+    estimatedInsuranceFee: rescue.estimatedInsuranceFee,
+    estimatedTotalFare: rescue.estimatedTotalFare,
+
+    // SOS
+    sosTriggered: rescue.sosTriggered,
+    sosTriggeredAt: rescue.sosTriggeredAt,
+
+    // Vehicle delivery
+    vehicleDeliveryStatus: rescue.vehicleDeliveryStatus,
+    vehicleConditionPhotos: rescue.vehicleConditionPhotos,
+    vehicleDeliveryNotes: rescue.vehicleDeliveryNotes,
+    vehicleDeliveryAcceptedAt: rescue.vehicleDeliveryAcceptedAt,
+    vehicleDeliveryIssue: rescue.vehicleDeliveryIssue,
+
     // Timestamps
     driver1AcceptedAt: rescue.driver1AcceptedAt,
     driver2AcceptedAt: rescue.driver2AcceptedAt,
@@ -153,17 +284,22 @@ const rescueInclude = {
  * 
  * Flow:
  * 1. Validate input (if hasVehicle, require vehicleType)
- * 2. Create RescueRequest in DB
- * 3. Generate OTP
- * 4. Find nearby bike drivers
- * 5. Broadcast to drivers via realtime service
+ * 2. Calculate fare estimate (passenger + vehicle legs)
+ * 3. Create RescueRequest in DB with all screen data
+ * 4. Generate OTP
+ * 5. Create initial timeline event
+ * 6. Find nearby bike drivers
+ * 7. Broadcast to drivers via realtime service
  */
 export async function createRescueRequest(input: CreateRescueInput) {
   logger.info(`[RESCUE] ========== CREATE RESCUE REQUEST ==========`);
   logger.info(`[RESCUE] User: ${input.userId}`);
+  logger.info(`[RESCUE] Service Type: ${input.rescueServiceType || 'PASSENGER_VEHICLE_RESCUE'}`);
+  logger.info(`[RESCUE] Reason: ${input.reason || 'N/A'}`);
   logger.info(`[RESCUE] Pickup: ${input.pickupAddress} (${input.pickupLat}, ${input.pickupLng})`);
   logger.info(`[RESCUE] Drop: ${input.dropAddress} (${input.dropLat}, ${input.dropLng})`);
-  logger.info(`[RESCUE] Has Vehicle: ${input.hasVehicle}, Type: ${input.vehicleType || 'N/A'}`);
+  logger.info(`[RESCUE] Has Vehicle: ${input.hasVehicle}, Type: ${input.vehicleType || 'N/A'}, Sub: ${input.vehicleSubType || 'N/A'}`);
+  logger.info(`[RESCUE] Registration: ${input.vehicleRegistrationNumber || 'N/A'}, Transmission: ${input.vehicleTransmission || 'N/A'}`);
 
   // Validate vehicle input
   if (input.hasVehicle) {
@@ -195,46 +331,119 @@ export async function createRescueRequest(input: CreateRescueInput) {
   const rescueOtp = generateRescueOtp();
   logger.info(`[RESCUE] Generated OTP for rescue request`);
 
-  // Calculate fare for user ride (rescue uses bike_rescue pricing)
-  let fareEstimate: any;
+  // ─── Calculate fare estimates for Review & Confirm screen ───────────────
+  let estimatedPassengerFare: number | null = null;
+  let estimatedVehicleFare: number | null = null;
+  let estimatedPlatformFee: number | null = null;
+  let estimatedInsuranceFee: number | null = null;
+  let estimatedTotalFare: number | null = null;
+
   try {
-    fareEstimate = await calculateFare({
+    // Passenger transport fare
+    const passengerFare = await calculateFare({
       pickupLat: input.pickupLat,
       pickupLng: input.pickupLng,
       dropLat: input.dropLat,
       dropLng: input.dropLng,
       vehicleType: 'bike_rescue',
     });
-    logger.info(`[RESCUE] User ride fare estimate: ₹${fareEstimate.totalFare}`);
+    estimatedPassengerFare = passengerFare?.totalFare || 0;
+    logger.info(`[RESCUE] Passenger fare estimate: ₹${estimatedPassengerFare}`);
+
+    // Vehicle delivery fare (if applicable)
+    if (input.hasVehicle && vehicleDropLat && vehicleDropLng) {
+      const vehicleFare = await calculateFare({
+        pickupLat: input.pickupLat,
+        pickupLng: input.pickupLng,
+        dropLat: vehicleDropLat,
+        dropLng: vehicleDropLng,
+        vehicleType: 'bike_rescue',
+      });
+      estimatedVehicleFare = vehicleFare?.totalFare || 0;
+      logger.info(`[RESCUE] Vehicle delivery fare estimate: ₹${estimatedVehicleFare}`);
+    }
+
+    // Platform fee and insurance from config
+    estimatedPlatformFee = await getPlatformConfigValue('rescue_platform_fee', DEFAULT_PLATFORM_FEE);
+    estimatedInsuranceFee = await getPlatformConfigValue('rescue_insurance_fee', DEFAULT_INSURANCE_FEE);
+
+    // Total
+    estimatedTotalFare = (estimatedPassengerFare || 0)
+      + (estimatedVehicleFare || 0)
+      + (estimatedPlatformFee || 0)
+      + (estimatedInsuranceFee || 0);
+
+    logger.info(`[RESCUE] Total estimated fare: ₹${estimatedTotalFare}`);
   } catch (fareError) {
     logger.warn('[RESCUE] Fare calculation failed, continuing without estimate', { error: (fareError as Error).message });
   }
 
-  // Create rescue request in DB
+  // ─── Create rescue request in DB ────────────────────────────────────────
   const rescue = await (prisma as any).rescueRequest.create({
     data: {
       userId: input.userId,
+
+      // Screen ①
+      rescueServiceType: input.rescueServiceType || 'PASSENGER_VEHICLE_RESCUE',
+
+      // Screen ②
+      reason: input.reason || null,
+      reasonDetails: input.reasonDetails || null,
+
+      // Screen ③
       pickupAddress: input.pickupAddress,
       pickupLatitude: input.pickupLat,
       pickupLongitude: input.pickupLng,
       dropAddress: input.dropAddress,
       dropLatitude: input.dropLat,
       dropLongitude: input.dropLng,
+      isVehicleWithUser: input.isVehicleWithUser ?? true,
+
+      // Screen ④
       hasVehicle: input.hasVehicle,
       vehicleType: input.hasVehicle ? input.vehicleType : null,
+      vehicleSubType: input.hasVehicle ? (input.vehicleSubType || null) : null,
+      vehicleRegistrationNumber: input.hasVehicle ? (input.vehicleRegistrationNumber || null) : null,
+      vehicleRegistrationState: input.hasVehicle ? (input.vehicleRegistrationState || null) : null,
+      vehicleTransmission: input.hasVehicle ? (input.vehicleTransmission || null) : null,
+      vehicleIssues: input.vehicleIssues || [],
+
+      // Screen ⑤
       vehicleDropAddress: input.hasVehicle ? vehicleDropAddress : null,
       vehicleDropLatitude: input.hasVehicle ? vehicleDropLat : null,
       vehicleDropLongitude: input.hasVehicle ? vehicleDropLng : null,
       vehicleDropSameAsDrop,
+
       paymentMethod: input.paymentMethod,
       rescueOtp,
       status: 'PENDING',
       rescueStage: 0,
+
+      // Fare estimates (Screen ⑥)
+      estimatedPassengerFare,
+      estimatedVehicleFare,
+      estimatedPlatformFee,
+      estimatedInsuranceFee,
+      estimatedTotalFare,
+
+      // Vehicle delivery defaults
+      vehicleDeliveryStatus: input.hasVehicle ? 'PENDING' : null,
     },
     include: rescueInclude,
   });
 
   logger.info(`[RESCUE] Created rescue request: ${rescue.id}`);
+
+  // ─── Timeline: Request created ──────────────────────────────────────────
+  await addTimelineEvent(rescue.id, 'REQUEST_CREATED', 'Rescue request received', {
+    description: `${input.rescueServiceType || 'Rescue'} request created`,
+    actor: 'user',
+    metadata: {
+      rescueServiceType: input.rescueServiceType,
+      reason: input.reason,
+      hasVehicle: input.hasVehicle,
+    },
+  });
 
   // Update user's last known location
   await prisma.user.update({
@@ -289,7 +498,7 @@ export async function createRescueRequest(input: CreateRescueInput) {
       dropLongitude: input.dropLng,
       pickupAddress: input.pickupAddress,
       dropAddress: input.dropAddress,
-      totalFare: fareEstimate?.totalFare || 0,
+      totalFare: estimatedTotalFare || 0,
       vehicleType: 'bike_rescue',
       passengerName: 'Rescue User',
       rideType: 'RESCUE',
@@ -298,6 +507,7 @@ export async function createRescueRequest(input: CreateRescueInput) {
       hasVehicle: input.hasVehicle,
       userVehicleType: input.vehicleType,
       vehicleDropAddress: vehicleDropAddress,
+      rescueServiceType: input.rescueServiceType,
     }, driverIds);
 
     if (broadcastResult) {
@@ -391,6 +601,13 @@ export async function driverAcceptRescue(rescueId: string, driverId: string) {
 
     logger.info(`[RESCUE] ✅ Single driver ${driverId} accepted rescue ${rescueId}`);
 
+    // Timeline event
+    await addTimelineEvent(rescueId, 'DRIVER_ASSIGNED', 'Bike rider on the way', {
+      description: `${driverName} is heading to your location`,
+      actor: 'driver',
+      metadata: { driverId, driverName, role: 'PRIMARY' },
+    });
+
     // Notify user
     sendPushNotification(rescue.userId, 'Rescue Driver Assigned!', 
       `${driverName} is on the way to rescue you! Your rescue PIN: ${rescue.rescueOtp}`, {
@@ -432,6 +649,13 @@ export async function driverAcceptRescue(rescueId: string, driverId: string) {
 
     logger.info(`[RESCUE] ✅ First driver ${driverId} accepted rescue ${rescueId} (waiting for second)`);
 
+    // Timeline event
+    await addTimelineEvent(rescueId, 'DRIVER1_ACCEPTED', 'Bike rider on the way', {
+      description: `${driverName} accepted. Waiting for a vehicle driver...`,
+      actor: 'driver',
+      metadata: { driverId, driverName, role: 'RIDER_DRIVER' },
+    });
+
     // Notify user that first driver accepted
     sendPushNotification(rescue.userId, 'First Rescue Driver Assigned!',
       `${driverName} has accepted your rescue. Waiting for a second driver for your vehicle...`, {
@@ -463,6 +687,13 @@ export async function driverAcceptRescue(rescueId: string, driverId: string) {
     });
 
     logger.info(`[RESCUE] ✅ Second driver ${driverId} accepted rescue ${rescueId} (both drivers ready)`);
+
+    // Timeline event
+    await addTimelineEvent(rescueId, 'BOTH_DRIVERS_ACCEPTED', 'Vehicle driver on the way', {
+      description: `${driverName} will handle your vehicle. Both drivers are ready!`,
+      actor: 'driver',
+      metadata: { driverId, driverName, role: 'VEHICLE_DRIVER' },
+    });
 
     // Get driver 1 info for notifications
     const driver1UserId = await getDriverUserId(rescue.driver1Id);
@@ -550,6 +781,13 @@ export async function driversEnRoute(rescueId: string, driverId: string) {
     include: rescueInclude,
   });
 
+  // Timeline event
+  await addTimelineEvent(rescueId, 'DRIVERS_EN_ROUTE', 'You have been picked up', {
+    description: 'Both drivers have teamed up and are heading to your location',
+    actor: 'driver',
+    metadata: { driverId },
+  });
+
   // Notify user
   sendPushNotification(rescue.userId, 'Rescue Drivers On The Way!',
     'Both drivers have teamed up and are heading to your location!', {
@@ -595,6 +833,13 @@ export async function driversArrived(rescueId: string, driverId: string) {
       driversArrivedAt: new Date(),
     },
     include: rescueInclude,
+  });
+
+  // Timeline event
+  await addTimelineEvent(rescueId, 'DRIVERS_ARRIVED', 'Vehicle handover verified', {
+    description: 'Rescue team has arrived at your location. Share your OTP to begin.',
+    actor: 'driver',
+    metadata: { driverId },
   });
 
   // Notify user
@@ -736,6 +981,15 @@ export async function verifyOtpAndStartRides(rescueId: string, driverId: string,
     include: rescueInclude,
   });
 
+  // Timeline event
+  await addTimelineEvent(rescueId, 'RIDES_STARTED', 'You are nearing destination', {
+    description: rescue.hasVehicle
+      ? 'Rescue underway! Track both your ride and your vehicle.'
+      : 'Rescue ride has started! Track your ride in the app.',
+    actor: 'system',
+    metadata: { userRideId, vehicleRideId },
+  });
+
   // Notify user
   sendPushNotification(rescue.userId, 'Rescue Started!',
     rescue.hasVehicle
@@ -809,6 +1063,18 @@ export async function completeRescue(rescueId: string) {
     include: rescueInclude,
   });
 
+  // Timeline events
+  await addTimelineEvent(rescueId, 'VEHICLE_ARRIVED_SAFELY', 'Vehicle arrived safely', {
+    description: 'Your vehicle has been delivered to the destination.',
+    actor: 'system',
+  });
+  await addTimelineEvent(rescueId, 'RESCUE_COMPLETED', 'Rescue completed', {
+    description: rescue.hasVehicle
+      ? 'Both you and your vehicle have been delivered safely.'
+      : 'You have been delivered safely. Thank you for using Raahi Rescue.',
+    actor: 'system',
+  });
+
   // Notify user
   sendPushNotification(rescue.userId, 'Rescue Completed!',
     rescue.hasVehicle
@@ -878,6 +1144,12 @@ export async function cancelRescue(
     include: rescueInclude,
   });
 
+  // Timeline event
+  await addTimelineEvent(rescueId, 'RESCUE_CANCELLED', 'Rescue cancelled', {
+    description: reason || 'The rescue request has been cancelled.',
+    actor: cancelledBy,
+  });
+
   // Notify relevant parties
   sendPushNotification(rescue.userId, 'Rescue Cancelled',
     reason || 'Your rescue request has been cancelled.', {
@@ -934,6 +1206,27 @@ export async function getRescueById(rescueId: string, requesterId?: string) {
 }
 
 /**
+ * Get user's active (ongoing) rescue request.
+ * Powers the app's ability to resume tracking after reopen (Screen ⑦).
+ */
+export async function getActiveRescue(userId: string) {
+  const activeStatuses = ['PENDING', 'DRIVER1_ACCEPTED', 'BOTH_ACCEPTED', 'DRIVERS_EN_ROUTE', 'DRIVERS_ARRIVED', 'IN_PROGRESS'];
+  
+  const rescue = await (prisma as any).rescueRequest.findFirst({
+    where: {
+      userId,
+      status: { in: activeStatuses },
+    },
+    include: rescueInclude,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (!rescue) return null;
+
+  return formatRescueRequest(rescue);
+}
+
+/**
  * Get user's rescue history (paginated)
  */
 export async function getUserRescueHistory(userId: string, page: number = 1, limit: number = 10) {
@@ -953,6 +1246,429 @@ export async function getUserRescueHistory(userId: string, page: number = 1, lim
     total,
     page,
     totalPages: Math.ceil(total / limit),
+  };
+}
+
+/**
+ * Get rescue fare estimate with detailed breakdown (Screen ⑥ Review & Confirm).
+ * Returns per-line pricing: passenger transport, vehicle delivery, platform fee, insurance.
+ */
+export async function getRescueFareEstimate(input: RescueFareEstimateInput) {
+  logger.info(`[RESCUE] Calculating fare estimate`);
+
+  // Passenger transport fare
+  let passengerFare = 0;
+  let passengerBreakdown: any = null;
+  try {
+    const fareResult = await calculateFare({
+      pickupLat: input.pickupLat,
+      pickupLng: input.pickupLng,
+      dropLat: input.dropLat,
+      dropLng: input.dropLng,
+      vehicleType: 'bike_rescue',
+    });
+    passengerFare = fareResult?.totalFare || 0;
+    passengerBreakdown = fareResult;
+  } catch (error) {
+    logger.warn('[RESCUE] Passenger fare estimate failed', { error: (error as Error).message });
+  }
+
+  // Vehicle delivery fare (if applicable)
+  let vehicleFare = 0;
+  let vehicleBreakdown: any = null;
+  if (input.hasVehicle) {
+    const vDropLat = input.vehicleDropSameAsDrop ? input.dropLat : input.vehicleDropLat;
+    const vDropLng = input.vehicleDropSameAsDrop ? input.dropLng : input.vehicleDropLng;
+    
+    if (vDropLat && vDropLng) {
+      try {
+        const fareResult = await calculateFare({
+          pickupLat: input.pickupLat,
+          pickupLng: input.pickupLng,
+          dropLat: vDropLat,
+          dropLng: vDropLng,
+          vehicleType: 'bike_rescue',
+        });
+        vehicleFare = fareResult?.totalFare || 0;
+        vehicleBreakdown = fareResult;
+      } catch (error) {
+        logger.warn('[RESCUE] Vehicle fare estimate failed', { error: (error as Error).message });
+      }
+    }
+  }
+
+  // Platform fee and insurance
+  const platformFee = await getPlatformConfigValue('rescue_platform_fee', DEFAULT_PLATFORM_FEE);
+  const insuranceFee = await getPlatformConfigValue('rescue_insurance_fee', DEFAULT_INSURANCE_FEE);
+
+  const totalFare = passengerFare + vehicleFare + platformFee + insuranceFee;
+
+  return {
+    breakdown: {
+      passengerTransport: {
+        label: 'Passenger transport',
+        amount: Math.round(passengerFare * 100) / 100,
+        details: passengerBreakdown,
+      },
+      vehicleDelivery: input.hasVehicle ? {
+        label: 'Vehicle delivery',
+        amount: Math.round(vehicleFare * 100) / 100,
+        details: vehicleBreakdown,
+      } : null,
+      platformFee: {
+        label: 'Platform fee',
+        amount: platformFee,
+      },
+      insurance: {
+        label: 'Insurance',
+        amount: insuranceFee,
+      },
+    },
+    total: Math.round(totalFare * 100) / 100,
+    currency: 'INR',
+    note: 'You can cancel anytime before pickup. T&C apply.',
+  };
+}
+
+/**
+ * Get rescue timeline events (Screen ⑨ Timeline Tab).
+ * Returns chronological list of all events for a rescue.
+ */
+export async function getRescueTimeline(rescueId: string) {
+  const events = await (prisma as any).rescueTimelineEvent.findMany({
+    where: { rescueId },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  return events.map((e: any) => ({
+    id: e.id,
+    event: e.event,
+    title: e.title,
+    description: e.description,
+    actor: e.actor,
+    metadata: e.metadata,
+    createdAt: e.createdAt,
+  }));
+}
+
+/**
+ * Trigger SOS / Emergency during a rescue (Screen ⑨ Support Tab).
+ * Marks the rescue as SOS-triggered and notifies all parties + admin.
+ */
+export async function triggerSOS(rescueId: string, userId: string, notes?: string) {
+  logger.info(`[RESCUE] 🚨 SOS TRIGGERED for rescue ${rescueId} by ${userId}`);
+
+  const rescue = await (prisma as any).rescueRequest.findUnique({
+    where: { id: rescueId },
+    include: rescueInclude,
+  });
+
+  if (!rescue) throw new Error('Rescue request not found');
+
+  // Only active rescues can trigger SOS
+  const activeStatuses = ['BOTH_ACCEPTED', 'DRIVERS_EN_ROUTE', 'DRIVERS_ARRIVED', 'IN_PROGRESS'];
+  if (!activeStatuses.includes(rescue.status)) {
+    throw new Error(`Cannot trigger SOS for rescue with status: ${rescue.status}`);
+  }
+
+  // Only the rescue user can trigger SOS
+  if (rescue.userId !== userId) {
+    throw new Error('Only the rescue user can trigger SOS');
+  }
+
+  const updated = await (prisma as any).rescueRequest.update({
+    where: { id: rescueId },
+    data: {
+      sosTriggered: true,
+      sosTriggeredAt: new Date(),
+      sosNotes: notes || null,
+    },
+    include: rescueInclude,
+  });
+
+  // Timeline event
+  await addTimelineEvent(rescueId, 'SOS_TRIGGERED', 'SOS / Emergency triggered', {
+    description: notes || 'User has triggered an emergency SOS alert.',
+    actor: 'user',
+    metadata: { userId, triggeredAt: new Date().toISOString() },
+  });
+
+  // Notify all assigned drivers
+  const driverIds = [rescue.driver1Id, rescue.driver2Id].filter(Boolean);
+  for (const did of driverIds) {
+    const dUserId = await getDriverUserId(did);
+    if (dUserId) {
+      sendPushNotification(dUserId, '🚨 SOS Alert — Immediate Attention Required',
+        `The passenger has triggered an emergency SOS on rescue ${rescueId}. Please check in immediately.`, {
+          type: 'RESCUE_UPDATE',
+          rescueId,
+          event: 'SOS_TRIGGERED',
+          priority: 'CRITICAL',
+        });
+    }
+  }
+
+  // Notify admin (via system notification — admin dashboard can listen for SOS type)
+  sendPushNotification('ADMIN_SYSTEM', '🚨 SOS — Rescue Emergency',
+    `SOS triggered by user ${rescue.user?.firstName || userId} on rescue ${rescueId}. ${notes || ''}`, {
+      type: 'RESCUE_UPDATE',
+      rescueId,
+      event: 'SOS_TRIGGERED',
+      priority: 'CRITICAL',
+      userId,
+    }).catch(() => {}); // Non-critical if admin push fails
+
+  logger.info(`[RESCUE] 🚨 SOS alerts sent for rescue ${rescueId}`);
+
+  return formatRescueRequest(updated);
+}
+
+/**
+ * Verify vehicle delivery (Screen ⑩).
+ * User accepts the vehicle condition or reports an issue with photos.
+ */
+export async function verifyVehicleDelivery(
+  rescueId: string,
+  userId: string,
+  input: VehicleDeliveryInput
+) {
+  logger.info(`[RESCUE] Vehicle delivery verification for rescue ${rescueId}: ${input.status}`);
+
+  const rescue = await (prisma as any).rescueRequest.findUnique({
+    where: { id: rescueId },
+  });
+
+  if (!rescue) throw new Error('Rescue request not found');
+  if (!rescue.hasVehicle) throw new Error('This rescue does not include a vehicle');
+  if (rescue.userId !== userId) throw new Error('Only the rescue user can verify vehicle delivery');
+
+  // Must be in-progress or completed
+  const allowedStatuses = ['IN_PROGRESS', 'COMPLETED'];
+  if (!allowedStatuses.includes(rescue.status)) {
+    throw new Error(`Cannot verify vehicle delivery for rescue with status: ${rescue.status}`);
+  }
+
+  const updateData: any = {
+    vehicleDeliveryStatus: input.status,
+    vehicleConditionPhotos: input.conditionPhotos || [],
+    vehicleDeliveryNotes: input.notes || null,
+  };
+
+  if (input.status === 'ACCEPTED') {
+    updateData.vehicleDeliveryAcceptedAt = new Date();
+
+    await addTimelineEvent(rescueId, 'VEHICLE_DELIVERY_ACCEPTED', 'Vehicle delivery accepted', {
+      description: 'User confirmed vehicle condition is satisfactory.',
+      actor: 'user',
+      metadata: { photosCount: (input.conditionPhotos || []).length },
+    });
+  } else if (input.status === 'ISSUE_REPORTED') {
+    updateData.vehicleDeliveryIssue = input.issue || 'Issue reported without details';
+
+    await addTimelineEvent(rescueId, 'VEHICLE_DELIVERY_ISSUE', 'Vehicle delivery issue reported', {
+      description: input.issue || 'User reported an issue with vehicle condition.',
+      actor: 'user',
+      metadata: { issue: input.issue, photosCount: (input.conditionPhotos || []).length },
+    });
+
+    // Create a support ticket for the issue
+    try {
+      await prisma.supportTicket.create({
+        data: {
+          userId,
+          issueType: 'VEHICLE_DELIVERY_DAMAGE',
+          description: `Vehicle delivery issue for rescue ${rescueId}: ${input.issue || 'No details provided'}`,
+          priority: 'HIGH',
+          status: 'OPEN',
+        },
+      });
+      logger.info(`[RESCUE] Created support ticket for vehicle delivery issue on rescue ${rescueId}`);
+    } catch (ticketError) {
+      logger.warn(`[RESCUE] Failed to create support ticket`, { error: ticketError });
+    }
+  }
+
+  const updated = await (prisma as any).rescueRequest.update({
+    where: { id: rescueId },
+    data: updateData,
+    include: rescueInclude,
+  });
+
+  // Notify driver 2 (vehicle driver) about the verdict
+  if (rescue.driver2Id) {
+    const d2UserId = await getDriverUserId(rescue.driver2Id);
+    if (d2UserId) {
+      sendPushNotification(d2UserId,
+        input.status === 'ACCEPTED' ? 'Vehicle Delivery Accepted ✅' : 'Vehicle Delivery Issue ⚠️',
+        input.status === 'ACCEPTED'
+          ? 'The user has accepted the vehicle delivery. Great job!'
+          : `The user reported an issue with the vehicle delivery: ${input.issue || 'Check app for details'}`,
+        { type: 'RESCUE_UPDATE', rescueId, event: 'VEHICLE_DELIVERY_VERIFIED' });
+    }
+  }
+
+  return formatRescueRequest(updated);
+}
+
+/**
+ * Submit multi-party rescue ratings (Screen ⑪ Rating & Complete).
+ * User can rate: Rider Driver, Vehicle Driver, and Support separately.
+ */
+export async function submitRescueRating(
+  rescueId: string,
+  userId: string,
+  input: SubmitRatingsInput
+) {
+  logger.info(`[RESCUE] Submitting ratings for rescue ${rescueId} by user ${userId}`);
+
+  const rescue = await (prisma as any).rescueRequest.findUnique({
+    where: { id: rescueId },
+    include: rescueInclude,
+  });
+
+  if (!rescue) throw new Error('Rescue request not found');
+  if (rescue.userId !== userId) throw new Error('Only the rescue user can submit ratings');
+
+  // Must be completed
+  if (rescue.status !== 'COMPLETED') {
+    throw new Error('Can only rate a completed rescue');
+  }
+
+  const savedRatings: any[] = [];
+
+  for (const ratingInput of input.ratings) {
+    // Determine target ID based on type
+    let targetId: string | null = null;
+    if (ratingInput.targetType === 'RIDER_DRIVER' && rescue.driver1Id) {
+      targetId = rescue.driver1Id;
+    } else if (ratingInput.targetType === 'VEHICLE_DRIVER' && rescue.driver2Id) {
+      targetId = rescue.driver2Id;
+    }
+
+    // Validate rating value
+    if (ratingInput.rating < 1 || ratingInput.rating > 5) {
+      throw new Error(`Rating must be between 1 and 5, got ${ratingInput.rating}`);
+    }
+
+    try {
+      const rating = await (prisma as any).rescueRating.upsert({
+        where: {
+          rescueId_userId_targetType: {
+            rescueId,
+            userId,
+            targetType: ratingInput.targetType,
+          },
+        },
+        update: {
+          rating: ratingInput.rating,
+          feedback: ratingInput.feedback || null,
+          problemSolved: input.problemSolved ?? null,
+        },
+        create: {
+          rescueId,
+          userId,
+          targetType: ratingInput.targetType,
+          targetId,
+          rating: ratingInput.rating,
+          feedback: ratingInput.feedback || null,
+          problemSolved: input.problemSolved ?? null,
+        },
+      });
+      savedRatings.push(rating);
+
+      // Update driver's aggregate rating if this is a driver rating
+      if (targetId && (ratingInput.targetType === 'RIDER_DRIVER' || ratingInput.targetType === 'VEHICLE_DRIVER')) {
+        try {
+          const driver = await prisma.driver.findUnique({
+            where: { id: targetId },
+            select: { rating: true, ratingCount: true },
+          });
+          if (driver) {
+            const newCount = driver.ratingCount + 1;
+            const newRating = ((driver.rating * driver.ratingCount) + ratingInput.rating) / newCount;
+            await prisma.driver.update({
+              where: { id: targetId },
+              data: {
+                rating: Math.round(newRating * 100) / 100,
+                ratingCount: newCount,
+              },
+            });
+            logger.info(`[RESCUE] Updated driver ${targetId} rating: ${newRating.toFixed(2)} (${newCount} ratings)`);
+          }
+        } catch (driverError) {
+          logger.warn(`[RESCUE] Failed to update driver rating for ${targetId}`, { error: driverError });
+        }
+      }
+    } catch (ratingError) {
+      logger.warn(`[RESCUE] Failed to save ${ratingInput.targetType} rating for rescue ${rescueId}`, { error: ratingError });
+    }
+  }
+
+  // Timeline event
+  await addTimelineEvent(rescueId, 'RATINGS_SUBMITTED', 'Rescue rated', {
+    description: 'User has submitted their ratings for this rescue.',
+    actor: 'user',
+    metadata: { ratingsCount: savedRatings.length, problemSolved: input.problemSolved },
+  });
+
+  return {
+    rescueId,
+    ratings: savedRatings.map((r: any) => ({
+      targetType: r.targetType,
+      rating: r.rating,
+      feedback: r.feedback,
+    })),
+    problemSolved: input.problemSolved,
+  };
+}
+
+/**
+ * Report an issue with a completed rescue (Screen ⑪ "Report an Issue").
+ * Creates a high-priority support ticket.
+ */
+export async function reportRescueIssue(
+  rescueId: string,
+  userId: string,
+  issueType: string,
+  description: string,
+  photos?: string[]
+) {
+  logger.info(`[RESCUE] Issue report for rescue ${rescueId}: ${issueType}`);
+
+  const rescue = await (prisma as any).rescueRequest.findUnique({
+    where: { id: rescueId },
+    select: { id: true, userId: true, status: true },
+  });
+
+  if (!rescue) throw new Error('Rescue request not found');
+  if (rescue.userId !== userId) throw new Error('Only the rescue user can report issues');
+
+  // Create a support ticket
+  const ticket = await prisma.supportTicket.create({
+    data: {
+      userId,
+      issueType: `RESCUE_${issueType.toUpperCase()}`,
+      description: `[Rescue ${rescueId}] ${description}${photos?.length ? ` | Photos: ${photos.join(', ')}` : ''}`,
+      priority: 'HIGH',
+      status: 'OPEN',
+    },
+  });
+
+  // Timeline event
+  await addTimelineEvent(rescueId, 'ISSUE_REPORTED', 'Issue reported', {
+    description: `User reported: ${issueType}`,
+    actor: 'user',
+    metadata: { ticketId: ticket.id, issueType, hasPhotos: (photos || []).length > 0 },
+  });
+
+  logger.info(`[RESCUE] Support ticket ${ticket.id} created for rescue ${rescueId}`);
+
+  return {
+    ticketId: ticket.id,
+    rescueId,
+    issueType,
+    status: 'OPEN',
+    message: 'Your issue has been reported. Our support team will reach out to you shortly.',
   };
 }
 

@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@raahi/shared": "file:../../packages/shared",
+    "@aws-sdk/client-s3": "3.525.0",
+    "@aws-sdk/s3-request-presigner": "3.525.0",
     "axios": "^1.6.2",
     "express": "^4.18.2",
     "express-validator": "^7.0.1",

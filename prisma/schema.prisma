@@ -996,39 +996,54 @@ enum SubscriptionPaymentStatus {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 model RescueRequest {
-  id                    String        @id @default(cuid())
-  userId                String        // The user requesting rescue
+  id                    String              @id @default(cuid())
+  userId                String              // The user requesting rescue
   
-  // Pickup & User Drop
+  // Screen ① — Rescue Service Type
+  rescueServiceType     RescueServiceType   @default(PASSENGER_VEHICLE_RESCUE)
+  
+  // Screen ② — What's Happening (reason for rescue)
+  reason                String?             // "stuck_in_traffic", "feeling_unsafe", "driver_unavailable", etc.
+  reasonDetails         String?             // Free-text when user selects "Other (Tell us)"
+  
+  // Screen ③ — Location & vehicle presence
   pickupAddress         String
   pickupLatitude        Float
   pickupLongitude       Float
   dropAddress           String
   dropLatitude          Float
   dropLongitude         Float
+  isVehicleWithUser     Boolean             @default(true) // "Is your vehicle with you?" Yes/No
   
-  // Vehicle Details
-  hasVehicle            Boolean       @default(false)
-  vehicleType           String?       // "TWO_WHEELER" or "FOUR_WHEELER"
-  vehicleDropAddress    String?       // Where to drop the vehicle
+  // Screen ④ — Vehicle Details
+  hasVehicle                Boolean         @default(false)
+  vehicleType               String?         // "TWO_WHEELER" or "FOUR_WHEELER" (Bike, Scooter, Hatchback, Sedan, SUV)
+  vehicleSubType            String?         // Granular: "BIKE", "SCOOTER", "HATCHBACK", "SEDAN", "SUV"
+  vehicleRegistrationNumber String?         // "MP04 XX 1234"
+  vehicleRegistrationState  String?         // "MP" — state code for registration
+  vehicleTransmission       String?         // "MANUAL" or "AUTOMATIC"
+  vehicleIssues             String[]        // ["flat_tyre", "overheating", "damage", "engine_failure", "battery_dead"]
+  
+  // Screen ⑤ — Vehicle drop location
+  vehicleDropAddress    String?             // Where to drop the vehicle
   vehicleDropLatitude   Float?
   vehicleDropLongitude  Float?
-  vehicleDropSameAsDrop Boolean       @default(false)
+  vehicleDropSameAsDrop Boolean             @default(false)
   
   // Driver Assignments
-  driver1Id             String?       // Primary driver (drops the user)
-  driver2Id             String?       // Secondary driver (drops the vehicle)
+  driver1Id             String?             // Primary driver (drops the user)
+  driver2Id             String?             // Secondary driver (drops the vehicle)
   
   // Linked Rides (created in ride-service)
-  userRideId            String?       @unique  // Ride for user drop
-  vehicleRideId         String?       @unique  // Ride for vehicle drop
+  userRideId            String?             @unique  // Ride for user drop
+  vehicleRideId         String?             @unique  // Ride for vehicle drop
   
   // Rescue OTP (shared with both drivers)
-  rescueOtp             String?       // 4-digit OTP
+  rescueOtp             String?             // 4-digit OTP
   
   // Status & Stage Tracking
-  status                RescueStatus  @default(PENDING)
-  rescueStage           Int           @default(0)
+  status                RescueStatus        @default(PENDING)
+  rescueStage           Int                 @default(0)
   // Stage 0: PENDING — Waiting for drivers
   // Stage 1: DRIVER1_ACCEPTED — First driver accepted, waiting for second
   // Stage 2: BOTH_ACCEPTED — Both drivers accepted (or single driver if no vehicle)
@@ -1037,7 +1052,27 @@ model RescueRequest {
   // Stage 5: IN_PROGRESS — OTP verified, rides started
   // Stage 6: COMPLETED — All rides completed
   
-  paymentMethod         String        @default("CASH")  // CASH, UPI, etc.
+  paymentMethod         String              @default("CASH")  // CASH, UPI, etc.
+  
+  // Screen ⑥ — Fare Estimate (stored at creation for reference)
+  estimatedPassengerFare  Float?            // Passenger transport estimate
+  estimatedVehicleFare    Float?            // Vehicle delivery estimate
+  estimatedPlatformFee    Float?            // Platform fee
+  estimatedInsuranceFee   Float?            // Insurance fee
+  estimatedTotalFare      Float?            // Grand total estimate
+  
+  // Screen ⑨ — SOS
+  sosTriggered          Boolean             @default(false)
+  sosTriggeredAt        DateTime?
+  sosResolvedAt         DateTime?
+  sosNotes              String?
+  
+  // Screen ⑩ — Vehicle Delivery Verification
+  vehicleDeliveryStatus     String?         // "PENDING", "ACCEPTED", "ISSUE_REPORTED"
+  vehicleConditionPhotos    String[]        // URLs of delivery condition photos
+  vehicleDeliveryNotes      String?         // User notes on delivery acceptance
+  vehicleDeliveryAcceptedAt DateTime?
+  vehicleDeliveryIssue      String?         // Issue description if user reports a problem
   
   // Timestamps
   driver1AcceptedAt     DateTime?
@@ -1049,20 +1084,74 @@ model RescueRequest {
   cancelledAt           DateTime?
   cancelledBy           String?
   cancellationReason    String?
-  createdAt             DateTime      @default(now())
-  updatedAt             DateTime      @updatedAt
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
   
   // Relations
-  user                  User          @relation(fields: [userId], references: [id])
-  driver1               Driver?       @relation("RescueDriver1", fields: [driver1Id], references: [id])
-  driver2               Driver?       @relation("RescueDriver2", fields: [driver2Id], references: [id])
+  user                  User                @relation(fields: [userId], references: [id])
+  driver1               Driver?             @relation("RescueDriver1", fields: [driver1Id], references: [id])
+  driver2               Driver?             @relation("RescueDriver2", fields: [driver2Id], references: [id])
+  timelineEvents        RescueTimelineEvent[]
+  ratings               RescueRating[]
   
   @@index([userId])
   @@index([status])
   @@index([driver1Id])
   @@index([driver2Id])
   @@index([createdAt])
+  @@index([userId, status])
   @@map("rescue_requests")
+}
+
+// ─── Rescue Timeline Events (Screen ⑨ Timeline Tab) ──────────────────────────
+// Immutable log of every significant event during a rescue journey.
+// Powers the Timeline tab in the Journey Hub.
+
+model RescueTimelineEvent {
+  id          String   @id @default(cuid())
+  rescueId    String
+  event       String   // Machine-readable: "REQUEST_CREATED", "DRIVER1_ACCEPTED", "DRIVERS_EN_ROUTE", etc.
+  title       String   // Human-readable: "Rescue request received", "Bike rider on the way"
+  description String?  // Optional detail text
+  actor       String?  // "system", "driver", "user", or specific driverId/userId
+  metadata    Json?    // Flexible additional data (e.g., driver name, location snapshot)
+  createdAt   DateTime @default(now())
+
+  rescue      RescueRequest @relation(fields: [rescueId], references: [id], onDelete: Cascade)
+
+  @@index([rescueId])
+  @@index([rescueId, createdAt])
+  @@map("rescue_timeline_events")
+}
+
+// ─── Rescue Ratings (Screen ⑪ Rating & Complete) ─────────────────────────────
+// Multi-party rating: user rates Rider Driver, Vehicle Driver, and Support separately.
+
+model RescueRating {
+  id            String   @id @default(cuid())
+  rescueId      String
+  userId        String   // The user giving the rating
+  targetType    String   // "RIDER_DRIVER", "VEHICLE_DRIVER", "SUPPORT"
+  targetId      String?  // Driver ID for driver ratings, null for SUPPORT
+  rating        Int      // 1-5 stars
+  feedback      String?  @db.VarChar(500) // Optional text feedback
+  problemSolved Boolean? // "Was your problem solved?" (Screen ⑪)
+  createdAt     DateTime @default(now())
+
+  rescue        RescueRequest @relation(fields: [rescueId], references: [id], onDelete: Cascade)
+
+  @@unique([rescueId, userId, targetType])
+  @@index([rescueId])
+  @@index([targetId])
+  @@map("rescue_ratings")
+}
+
+enum RescueServiceType {
+  TRAFFIC_RESCUE           // "Traffic Rescue — Quick transport through traffic"
+  VEHICLE_RESCUE           // "Vehicle Rescue — Get your vehicle delivered"
+  PASSENGER_VEHICLE_RESCUE // "Passenger + Vehicle Rescue — We'll rescue you and move your vehicle"
+  BREAKDOWN_RESCUE         // "Breakdown Rescue — Help for your vehicle"
+  EMERGENCY_ASSISTANCE     // "Emergency Assistance — Accident, stranded or urgent help"
 }
 
 enum RescueStatus {
