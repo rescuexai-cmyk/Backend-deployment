@@ -201,7 +201,7 @@ services:
       dockerfile: services/pricing-service/Dockerfile
     container_name: raahi-pricing-service
     restart: always
-    mem_limit: 128m
+    mem_limit: 512m
     environment:
       NODE_ENV: production
       PORT: 5005
