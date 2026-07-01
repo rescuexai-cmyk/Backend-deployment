@@ -17,14 +17,6 @@ export const errorHandler = (
   let { statusCode = 500, message } = error;
   let errorCode: string | undefined;
 
-  logger.error('Error occurred', {
-    error: error.message,
-    stack: error.stack,
-    url: req.url,
-    method: req.method,
-    code: (error as any).code,
-  });
-
   // Handle standard error types
   if (error.name === 'CrossZoneBlockedError') {
     statusCode = 422;
@@ -62,6 +54,27 @@ export const errorHandler = (
 
   if (process.env.NODE_ENV === 'production' && !error.isOperational && statusCode === 500) {
     message = 'Something went wrong';
+  }
+
+  // Log at a severity matching the outcome: server faults (5xx) are real
+  // errors; client/operational outcomes (4xx, e.g. permit blocks, validation)
+  // are expected and logged as warnings without a noisy stack trace.
+  if (statusCode >= 500) {
+    logger.error('Error occurred', {
+      error: error.message,
+      stack: error.stack,
+      url: req.url,
+      method: req.method,
+      code: (error as any).code,
+    });
+  } else {
+    logger.warn('Request rejected', {
+      error: error.message,
+      status: statusCode,
+      url: req.url,
+      method: req.method,
+      code: errorCode ?? (error as any).code,
+    });
   }
 
   res.status(statusCode).json({
