@@ -280,12 +280,16 @@ services:
     container_name: raahi-admin-service
     restart: always
     mem_limit: 128m
+    ports:
+      - "127.0.0.1:5008:5008"
     environment:
       NODE_ENV: production
       PORT: 5008
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
+      PRICING_SERVICE_URL: http://pricing-service:5005
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
       interval: 15s
@@ -371,6 +375,7 @@ services:
     depends_on:
       - gateway
       - realtime-service
+      - admin-service
     healthcheck:
       # nginx:alpine has no curl; use busybox wget. Use 127.0.0.1 (not localhost)
       # because localhost resolves to ::1 first and nginx only binds IPv4.

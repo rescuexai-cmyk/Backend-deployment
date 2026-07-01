@@ -1,3 +1,4 @@
+import path from 'path';
 import express, { NextFunction, Response } from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
@@ -11,6 +12,29 @@ import { OnboardingStatus } from '@prisma/client';
 const logger = createLogger('admin-service');
 const app = express();
 const PORT = process.env.PORT || 5008;
+
+const PRICING_SERVICE_URL = process.env.PRICING_SERVICE_URL || 'http://localhost:5005';
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+/**
+ * Forward a promo-management request to the pricing-service admin API using the
+ * internal key. Keeps the internal key server-side (never in the browser) and
+ * reuses the pricing-service's validation + cache invalidation.
+ */
+async function pricingProxy(
+  method: string,
+  proxyPath: string,
+  body?: unknown,
+): Promise<{ status: number; data: any }> {
+  const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
+  const resp = await doFetch(`${PRICING_SERVICE_URL}${proxyPath}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  return { status: resp.status, data };
+}
 
 // ==================== PAGINATION LIMITS ====================
 const MAX_PAGINATION_LIMIT = 100;
@@ -503,6 +527,99 @@ app.get('/api/admin/statistics', authenticate, requireAdmin, asyncHandler(async 
     },
   });
 }));
+
+// ==================== PROMO MANAGEMENT (Marketing) ====================
+// Proxies to pricing-service /api/promo/admin. Protected by admin JWT so the
+// pricing internal key never reaches the browser. Changes reflect on the app
+// immediately (pricing-service busts its promo cache on every write).
+
+/**
+ * @openapi
+ * /api/admin/promos:
+ *   get:
+ *     tags: [Promos]
+ *     summary: List all promo codes (incl. inactive/expired) with usage totals
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: List of promos }
+ */
+app.get(
+  '/api/admin/promos',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (_req: AuthRequest, res) => {
+    const { status, data } = await pricingProxy('GET', '/api/promo/admin');
+    res.status(status).json(data);
+  }),
+);
+
+/**
+ * @openapi
+ * /api/admin/promos:
+ *   post:
+ *     tags: [Promos]
+ *     summary: Create or update a promo code (upsert by code)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Promo saved }
+ */
+app.post(
+  '/api/admin/promos',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Promo upsert by ${req.user?.email || req.user?.id}: ${req.body?.code}`);
+    const { status, data } = await pricingProxy('POST', '/api/promo/admin', req.body);
+    res.status(status).json(data);
+  }),
+);
+
+/**
+ * @openapi
+ * /api/admin/promos/{id}:
+ *   patch:
+ *     tags: [Promos]
+ *     summary: Update a promo (e.g. toggle active, change value/limits)
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Promo updated }
+ */
+app.patch(
+  '/api/admin/promos/:id',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Promo update by ${req.user?.email || req.user?.id}: ${req.params.id}`);
+    const { status, data } = await pricingProxy('PATCH', `/api/promo/admin/${req.params.id}`, req.body);
+    res.status(status).json(data);
+  }),
+);
+
+/**
+ * @openapi
+ * /api/admin/promos/{id}:
+ *   delete:
+ *     tags: [Promos]
+ *     summary: Delete a promo code
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Promo deleted }
+ */
+app.delete(
+  '/api/admin/promos/:id',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Promo delete by ${req.user?.email || req.user?.id}: ${req.params.id}`);
+    const { status, data } = await pricingProxy('DELETE', `/api/promo/admin/${req.params.id}`);
+    res.status(status).json(data);
+  }),
+);
+
+// Serve the marketing dashboard (static HTML; API calls are auth-gated above).
+app.get(['/promos', '/dashboard', '/dashboard/promos'], (_req, res) => {
+  res.sendFile(path.resolve(__dirname, '../public/dashboard.html'));
+});
 
 app.use(notFound);
 app.use(errorHandler);
