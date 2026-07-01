@@ -208,6 +208,7 @@ router.post(
     // Rescue service fields
     body('rideType').optional().isIn(['NORMAL', 'RESCUE']),
     body('rescueMultiDriver').optional().isBoolean(),
+    body('promoCode').optional().isString().trim(),
     body('stops').optional().isArray(),
     body('stops.*.lat').isFloat({ min: -90, max: 90 }),
     body('stops.*.lng').isFloat({ min: -180, max: 180 }),
@@ -219,24 +220,35 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType, rideType, rescueMultiDriver, stops } = req.body;
-    const ride = await rideService.createRide({
-      passengerId: req.user!.id,
-      pickupLat,
-      pickupLng,
-      dropLat,
-      dropLng,
-      pickupAddress,
-      dropAddress,
-      paymentMethod,
-      scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
-      vehicleType,
-      // Rescue service fields
-      rideType: rideType || 'NORMAL',
-      rescueMultiDriver: rescueMultiDriver || false,
-      stops,
-    });
-    res.status(201).json({ success: true, message: 'Ride created successfully', data: ride });
+    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType, rideType, rescueMultiDriver, promoCode, stops } = req.body;
+    try {
+      const ride = await rideService.createRide({
+        passengerId: req.user!.id,
+        pickupLat,
+        pickupLng,
+        dropLat,
+        dropLng,
+        pickupAddress,
+        dropAddress,
+        paymentMethod,
+        scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
+        vehicleType,
+        // Rescue service fields
+        rideType: rideType || 'NORMAL',
+        rescueMultiDriver: rescueMultiDriver || false,
+        promoCode,
+        stops,
+      });
+      res.status(201).json({ success: true, message: 'Ride created successfully', data: ride });
+    } catch (error: any) {
+      // Invalid/expired/limit-reached promo code → clean 400 so the client can
+      // retry without the code (the ride was NOT created).
+      if (error?.code === 'PROMO_INVALID') {
+        res.status(400).json({ success: false, message: error.message, code: 'PROMO_INVALID' });
+        return;
+      }
+      throw error;
+    }
   })
 );
 

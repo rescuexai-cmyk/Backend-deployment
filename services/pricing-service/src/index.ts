@@ -12,7 +12,13 @@ import {
   getDriverQuestsSnapshot,
   updateDriverQuestProgress,
 } from './pricingService';
-import { validatePromo, calculatePromoDiscount, getActivePromosForUser } from './promoService';
+import {
+  validatePromo,
+  calculatePromoDiscount,
+  getActivePromosForUser,
+  redeemPromo,
+  invalidatePromoCache,
+} from './promoService';
 import { listZoneHealth, runMarketplaceGovernance, upsertMarketplacePolicy, getMarketplacePolicy } from './marketplacePolicy';
 
 const logger = createLogger('pricing-service');
@@ -634,6 +640,210 @@ app.get(
     const promos = await getActivePromosForUser({ userId, vehicleType, city });
     
     res.status(200).json({ success: true, data: promos });
+  })
+);
+
+/**
+ * POST /api/promo/redeem  (internal — called by ride-service at booking time)
+ * Validates the code, computes the discount, and (if rideId given) records a
+ * redemption so per-user / global limits take effect. Idempotent per rideId.
+ * Omit rideId for a dry-run (validate + price only, no usage recorded).
+ */
+app.post(
+  '/api/promo/redeem',
+  authenticateInternal,
+  [
+    body('code').isString().notEmpty().trim(),
+    body('userId').isString().notEmpty(),
+    body('rideId').optional().isString().notEmpty(),
+    body('fare').optional().isFloat({ min: 0 }),
+    body('vehicleType').optional().isString(),
+    body('city').optional().isString(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+
+    const { code, userId, rideId, fare, vehicleType, city } = req.body;
+    const result = await redeemPromo({ code, userId, rideId, fare, vehicleType, city });
+
+    if (!result.valid || !result.promo) {
+      res.status(400).json({ success: false, message: result.error || 'Invalid promo' });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        promoId: result.promo.id,
+        code: result.promo.code,
+        type: result.promo.type,
+        recorded: result.recorded,
+        discount: result.discount,
+      },
+    });
+  })
+);
+
+// ============================================================
+// Promo Management (admin — internal API key required)
+// ============================================================
+
+const PROMO_TYPES = ['PERCENT', 'FLAT', 'CASHBACK'];
+
+/**
+ * GET /api/promo/admin — list ALL promos (including inactive/expired) with usage totals.
+ */
+app.get(
+  '/api/promo/admin',
+  authenticateInternal,
+  asyncHandler(async (_req, res) => {
+    const { prisma } = require('@raahi/shared');
+    const promos = await prisma.promo.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { _count: { select: { usages: true } } },
+    });
+    res.status(200).json({ success: true, data: promos });
+  })
+);
+
+/**
+ * POST /api/promo/admin — create or update a promo (upsert by code).
+ */
+app.post(
+  '/api/promo/admin',
+  authenticateInternal,
+  [
+    body('code').isString().notEmpty().trim(),
+    body('type').isString().custom((v) => PROMO_TYPES.includes(String(v).toUpperCase())),
+    body('value').isFloat({ min: 0 }),
+    body('maxDiscount').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('minFare').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('usageLimit').optional({ nullable: true }).isInt({ min: 1 }),
+    body('perUserLimit').optional().isInt({ min: 1 }),
+    body('validFrom').optional().isISO8601(),
+    body('validTo').optional({ nullable: true }).isISO8601(),
+    body('vehicleTypes').optional().isArray(),
+    body('cities').optional().isArray(),
+    body('isFirstRideOnly').optional().isBoolean(),
+    body('isActive').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+
+    const { prisma } = require('@raahi/shared');
+    const b = req.body;
+    const code = String(b.code).toUpperCase();
+
+    const data = {
+      type: String(b.type).toUpperCase(),
+      value: b.value,
+      maxDiscount: b.maxDiscount ?? null,
+      minFare: b.minFare ?? null,
+      usageLimit: b.usageLimit ?? null,
+      perUserLimit: b.perUserLimit ?? 1,
+      validFrom: b.validFrom ? new Date(b.validFrom) : new Date(),
+      validTo: b.validTo ? new Date(b.validTo) : null,
+      vehicleTypes: Array.isArray(b.vehicleTypes) ? b.vehicleTypes.map((v: string) => v.toLowerCase()) : [],
+      cities: Array.isArray(b.cities) ? b.cities.map((c: string) => c.toLowerCase()) : [],
+      isFirstRideOnly: b.isFirstRideOnly ?? false,
+      isActive: b.isActive ?? true,
+    };
+
+    const promo = await prisma.promo.upsert({
+      where: { code },
+      update: data,
+      create: { code, ...data },
+    });
+
+    invalidatePromoCache();
+    res.status(200).json({ success: true, message: 'Promo saved', data: promo });
+  })
+);
+
+/**
+ * PATCH /api/promo/admin/:id — partial update (e.g. toggle isActive, change value).
+ */
+app.patch(
+  '/api/promo/admin/:id',
+  authenticateInternal,
+  [
+    body('type').optional().isString().custom((v) => PROMO_TYPES.includes(String(v).toUpperCase())),
+    body('value').optional().isFloat({ min: 0 }),
+    body('maxDiscount').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('minFare').optional({ nullable: true }).isFloat({ min: 0 }),
+    body('usageLimit').optional({ nullable: true }).isInt({ min: 1 }),
+    body('perUserLimit').optional().isInt({ min: 1 }),
+    body('validFrom').optional().isISO8601(),
+    body('validTo').optional({ nullable: true }).isISO8601(),
+    body('vehicleTypes').optional().isArray(),
+    body('cities').optional().isArray(),
+    body('isFirstRideOnly').optional().isBoolean(),
+    body('isActive').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+
+    const { prisma } = require('@raahi/shared');
+    const b = req.body;
+    const data: Record<string, any> = {};
+    if (b.type !== undefined) data.type = String(b.type).toUpperCase();
+    if (b.value !== undefined) data.value = b.value;
+    if (b.maxDiscount !== undefined) data.maxDiscount = b.maxDiscount;
+    if (b.minFare !== undefined) data.minFare = b.minFare;
+    if (b.usageLimit !== undefined) data.usageLimit = b.usageLimit;
+    if (b.perUserLimit !== undefined) data.perUserLimit = b.perUserLimit;
+    if (b.validFrom !== undefined) data.validFrom = new Date(b.validFrom);
+    if (b.validTo !== undefined) data.validTo = b.validTo ? new Date(b.validTo) : null;
+    if (b.vehicleTypes !== undefined) data.vehicleTypes = (b.vehicleTypes || []).map((v: string) => v.toLowerCase());
+    if (b.cities !== undefined) data.cities = (b.cities || []).map((c: string) => c.toLowerCase());
+    if (b.isFirstRideOnly !== undefined) data.isFirstRideOnly = b.isFirstRideOnly;
+    if (b.isActive !== undefined) data.isActive = b.isActive;
+
+    try {
+      const promo = await prisma.promo.update({ where: { id: req.params.id }, data });
+      invalidatePromoCache();
+      res.status(200).json({ success: true, message: 'Promo updated', data: promo });
+    } catch (err: any) {
+      if (err?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Promo not found' });
+        return;
+      }
+      throw err;
+    }
+  })
+);
+
+/**
+ * DELETE /api/promo/admin/:id — remove a promo (cascades its usage rows).
+ */
+app.delete(
+  '/api/promo/admin/:id',
+  authenticateInternal,
+  asyncHandler(async (req, res) => {
+    const { prisma } = require('@raahi/shared');
+    try {
+      await prisma.promo.delete({ where: { id: req.params.id } });
+      invalidatePromoCache();
+      res.status(200).json({ success: true, message: 'Promo deleted' });
+    } catch (err: any) {
+      if (err?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Promo not found' });
+        return;
+      }
+      throw err;
+    }
   })
 );
 

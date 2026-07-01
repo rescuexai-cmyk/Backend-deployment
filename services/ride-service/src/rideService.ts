@@ -25,6 +25,8 @@ import {
   transitionRideViaFireball,
   verifyOtpViaFireball,
   updateRideLocationViaFireball,
+  redeemPromo as httpRedeemPromo,
+  PromoInvalidError,
 } from './httpClients';
 import { calculateCancellationFee, CancellationContext } from './cancellationService';
 import { enqueueScheduledRide, cancelScheduledRideJob } from './scheduledRideQueue';
@@ -200,6 +202,7 @@ export interface CreateRideRequest {
   rideType?: 'NORMAL' | 'RESCUE';
   rescueMultiDriver?: boolean;
   stops?: Array<{ lat: number; lng: number; address: string }>;
+  promoCode?: string;
 }
 
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -324,6 +327,37 @@ export async function createRide(req: CreateRideRequest) {
     stops: req.stops,
   });
 
+  // ─── Promo/coupon (booking-time discount) ─────────────────────────────────
+  // Dry-run first so an invalid code is rejected cleanly BEFORE the ride row is
+  // created. The discount is baked into totalFare; usage is recorded after the
+  // ride exists (idempotent). Rescue rides are never discounted.
+  let promoContext: { promoId: string; code: string; discountAmount: number } | null = null;
+  let effectiveTotalFare = pricing.totalFare;
+  if (req.promoCode && !isRescue) {
+    try {
+      const dry = await httpRedeemPromo({
+        code: req.promoCode,
+        userId: req.passengerId,
+        fare: pricing.totalFare,
+        vehicleType: effectiveVehicleType,
+      });
+      const discountAmount = dry.discount?.discountAmount ?? 0;
+      effectiveTotalFare = dry.discount?.discountedFare ?? pricing.totalFare;
+      promoContext = { promoId: dry.promoId, code: dry.code, discountAmount };
+      logger.info(
+        `[RIDE] Promo ${dry.code} applied: -₹${discountAmount} (₹${pricing.totalFare} → ₹${effectiveTotalFare})`,
+      );
+    } catch (err) {
+      if (err instanceof PromoInvalidError) {
+        throw err; // surfaced as 400 by the route
+      }
+      // Pricing service unreachable / 5xx → don't block the booking; skip discount.
+      logger.warn(`[RIDE] Promo redemption unavailable, booking without discount`, {
+        error: (err as Error).message,
+      });
+    }
+  }
+
   // Generate 4-digit OTP for ride verification
   const rideOtp = generateRideOtp();
   logger.info(`[RIDE] Generated OTP ${rideOtp} for new ride`);
@@ -364,7 +398,10 @@ export async function createRide(req: CreateRideRequest) {
       distanceFare: pricing.distanceFare,
       timeFare: pricing.timeFare,
       surgeMultiplier: pricing.surgeMultiplier,
-      totalFare: pricing.totalFare,
+      totalFare: effectiveTotalFare,
+      promoCode: promoContext?.code ?? null,
+      promoId: promoContext?.promoId ?? null,
+      discountAmount: promoContext?.discountAmount ?? 0,
       paymentMethod: req.paymentMethod,
       vehicleType: isRescue ? 'bike_rescue' : (req.vehicleType || null),
       scheduledAt: req.scheduledTime,
@@ -388,6 +425,25 @@ export async function createRide(req: CreateRideRequest) {
       stops: true,
     },
   });
+
+  // Record promo redemption now that the ride row exists (idempotent per ride).
+  // Non-blocking: the discount is already applied; a failure here only affects
+  // usage-limit accounting, so we log rather than fail the booking.
+  if (promoContext) {
+    try {
+      await httpRedeemPromo({
+        code: promoContext.code,
+        userId: req.passengerId,
+        rideId: ride.id,
+        fare: pricing.totalFare,
+        vehicleType: effectiveVehicleType,
+      });
+    } catch (err) {
+      logger.warn(`[RIDE] Failed to record promo usage for ride ${ride.id}`, {
+        error: (err as Error).message,
+      });
+    }
+  }
 
   // ─── Scheduled Ride: Enqueue for deferred dispatch, skip broadcast ──────
   if (isScheduled) {
@@ -418,7 +474,7 @@ export async function createRide(req: CreateRideRequest) {
       pickupAddress: req.pickupAddress,
       dropAddress: req.dropAddress,
       pickupH3: latLngToH3(req.pickupLat, req.pickupLng),
-      totalFare: pricing.totalFare,
+      totalFare: effectiveTotalFare,
       baseFare: pricing.baseFare,
       distanceFare: pricing.distanceFare,
       timeFare: pricing.timeFare,

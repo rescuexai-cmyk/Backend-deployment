@@ -109,6 +109,65 @@ export async function finalizeFare(body: {
   }, 'finalizeFare', MAX_RETRIES, true);
 }
 
+export interface PromoRedeemResult {
+  promoId: string;
+  code: string;
+  type: 'PERCENT' | 'FLAT' | 'CASHBACK';
+  recorded: boolean;
+  discount?: {
+    discountAmount: number;
+    discountType: 'PERCENT' | 'FLAT' | 'CASHBACK';
+    originalFare: number;
+    discountedFare: number;
+    cashbackAmount?: number;
+  };
+}
+
+/**
+ * Thrown when a user-supplied promo code is rejected by the pricing service
+ * (invalid / expired / limit reached). Booking should surface this as a 400.
+ */
+export class PromoInvalidError extends Error {
+  code = 'PROMO_INVALID';
+  constructor(message: string) {
+    super(message);
+    this.name = 'PromoInvalidError';
+  }
+}
+
+/**
+ * Validate + optionally record a promo redemption via the pricing service.
+ * - Omit rideId for a dry-run (validate + price only).
+ * - A 4xx from pricing means the code is genuinely invalid → PromoInvalidError.
+ * - Network/5xx failures are surfaced to the caller so it can decide (booking
+ *   treats those as "skip the discount" rather than blocking the ride).
+ */
+export async function redeemPromo(body: {
+  code: string;
+  userId: string;
+  rideId?: string;
+  fare?: number;
+  vehicleType?: string;
+  city?: string;
+}): Promise<PromoRedeemResult> {
+  try {
+    const { data } = await axios.post(`${PRICING_SERVICE_URL}/api/promo/redeem`, body, {
+      timeout: 5000,
+      headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+    });
+    return data.data as PromoRedeemResult;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      if (status && status >= 400 && status < 500) {
+        const message = (error.response?.data as any)?.message || 'Invalid promo code';
+        throw new PromoInvalidError(message);
+      }
+    }
+    throw error;
+  }
+}
+
 export async function getNearbyDrivers(lat: number, lng: number, radius: number = 5, vehicleType?: string) {
   return withRetry(async () => {
     const { data } = await axios.get(`${PRICING_SERVICE_URL}/api/pricing/nearby-drivers`, {

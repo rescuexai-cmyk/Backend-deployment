@@ -278,7 +278,12 @@ model Ride {
   waitingMinutes    Int       @default(0)   // Time driver waited at pickup (mins)
   parkingFees       Float     @default(0)   // Parking charges (₹)
   extraStopsCount   Int       @default(0)   // Additional stops beyond origin
-  discountPercent   Float     @default(0)   // Applied promo/coupon (0–100)
+  discountPercent   Float     @default(0)   // Post-ride manual/driver discount (0–100)
+
+  // Promo/coupon applied at booking time
+  promoCode         String?                 // e.g. "FIRST50"
+  promoId           String?                 // FK-ish reference to promos.id (loose, no relation)
+  discountAmount    Float     @default(0)   // ₹ discount already reflected in totalFare
   
   // Rating fields (per-ride rating)
   passengerRating   Int?      // 1-5 rating given by passenger to driver
