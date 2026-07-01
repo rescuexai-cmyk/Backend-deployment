@@ -7,6 +7,8 @@ import {
   normalizeVehicleType,
   getVehicleRank,
   isDriverCompatibleForRide,
+  acquireLock,
+  releaseLock,
 } from '@raahi/shared';
 import {
   calculateFare as httpCalculateFare,
@@ -782,9 +784,41 @@ export async function getUserRides(userId: string, page: number = 1, limit: numb
  * Uses a database transaction with optimistic locking to prevent double assignment.
  * @throws Error if ride is already assigned or not in PENDING status
  */
+// Statuses in which a driver is actively committed to a ride and must not be
+// assigned another one (reverse race: one driver accepting two rides at once).
+const ACTIVE_RIDE_STATUSES = ['DRIVER_ASSIGNED', 'CONFIRMED', 'DRIVER_ARRIVED', 'RIDE_STARTED'];
+
+// TTL for the accept claim lock. Only needs to outlive the DB transaction; kept
+// short so a crashed instance can't hold a ride hostage.
+const ACCEPT_LOCK_TTL_SECONDS = Number(process.env.ACCEPT_LOCK_TTL_SECONDS ?? 15);
+
 export async function assignDriver(rideId: string, driverId: string) {
-  // Use transaction with optimistic locking to prevent race conditions
-  const ride = await prisma.$transaction(async (tx) => {
+  // ── Layer 0: Redis atomic-claim gate (load-shedding) ──────────────────────
+  // Collapses N concurrent accepts of the same ride (and a single driver racing
+  // two rides) down to one attempt BEFORE hitting Postgres. This is a
+  // performance optimization only — it FAILS OPEN if Redis is down, because the
+  // Serializable transaction + conditional update below is the real source of
+  // truth for correctness.
+  const lockToken = `${driverId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const rideLockKey = `lock:ride-accept:${rideId}`;
+  const driverLockKey = `lock:driver-accept:${driverId}`;
+
+  if (!(await acquireLock(rideLockKey, ACCEPT_LOCK_TTL_SECONDS, lockToken))) {
+    const err: any = new Error('Ride is currently being accepted by another driver');
+    err.code = 'RIDE_BEING_ACCEPTED';
+    throw err;
+  }
+  if (!(await acquireLock(driverLockKey, ACCEPT_LOCK_TTL_SECONDS, lockToken))) {
+    await releaseLock(rideLockKey, lockToken);
+    const err: any = new Error('Driver is currently accepting another ride');
+    err.code = 'DRIVER_BUSY';
+    throw err;
+  }
+
+  let ride;
+  try {
+    // Use transaction with optimistic locking to prevent race conditions
+    ride = await prisma.$transaction(async (tx) => {
     // First, check the current state of the ride
     const currentRide = await tx.ride.findUnique({
       where: { id: rideId },
@@ -831,6 +865,24 @@ export async function assignDriver(rideId: string, driverId: string) {
       );
     }
 
+    // Driver-busy guard (reverse race): a driver must not hold two active rides
+    // simultaneously. Under Serializable isolation this predicate read + the
+    // update below make two concurrent accepts by the same driver conflict, so
+    // one is rolled back with 40001 rather than double-booking the driver.
+    const existingActiveRide = await tx.ride.findFirst({
+      where: {
+        driverId,
+        id: { not: rideId },
+        status: { in: ACTIVE_RIDE_STATUSES as any },
+      },
+      select: { id: true },
+    });
+    if (existingActiveRide) {
+      const err: any = new Error('Driver already has an active ride');
+      err.code = 'DRIVER_BUSY';
+      throw err;
+    }
+
     // Perform the atomic update with WHERE clause to ensure no concurrent modification
     // This uses optimistic locking - if another transaction modified the ride, this will fail
     const updatedRide = await tx.ride.update({
@@ -855,11 +907,17 @@ export async function assignDriver(rideId: string, driverId: string) {
     });
 
     return updatedRide;
-  }, {
-    // Set isolation level to prevent phantom reads
-    isolationLevel: 'Serializable',
-    timeout: 10000, // 10 second timeout
-  });
+    }, {
+      // Set isolation level to prevent phantom reads
+      isolationLevel: 'Serializable',
+      timeout: 10000, // 10 second timeout
+    });
+  } finally {
+    // Release the claim locks as soon as the critical section is over, before
+    // the slower broadcast/notification I/O below. The DB row is now the guard.
+    await releaseLock(driverLockKey, lockToken);
+    await releaseLock(rideLockKey, lockToken);
+  }
 
   logger.info(`Driver ${driverId} assigned to ride ${rideId}`);
 

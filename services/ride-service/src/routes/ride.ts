@@ -608,8 +608,43 @@ router.post('/:id/accept', authenticate, asyncHandler(async (req: AuthRequest, r
     console.log(`[RIDE_ACCEPT] ❌ FAILED: ${error.message}`);
     console.log(`[RIDE_ACCEPT] Error details:`, error);
     
-    // Handle race condition - ride already taken
-    if (error.message?.includes('already assigned') || error.message?.includes('already taken')) {
+    // Redis claim-gate contention: another accept for THIS ride is in flight.
+    // The ride may still be free once that attempt resolves, so tell the client
+    // to retry shortly rather than declaring it permanently taken.
+    if (error.code === 'RIDE_BEING_ACCEPTED') {
+      console.log(`[RIDE_ACCEPT] Claim gate busy - another accept in flight for ride ${rideId}`);
+      res.status(409).json({
+        success: false,
+        message: 'This ride is being accepted by another driver. Please try again.',
+        code: 'RIDE_BEING_ACCEPTED',
+        retryable: true,
+      });
+      return;
+    }
+
+    // Driver-busy guard: this driver is already committed to an active ride
+    // (or racing another accept of their own).
+    if (error.code === 'DRIVER_BUSY' || error.message?.includes('Driver already has an active ride')) {
+      console.log(`[RIDE_ACCEPT] Driver ${driver.id} is busy with another ride`);
+      res.status(409).json({
+        success: false,
+        message: 'You already have an active ride. Complete it before accepting another.',
+        code: 'DRIVER_BUSY',
+      });
+      return;
+    }
+
+    // Handle race condition - ride already taken.
+    // Covers: explicit messages, the optimistic-lock CAS miss (Prisma P2025),
+    // and Serializable write conflicts (Prisma P2034 / Postgres 40001).
+    if (
+      error.message?.includes('already assigned') ||
+      error.message?.includes('already taken') ||
+      error.code === 'P2025' ||
+      error.code === 'P2034' ||
+      error.message?.includes('could not serialize') ||
+      error.message?.includes('write conflict')
+    ) {
       console.log(`[RIDE_ACCEPT] Race condition detected - ride was taken by another driver`);
       res.status(409).json({ 
         success: false, 

@@ -352,6 +352,51 @@ export async function ttl(key: string): Promise<number> {
   }
 }
 
+// ─── Distributed Locks (SET NX) ──────────────────────────────────────────────
+
+/**
+ * Try to acquire a short-lived distributed lock using `SET key token NX EX ttl`.
+ *
+ * FAIL-OPEN: if Redis is unavailable, this returns `true` (lock "acquired") so
+ * that critical flows (e.g. ride acceptance) are never blocked by a Redis
+ * outage. Callers MUST still enforce correctness at the database layer (the
+ * Redis lock is a load-shedding optimization, not the source of truth).
+ *
+ * @returns true if the lock was acquired (or Redis is down), false if already held.
+ */
+export async function acquireLock(key: string, ttlSeconds: number, token: string): Promise<boolean> {
+  const client = getRedisClient();
+  if (!client) return true; // fail-open
+
+  try {
+    const result = await client.set(key, token, 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  } catch (err) {
+    logger.error(`[REDIS] acquireLock failed for ${key}`, { error: err });
+    return true; // fail-open on error
+  }
+}
+
+/**
+ * Release a lock previously taken with acquireLock, but only if we still own it
+ * (compare-and-delete via Lua so we never delete someone else's lock).
+ */
+export async function releaseLock(key: string, token: string): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+
+  try {
+    // ioredis keyPrefix is NOT applied to eval KEYS, so prepend it manually to
+    // match the key written by acquireLock (client.set auto-prefixes).
+    const prefix = client.options?.keyPrefix || '';
+    const script =
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+    await client.eval(script, 1, prefix + key, token);
+  } catch (err) {
+    logger.error(`[REDIS] releaseLock failed for ${key}`, { error: err });
+  }
+}
+
 /**
  * Publish to a channel (for pub/sub)
  */
