@@ -372,8 +372,9 @@ services:
       - gateway
       - realtime-service
     healthcheck:
-      # nginx:alpine has no curl; use busybox wget which is always present.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/health || exit 1"]
+      # nginx:alpine has no curl; use busybox wget. Use 127.0.0.1 (not localhost)
+      # because localhost resolves to ::1 first and nginx only binds IPv4.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
