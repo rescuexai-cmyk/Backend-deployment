@@ -138,6 +138,11 @@ async function processVerificationJob(job: Job<VerificationJobData>): Promise<vo
 }
 
 async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
+  const driver = await prisma.driver.findUnique({
+    where: { id: driverId },
+    select: { vehicleType: true },
+  });
+
   const allDocs = await prisma.driverDocument.findMany({
     where: { driverId },
     select: {
@@ -148,7 +153,7 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
     },
   });
   
-  const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType));
+  const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType), driver?.vehicleType);
   const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
   
   if (docCheck.isComplete && allVerified) {

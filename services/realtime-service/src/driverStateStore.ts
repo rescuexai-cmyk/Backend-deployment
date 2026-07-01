@@ -15,60 +15,10 @@
 
 import { createLogger, getRedisClient, isRedisAvailable } from '@raahi/shared';
 import { latLngToH3, getKRing, getH3Config } from '@raahi/shared';
+import { isDriverCompatibleForRide } from '@raahi/shared';
 import { eventBus, CHANNELS } from './eventBus';
 
 const logger = createLogger('driver-state-store');
-
-// ─── Vehicle Type Normalization ───────────────────────────────────────────────
-
-function normalizeVehicleCategory(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase().trim().replace(/-/g, '_');
-  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
-  if (value === 'auto') return 'auto';
-  if (
-    [
-      'cab',
-      'cab_mini',
-      'cab_sedan',
-      'cab_xl',
-      'cab_suv',
-      'cab_premium',
-      'personal_driver',
-      'commercial_car',
-    ].includes(value)
-  ) {
-    return 'cab';
-  }
-  return null;
-}
-
-function isVehicleCompatible(
-  rideVehicleType: string | null | undefined,
-  driverVehicleType: string | null | undefined,
-): boolean {
-  const rideCategory = normalizeVehicleCategory(rideVehicleType);
-  if (!rideCategory) return true; // Unknown ride type: keep legacy behavior
-  const driverCategory = normalizeVehicleCategory(driverVehicleType);
-  if (!driverCategory) return false; // Unknown driver type should not receive typed ride
-
-  // Non-cab categories: strict match (bike, auto unchanged)
-  if (rideCategory !== 'cab' || driverCategory !== 'cab') {
-    return rideCategory === driverCategory;
-  }
-
-  // Cab category: downward-compatible — driver rank must be >= ride request rank
-  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
-}
-
-function getVehicleRank(vehicleType: string | null | undefined): number {
-  if (!vehicleType) return 0;
-  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
-  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
-  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
-  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
-  return 0;
-}
 
 // ─── Redis Keys ───────────────────────────────────────────────────────────────
 
@@ -104,6 +54,7 @@ export interface DriverState {
   vehicleNumber: string | null;
   vehicleModel: string | null;
   vehicleType: string | null;
+  serviceTypes: string[];
   rating: number;
   ratingCount: number;
   totalRides: number;
@@ -220,6 +171,7 @@ class DriverStateStoreImpl {
     vehicleNumber: string | null;
     vehicleModel: string | null;
     vehicleType: string | null;
+    serviceTypes?: string[] | null;
     rating: number;
     ratingCount: number;
     totalRides: number;
@@ -245,6 +197,7 @@ class DriverStateStoreImpl {
       vehicleNumber: driver.vehicleNumber,
       vehicleModel: driver.vehicleModel,
       vehicleType: driver.vehicleType,
+      serviceTypes: driver.serviceTypes ?? [],
       rating: driver.rating,
       ratingCount: driver.ratingCount,
       totalRides: driver.totalRides,
@@ -523,7 +476,7 @@ class DriverStateStoreImpl {
         if (!d.isOnline || !d.isActive) return false;
         if (!d.lat || !d.lng) return false;
         if (d.lastActiveAt < heartbeatThreshold) return false;
-        if (vehicleType && !isVehicleCompatible(vehicleType, d.vehicleType)) return false;
+        if (vehicleType && !isDriverCompatibleForRide(vehicleType, d.vehicleType, d.serviceTypes)) return false;
         return true;
       })
       .map(d => ({
@@ -664,6 +617,7 @@ class DriverStateStoreImpl {
     vehicleNumber: string | null;
     vehicleModel: string | null;
     vehicleType: string | null;
+    serviceTypes?: string[] | null;
     rating: number;
     ratingCount: number;
     totalRides: number;
@@ -693,6 +647,7 @@ class DriverStateStoreImpl {
         vehicleNumber: d.vehicleNumber,
         vehicleModel: d.vehicleModel,
         vehicleType: d.vehicleType,
+        serviceTypes: d.serviceTypes ?? [],
         rating: d.rating,
         ratingCount: d.ratingCount,
         totalRides: d.totalRides,

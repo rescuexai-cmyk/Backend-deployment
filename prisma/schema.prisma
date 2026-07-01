@@ -22,6 +22,8 @@ model User {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   lastLoginAt       DateTime?
+  deletedAt         DateTime? // Set when user requests account deletion (soft-delete)
+  deletionReason    String?   // Optional reason captured from the user at deletion time
   
   // Firebase Auth integration
   firebaseUid       String?   @unique  // Firebase user UID for phone auth
@@ -720,6 +722,7 @@ enum PaymentMethod {
   CARD
   UPI
   WALLET
+  SCAN_TO_PAY
 }
 
 enum PaymentStatus {
@@ -1164,3 +1167,48 @@ enum RescueStatus {
   COMPLETED
   CANCELLED
 }
+
+model CrossZoneRule {
+  id          String   @id @default(uuid())
+  origin      String   // Zone code (e.g., "delhi") — resolved via geofence, falls back to city
+  destination String   // Zone code (e.g., "noida")
+  vehicleType String   // e.g., "auto"
+  isAllowed   Boolean  @default(true)
+  reason      String?  // Optional explanation of the block (e.g., "No permit to cross state border")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([origin, destination, vehicleType])
+  @@index([origin, destination])
+  @@map("cross_zone_rules")
+}
+
+/// Operational zone (city / state / custom service area) used for permit rules,
+/// surge zones, and geofenced restrictions. Geometry is stored as an H3 cell set
+/// (see ZoneCell) for fast, deterministic point-in-zone lookups without PostGIS.
+model Zone {
+  id        String     @id @default(uuid())
+  code      String     @unique // Stable slug, e.g. "delhi", "noida", "igi_airport"
+  name      String
+  type      String     @default("city") // city | state | airport | custom
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  cells     ZoneCell[]
+
+  @@index([isActive])
+  @@map("zones")
+}
+
+/// A single H3 cell belonging to a zone. h3Index is unique so any location
+/// deterministically resolves to at most one zone.
+model ZoneCell {
+  id       String @id @default(uuid())
+  zoneId   String
+  h3Index  String @unique // H3 index at ZONE_H3_RESOLUTION
+  zone     Zone   @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@index([zoneId])
+  @@map("zone_cells")
+}
+

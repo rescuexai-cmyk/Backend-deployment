@@ -7,7 +7,7 @@ import { connectDatabase, authenticate, authenticateDriver, AuthRequest, setupSw
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger, latLngToH3 } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
-import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments } from '@raahi/shared';
+import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments, getRequiredDocuments, INDEPENDENT_DRIVER_VEHICLE_TYPE } from '@raahi/shared';
 import { OnboardingStatus, PenaltyStatus, DocumentType } from '@prisma/client';
 import * as DigiLocker from './digilocker';
 import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument } from './storage';
@@ -1632,6 +1632,72 @@ app.put(
 
 /**
  * @openapi
+ * /api/driver/onboarding/categories:
+ *   get:
+ *     tags: [Onboarding]
+ *     summary: Get available driver categories
+ *     description: Returns all driver registration categories with descriptions, service types, and required documents. Use this to power the category selection screen in the app.
+ *     responses:
+ *       200:
+ *         description: List of available driver categories
+ */
+app.get('/api/driver/onboarding/categories', asyncHandler(async (_req, res) => {
+  res.json({
+    success: true,
+    data: {
+      categories: [
+        {
+          id: 'bike',
+          label: 'Bike Rider',
+          description: 'Deliver rides on your own two-wheeler. Perfect for quick city trips and bike rescue.',
+          icon: 'bike',
+          vehicle_required: true,
+          service_types: ['bike_rescue', 'raahi_driver'],
+          required_documents: [...REQUIRED_DOCUMENTS],
+          example_vehicle_types: ['bike', 'motorbike'],
+        },
+        {
+          id: 'auto',
+          label: 'Auto Driver',
+          description: 'Drive passengers in your auto-rickshaw across the city.',
+          icon: 'auto',
+          vehicle_required: true,
+          service_types: ['raahi_driver'],
+          required_documents: [...REQUIRED_DOCUMENTS],
+          example_vehicle_types: ['auto'],
+        },
+        {
+          id: 'cab',
+          label: 'Cab Driver',
+          description: 'Drive passengers in your own cab — mini, sedan, XL, or premium.',
+          icon: 'cab',
+          vehicle_required: true,
+          service_types: ['raahi_driver'],
+          required_documents: [...REQUIRED_DOCUMENTS],
+          example_vehicle_types: ['cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium'],
+        },
+        {
+          id: INDEPENDENT_DRIVER_VEHICLE_TYPE,
+          label: 'Independent Driver',
+          description: 'No vehicle? No problem. Register as a professional driver available for hiring — drive the client\'s car or assist in rescue operations. No RC or Insurance required.',
+          icon: 'person_car',
+          vehicle_required: false,
+          service_types: ['personal_driver', 'bike_rescue'],
+          required_documents: ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'PROFILE_PHOTO'],
+          example_vehicle_types: [],
+          highlights: [
+            'Be hired as a personal/chauffeur driver',
+            'Assist in bike rescue & roadside emergencies',
+            'No vehicle ownership needed',
+          ],
+        },
+      ],
+    },
+  });
+}));
+
+/**
+ * @openapi
  * /api/driver/onboarding/start:
  *   post:
  *     tags: [Onboarding]
@@ -1718,14 +1784,18 @@ app.put('/api/driver/onboarding/language', authenticate, [body('language').notEm
 }));
 
 /**
- * Step 3: Vehicle type selection + referral code
+ * Step 3: Vehicle type / driver category selection + referral code
+ *
+ * Accepted vehicleType values:
+ *   Standard: bike, auto, cab_mini, cab_sedan, cab_xl, cab_suv, cab_premium
+ *   Special:  independent_driver  — no vehicle ownership required
  */
 app.put(
   '/api/driver/onboarding/vehicle',
   authenticate,
   [
     body('vehicleType').notEmpty().withMessage('Vehicle type is required'),
-    body('serviceTypes').isArray().withMessage('Service types must be an array'),
+    body('serviceTypes').optional().isArray(),
     body('referralCode').optional().isString(),
   ],
   asyncHandler(async (req: AuthRequest, res) => {
@@ -1734,9 +1804,18 @@ app.put(
       res.status(400).json({ success: false, errors: errors.array() });
       return;
     }
-    
-    const { vehicleType, serviceTypes, referralCode } = req.body;
-    
+
+    const { vehicleType, referralCode } = req.body;
+    const isIndependent = vehicleType === INDEPENDENT_DRIVER_VEHICLE_TYPE;
+
+    // For independent drivers, auto-set serviceTypes if caller didn't override
+    const serviceTypes: string[] =
+      req.body.serviceTypes && req.body.serviceTypes.length > 0
+        ? req.body.serviceTypes
+        : isIndependent
+          ? ['personal_driver', 'bike_rescue']
+          : [];
+
     const driver = await prisma.driver.update({
       where: { userId: req.user!.id },
       data: {
@@ -1746,15 +1825,21 @@ app.put(
         onboardingStatus: OnboardingStatus.LICENSE_UPLOAD,
       },
     });
-    
+
     res.json({
       success: true,
-      message: 'Vehicle information saved',
+      message: isIndependent
+        ? 'Registered as Independent Driver. No vehicle documents (RC/Insurance) required.'
+        : 'Vehicle information saved',
       data: {
         driver_id: driver.id,
+        driver_category: isIndependent ? 'independent_driver' : 'vehicle_owner',
         vehicle_type: driver.vehicleType,
         service_types: driver.serviceTypes,
         referral_code: driver.referralCode,
+        required_documents: isIndependent
+          ? ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'PROFILE_PHOTO']
+          : [...REQUIRED_DOCUMENTS],
         next_step: 'LICENSE_UPLOAD',
       },
     });
@@ -1808,7 +1893,11 @@ app.put(
     }
     
     // Check if vehicle registration is already registered
-    if (vehicleRegistrationNumber) {
+    // Skip for independent drivers — they don't own a vehicle
+    const currentDriver = await prisma.driver.findFirst({ where: { userId: req.user!.id }, select: { vehicleType: true } });
+    const isIndependentDriver = currentDriver?.vehicleType === INDEPENDENT_DRIVER_VEHICLE_TYPE;
+
+    if (vehicleRegistrationNumber && !isIndependentDriver) {
       const existingVehicle = await prisma.driver.findFirst({
         where: { vehicleNumber: vehicleRegistrationNumber, userId: { not: req.user!.id } },
       });
@@ -1816,6 +1905,11 @@ app.put(
         res.status(409).json({ success: false, message: 'Vehicle registration number is already registered' });
         return;
       }
+    }
+
+    // Independent drivers: do not persist vehicle fields
+    if (isIndependentDriver && vehicleRegistrationNumber) {
+      logger.info(`[ONBOARDING] Independent driver ${req.user!.id} — ignoring vehicleRegistrationNumber`);
     }
     
     // Update user's name if provided
@@ -1834,10 +1928,13 @@ app.put(
     const updateData: any = {};
     if (aadhaarNumber) updateData.aadhaarNumber = aadhaarNumber;
     if (panNumber) updateData.panNumber = panNumber.toUpperCase();
-    if (vehicleRegistrationNumber) updateData.vehicleNumber = vehicleRegistrationNumber.toUpperCase();
-    if (vehicleModel) updateData.vehicleModel = vehicleModel;
-    if (vehicleColor) updateData.vehicleColor = vehicleColor;
-    if (vehicleYear) updateData.vehicleYear = vehicleYear;
+    // Vehicle-ownership fields: skip entirely for independent drivers
+    if (!isIndependentDriver) {
+      if (vehicleRegistrationNumber) updateData.vehicleNumber = vehicleRegistrationNumber.toUpperCase();
+      if (vehicleModel) updateData.vehicleModel = vehicleModel;
+      if (vehicleColor) updateData.vehicleColor = vehicleColor;
+      if (vehicleYear) updateData.vehicleYear = vehicleYear;
+    }
     updateData.onboardingStatus = OnboardingStatus.DOCUMENT_UPLOAD;
     
     const driver = await prisma.driver.update({
@@ -1881,11 +1978,16 @@ const preUploadMiddleware = asyncHandler(async (req: AuthRequest, res, next) => 
   }
   
   const docType = documentType.toUpperCase();
-  if (!REQUIRED_DOCUMENTS.includes(docType as any)) {
+  // Determine valid doc types based on driver category
+  const driverForDocCheck = await prisma.driver.findFirst({ where: { userId: req.user!.id }, select: { vehicleType: true } });
+  const validDocTypes = getRequiredDocuments(driverForDocCheck?.vehicleType) as readonly string[];
+  // Always allow PROFILE_PHOTO regardless of category
+  const allValidTypes = [...new Set([...validDocTypes, 'PROFILE_PHOTO'])];
+  if (!allValidTypes.includes(docType)) {
     res.status(400).json({ 
       success: false, 
       message: `Invalid document type: ${docType}`,
-      validTypes: REQUIRED_DOCUMENTS,
+      validTypes: allValidTypes,
     });
     return;
   }
@@ -2009,7 +2111,7 @@ const handleDriverDocumentUpload = asyncHandler(async (req: AuthRequest, res: ex
         where: { driverId },
         select: { documentType: true, isVerified: true },
       });
-      const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType));
+      const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType), driver?.vehicleType);
       const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
       
       if (docCheck.isComplete && allVerified) {
@@ -2152,9 +2254,11 @@ app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(a
     return;
   }
   const uploaded = driver.documents.map((d) => d.documentType);
-  const docCheck = checkRequiredDocuments(uploaded);
+  // Use per-category document requirements (independent drivers skip RC & Insurance)
+  const docCheck = checkRequiredDocuments(uploaded, driver.vehicleType);
+  const requiredForCategory = [...getRequiredDocuments(driver.vehicleType)];
   if (!docCheck.isComplete) {
-    res.status(400).json({ success: false, message: 'Missing required documents', data: { missing_documents: docCheck.missing, required_documents: [...REQUIRED_DOCUMENTS] } });
+    res.status(400).json({ success: false, message: 'Missing required documents', data: { missing_documents: docCheck.missing, required_documents: requiredForCategory } });
     return;
   }
 
@@ -2285,12 +2389,15 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   const verifiedDocs = driver.documents.filter((d) => d.isVerified);
   const flaggedDocs = driver.documents.filter((d) => !d.isVerified && (d.verificationStatus === 'flagged' || d.verificationStatus === 'failed'));
   const pendingDocs = driver.documents.filter((d) => !d.isVerified && d.verificationStatus !== 'flagged' && d.verificationStatus !== 'failed');
-  
-  // Calculate verification progress percentage using shared constants
-  const requiredDocs = [...REQUIRED_DOCUMENTS];
+
+  const isIndependentDriver = driver.vehicleType === INDEPENDENT_DRIVER_VEHICLE_TYPE;
+  const driverCategory = isIndependentDriver ? 'independent_driver' : 'vehicle_owner';
+
+  // Calculate verification progress using per-category required documents
+  const requiredDocs = [...getRequiredDocuments(driver.vehicleType)];
   const uploadedDocTypes = driver.documents.map(d => d.documentType);
   const verifiedDocTypes = verifiedDocs.map(d => d.documentType);
-  
+
   const totalSteps = requiredDocs.length + 2; // +2 for aadhaar and pan verification
   let completedSteps = verifiedDocTypes.length;
   if (driver.aadhaarVerified) completedSteps++;
@@ -2305,7 +2412,10 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
       current_step: driver.onboardingStatus,
       is_verified: driver.isVerified,
       is_onboarding_complete: driver.onboardingStatus === OnboardingStatus.COMPLETED,
-      
+      // Driver category
+      driver_category: driverCategory,
+      vehicle_required: !isIndependentDriver,
+      service_types: driver.serviceTypes,
       // Personal info
       full_name: `${driver.user.firstName} ${driver.user.lastName || ''}`.trim(),
       email: driver.user.email,

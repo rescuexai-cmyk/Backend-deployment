@@ -26,6 +26,10 @@ export const errorHandler = (
   });
 
   // Handle standard error types
+  if (error.name === 'CrossZoneBlockedError') {
+    statusCode = 422;
+    errorCode = 'CROSS_ZONE_VEHICLE_BLOCKED';
+  }
   if (error.name === 'ValidationError') statusCode = 400;
   if (error.name === 'CastError') statusCode = 400;
   if (error.name === 'JsonWebTokenError') statusCode = 401;

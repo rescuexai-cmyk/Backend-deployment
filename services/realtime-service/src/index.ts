@@ -7,6 +7,7 @@ import { connectDatabase, authenticate, AuthRequest, errorHandler, notFound, asy
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, COMPLETED_ONBOARDING_STATUS, latLngToH3 } from '@raahi/shared';
+import { isDriverCompatibleForRide } from '@raahi/shared';
 import {
   setIo,
   setDriverMaps,
@@ -176,6 +177,7 @@ io.on('connection', (socket) => {
         currentLongitude: true,
         h3Index: true,
         vehicleType: true,
+        serviceTypes: true,
         vehicleNumber: true,
         vehicleModel: true,
         rating: true,
@@ -301,6 +303,7 @@ io.on('connection', (socket) => {
         vehicleNumber: dbDriver.vehicleNumber ?? null,
         vehicleModel: dbDriver.vehicleModel ?? null,
         vehicleType: dbDriver.vehicleType ?? null,
+        serviceTypes: dbDriver.serviceTypes ?? [],
         rating: dbDriver.rating ?? 0,
         ratingCount: dbDriver.ratingCount ?? 0,
         totalRides: dbDriver.totalRides ?? 0,
@@ -1366,6 +1369,7 @@ async function ensureDriverInRamen(inputId: string) {
       currentLongitude: true,
       h3Index: true,
       vehicleType: true,
+      serviceTypes: true,
       vehicleNumber: true,
       vehicleModel: true,
       rating: true,
@@ -1407,6 +1411,7 @@ async function ensureDriverInRamen(inputId: string) {
       vehicleNumber: dbDriver.vehicleNumber ?? null,
       vehicleModel: dbDriver.vehicleModel ?? null,
       vehicleType: dbDriver.vehicleType ?? null,
+      serviceTypes: dbDriver.serviceTypes ?? [],
       rating: dbDriver.rating ?? 0,
       ratingCount: dbDriver.ratingCount ?? 0,
       totalRides: dbDriver.totalRides ?? 0,
@@ -1445,38 +1450,11 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
     
     // CRITICAL: Apply vehicle type filter with downward-compatible dispatch.
     // Cab requests include higher-tier cab drivers (Premium can accept Mini).
+    // Independent drivers are matched via their serviceTypes.
     if (vehicleType) {
-      const normalizeCategory = (raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null => {
-        if (!raw) return null;
-        const v = raw.toLowerCase().trim().replace(/-/g, '_');
-        if (['bike', 'bike_rescue', 'motorbike'].includes(v)) return 'bike';
-        if (v === 'auto') return 'auto';
-        if (['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'].includes(v)) return 'cab';
-        return null;
-      };
-      const getRank = (raw: string | null | undefined): number => {
-        if (!raw) return 0;
-        const v = raw.toLowerCase().trim().replace(/-/g, '_');
-        if (['cab_premium', 'personal_driver'].includes(v)) return 3;
-        if (['cab_xl', 'cab_suv'].includes(v)) return 2;
-        if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
-        return 0;
-      };
-      const rideCategory = normalizeCategory(vehicleType);
-      if (rideCategory) {
-        if (rideCategory === 'cab') {
-          // Downward-compatible: include drivers with rank >= ride rank
-          const rideRank = getRank(vehicleType);
-          allOnline = allOnline.filter((d) => {
-            const driverCategory = normalizeCategory(d.vehicleType);
-            if (driverCategory !== 'cab') return false;
-            return getRank(d.vehicleType) >= rideRank;
-          });
-        } else {
-          // Non-cab: strict category match
-          allOnline = allOnline.filter((d) => normalizeCategory(d.vehicleType) === rideCategory);
-        }
-      }
+      allOnline = allOnline.filter((d) =>
+        isDriverCompatibleForRide(vehicleType, d.vehicleType, d.serviceTypes),
+      );
     }
     
     drivers = allOnline;
@@ -1497,6 +1475,7 @@ app.get('/internal/nearby-drivers', authenticateInternal, asyncHandler(async (re
         h3Index: d.h3Index,
         distance: d.lat && d.lng ? undefined : null, // Calculated by caller
         vehicleType: d.vehicleType,
+        serviceTypes: d.serviceTypes,
         vehicleNumber: d.vehicleNumber,
         vehicleModel: d.vehicleModel,
         rating: d.rating,

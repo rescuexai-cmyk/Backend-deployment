@@ -13,6 +13,10 @@ import {
   createMatchingLog,
   logMatchingProcess,
   estimateKRingRadiusKm,
+  assertVehicleAllowedForCoordinates,
+  getBlockedVehicleTypesForCoordinates,
+  isDriverEligibleForVehicleType,
+  getNearbyDriverVehicleTypeFilter,
 } from '@raahi/shared';
 import {
   calculateBaseFare,
@@ -292,6 +296,15 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
   }
 
   const vehicle = (vehicleType || 'cab_mini').toLowerCase();
+
+  await assertVehicleAllowedForCoordinates({
+    pickupLat,
+    pickupLng,
+    dropLat,
+    dropLng,
+    vehicleType: vehicle,
+  });
+
   const date = scheduledTime ? new Date(scheduledTime) : new Date();
 
   // Get city from pickup coordinates for per-city pricing
@@ -437,6 +450,12 @@ const ALL_VEHICLE_TYPES = [
   'personal_driver',
 ];
 
+/**
+ * Checks if a driver's vehicle type makes them eligible to accept a request of the specified vehicle type.
+ * Follows the downward-compatible dispatch ranking logic of the platform.
+ */
+export { isDriverEligibleForVehicleType } from '@raahi/shared';
+
 export async function calculateAllFares(
   pickupLat: number,
   pickupLng: number,
@@ -445,8 +464,44 @@ export async function calculateAllFares(
   scheduledTime?: Date,
   stops?: Array<{ lat: number; lng: number; address?: string }>
 ): Promise<Record<string, EstimateResponse>> {
+  // 1. Resolve origin/destination zones (H3 geofence, falls back to city) and
+  //    fetch permit rules blocking specific vehicle types for this route.
+  const { origin: pickupZone, destination: dropZone, blocked: blockedTypes } =
+    await getBlockedVehicleTypesForCoordinates(pickupLat, pickupLng, dropLat, dropLng);
+
+  logger.info(`[PRICING-ALL] Route: origin=${pickupZone} (${pickupLat},${pickupLng}) -> destination=${dropZone} (${dropLat},${dropLng})`);
+
+  // Filter allowed vehicle types
+  const allowedVehicleTypes = ALL_VEHICLE_TYPES.filter(vt => !blockedTypes.has(vt.toLowerCase()));
+  logger.info(`[PRICING-ALL] Blocked: ${[...blockedTypes].join(', ')} | Allowed: ${allowedVehicleTypes.join(', ')}`);
+
+  // 3. Query nearby online/active drivers within a 10km radius
+  let activeVehicleTypes = allowedVehicleTypes;
+  try {
+    const nearbyDrivers = await getNearbyDrivers(pickupLat, pickupLng, 10);
+    logger.info(`[PRICING-ALL] Found ${nearbyDrivers.length} online drivers within 10km radius`);
+
+    // Map allowed vehicle types to whether they have matching/eligible online drivers nearby
+    const supplyFiltered = allowedVehicleTypes.filter(vt =>
+      nearbyDrivers.some(driver =>
+        isDriverEligibleForVehicleType(driver.vehicleType, vt, driver.serviceTypes),
+      ),
+    );
+
+    // Fallback: If no drivers are online at all, return all allowed vehicles so user can still see estimates
+    if (supplyFiltered.length > 0) {
+      activeVehicleTypes = supplyFiltered;
+      logger.info(`[PRICING-ALL] Filtered by active supply: ${activeVehicleTypes.join(', ')}`);
+    } else {
+      logger.info(`[PRICING-ALL] No supply found near pickup. Falling back to all allowed types: ${activeVehicleTypes.join(', ')}`);
+    }
+  } catch (error) {
+    logger.error(`[PRICING-ALL] Failed to filter by active supply (H3): ${error}`);
+  }
+
+  // 4. Calculate fares only for the allowed & available vehicle types
   const results: Record<string, EstimateResponse> = {};
-  for (const vt of ALL_VEHICLE_TYPES) {
+  for (const vt of activeVehicleTypes) {
     results[vt] = await calculateFare({
       pickupLat,
       pickupLng,
@@ -609,40 +664,7 @@ export async function getNearbyDrivers(
 
     if (!isDev) whereClause.isVerified = true;
     if (vehicleType) {
-      // Downward-compatible dispatch for cab types:
-      // A cab_mini request includes cab_mini, cab_xl, and cab_premium drivers.
-      // A cab_premium request only includes cab_premium drivers.
-      // Bike/auto remain strictly isolated.
-      const bikeTypes = ['bike', 'bike_rescue', 'motorbike'];
-      const autoTypes = ['auto'];
-      
-      // Cab types grouped by rank (higher rank can accept lower rank requests)
-      const cabRank1 = ['cab', 'cab_mini', 'cab_sedan', 'commercial_car'];
-      const cabRank2 = ['cab_xl', 'cab_suv'];
-      const cabRank3 = ['cab_premium', 'personal_driver'];
-      const allCabTypes = [...cabRank1, ...cabRank2, ...cabRank3];
-      
-      const vt = vehicleType.toLowerCase().trim().replace(/-/g, '_');
-      let matchTypes: string[];
-      if (bikeTypes.includes(vt)) {
-        matchTypes = bikeTypes;
-      } else if (autoTypes.includes(vt)) {
-        matchTypes = autoTypes;
-      } else if (allCabTypes.includes(vt)) {
-        // Determine the ride's rank and include all drivers with rank >= ride rank
-        if (cabRank3.includes(vt)) {
-          // Premium request: only premium drivers
-          matchTypes = cabRank3;
-        } else if (cabRank2.includes(vt)) {
-          // XL request: XL + Premium drivers
-          matchTypes = [...cabRank2, ...cabRank3];
-        } else {
-          // Mini/Standard request: all cab drivers (Mini + XL + Premium)
-          matchTypes = allCabTypes;
-        }
-      } else {
-        matchTypes = [vehicleType]; // Unknown type: exact match fallback
-      }
+      const matchTypes = getNearbyDriverVehicleTypeFilter(vehicleType);
       whereClause.vehicleType = { in: matchTypes };
     }
 
@@ -660,6 +682,11 @@ export async function getNearbyDrivers(
         h3Index: d.h3Index,
       }))
       .filter((d) => d.distance <= radiusKm)
+      .filter((d) =>
+        vehicleType
+          ? isDriverEligibleForVehicleType(d.vehicleType || '', vehicleType, d.serviceTypes)
+          : true,
+      )
       .sort((a, b) => a.distance - b.distance);
 
     iterations.push({ k, cellCount: searchCells.length, driversFound: driversWithDistance.length });

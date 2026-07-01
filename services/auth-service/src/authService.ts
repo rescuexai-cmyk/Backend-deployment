@@ -622,3 +622,94 @@ export async function updateUserProfile(
     throw error;
   }
 }
+
+// ─── Account Deletion ────────────────────────────────────────────────────
+
+export class ActiveRideError extends Error {
+  constructor() {
+    super('Cannot delete account while a ride is in progress. Please complete or cancel your current ride first.');
+    this.name = 'ActiveRideError';
+  }
+}
+
+/**
+ * Industry-standard account deletion (Uber/Ola/Rapido model).
+ *
+ * Immediate effects:
+ *   1. Blocks if user has an active ride (PENDING → IN_PROGRESS)
+ *   2. Revokes all refresh tokens (app is logged out)
+ *   3. Anonymizes all PII (phone, email, name, profile image, FCM token)
+ *   4. Marks account as deleted (soft-delete via deletedAt)
+ *   5. Revokes Firebase UID (best-effort, non-blocking)
+ *
+ * Deferred:
+ *   - Past rides are retained for driver earnings + regulatory records
+ *     (passenger name shows as "Deleted User" in ride history)
+ *   - A separate cron job can hard-delete after 30 days using deletedAt
+ */
+export async function deleteAccount(userId: string, reason?: string): Promise<void> {
+  logger.info(`[AUTH] Account deletion requested for user: ${userId}`);
+
+  // 1. Guard: block deletion if an active ride exists
+  const activeRide = await prisma.ride.findFirst({
+    where: {
+      passengerId: userId,
+      status: { in: ['PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED', 'DRIVER_ARRIVED', 'RIDE_STARTED'] },
+    },
+    select: { id: true, status: true },
+  });
+
+  if (activeRide) {
+    logger.warn(`[AUTH] Deletion blocked — active ride ${activeRide.id} (${activeRide.status}) for user ${userId}`);
+    throw new ActiveRideError();
+  }
+
+  // 2. Fetch firebaseUid before we wipe it
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, firebaseUid: true, phone: true },
+  });
+
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  // 3. Atomically revoke tokens + anonymize PII + soft-delete
+  await prisma.$transaction(async (tx) => {
+    // Invalidate all refresh tokens (forces logout on all devices)
+    await tx.refreshToken.deleteMany({ where: { userId } });
+
+    // Anonymize PII — phone is made unique so it can't conflict with a future signup
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        // Anonymise identifying fields
+        phone: `deleted_${userId}`,
+        email: null,
+        firstName: 'Deleted',
+        lastName: null,
+        profileImage: null,
+        fcmToken: null,
+        fcmTokenUpdatedAt: null,
+        firebaseUid: null,
+        // Deactivate & mark as deleted (soft-delete)
+        isActive: false,
+        deletedAt: new Date(),
+        deletionReason: reason ?? null,
+        updatedAt: new Date(),
+      },
+    });
+  });
+
+  logger.info(`[AUTH] Account soft-deleted and PII anonymized for user: ${userId}`);
+
+  // 4. Revoke Firebase account (best-effort — non-blocking)
+  if (user.firebaseUid) {
+    FirebaseAuth.deleteFirebaseUser(user.firebaseUid).catch((err) => {
+      logger.warn(`[AUTH] Firebase deletion failed for uid ${user.firebaseUid}: ${err?.message}`);
+    });
+  }
+
+  logger.info(`[AUTH] Account deletion complete for user: ${userId}`);
+}
+

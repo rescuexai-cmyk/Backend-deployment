@@ -1,6 +1,13 @@
 import { getDistance } from 'geolib';
 import { prisma } from '@raahi/shared';
-import { createLogger, canDriverStartRides } from '@raahi/shared';
+import {
+  createLogger,
+  canDriverStartRides,
+  assertVehicleAllowedForCoordinates,
+  normalizeVehicleType,
+  getVehicleRank,
+  isDriverCompatibleForRide,
+} from '@raahi/shared';
 import {
   calculateFare as httpCalculateFare,
   finalizeFare as httpFinalizeFare,
@@ -184,70 +191,13 @@ export interface CreateRideRequest {
   dropLng: number;
   pickupAddress: string;
   dropAddress: string;
-  paymentMethod: 'CASH' | 'CARD' | 'UPI' | 'WALLET';
+  paymentMethod: 'CASH' | 'CARD' | 'UPI' | 'WALLET' | 'SCAN_TO_PAY';
   scheduledTime?: Date;
   vehicleType?: string;
   // Rescue service fields
   rideType?: 'NORMAL' | 'RESCUE';
   rescueMultiDriver?: boolean;
   stops?: Array<{ lat: number; lng: number; address: string }>;
-}
-
-function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase().trim().replace(/-/g, '_');
-
-  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
-  if (value === 'auto') return 'auto';
-  if (
-    [
-      'cab',
-      'cab_mini',
-      'cab_sedan',
-      'cab_xl',
-      'cab_suv',
-      'cab_premium',
-      'personal_driver',
-      'commercial_car',
-    ].includes(value)
-  ) {
-    return 'cab';
-  }
-  return null;
-}
-
-/**
- * Downward-Compatible Dispatch: Vehicle Ranking
- *
- * Rank 3 (Premium): cab_premium, personal_driver
- * Rank 2 (XL):      cab_xl, cab_suv
- * Rank 1 (Mini):    cab, cab_mini, cab_sedan, commercial_car
- * Rank 0:           non-cab types (no cross-category dispatch)
- *
- * Rule: A driver can accept a ride if Rank_Driver >= Rank_Request.
- */
-function getVehicleRank(vehicleType: string | null | undefined): number {
-  if (!vehicleType) return 0;
-  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
-  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
-  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
-  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
-  return 0;
-}
-
-function isDriverCompatibleForRide(rideVehicleType: string | null | undefined, driverVehicleType: string | null | undefined): boolean {
-  const rideKind = normalizeVehicleType(rideVehicleType);
-  if (!rideKind) return true; // Unknown ride type: keep legacy behavior.
-  const driverKind = normalizeVehicleType(driverVehicleType);
-  if (!driverKind) return false; // Be safe: unknown driver type should not receive typed ride.
-
-  // Non-cab categories: strict match (bike, auto unchanged)
-  if (rideKind !== 'cab' || driverKind !== 'cab') {
-    return rideKind === driverKind;
-  }
-
-  // Cab category: downward-compatible — driver rank must be >= ride request rank
-  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
 }
 
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -346,6 +296,22 @@ function formatRide(ride: any, includeOtp: boolean = false) {
 }
 
 export async function createRide(req: CreateRideRequest) {
+  const rideType = req.rideType || 'NORMAL';
+  const isRescue = rideType === 'RESCUE';
+  const effectiveVehicleType = isRescue ? 'bike_rescue' : (req.vehicleType || 'cab_mini');
+
+  // Enforce cross-zone vehicle permits. Emergency RESCUE rides are exempt —
+  // roadside rescue must be able to cross zone/state borders.
+  if (!isRescue && effectiveVehicleType && effectiveVehicleType !== 'eco_pickup') {
+    await assertVehicleAllowedForCoordinates({
+      pickupLat: req.pickupLat,
+      pickupLng: req.pickupLng,
+      dropLat: req.dropLat,
+      dropLng: req.dropLng,
+      vehicleType: effectiveVehicleType,
+    });
+  }
+
   const pricing = await httpCalculateFare({
     pickupLat: req.pickupLat,
     pickupLng: req.pickupLng,
@@ -374,9 +340,7 @@ export async function createRide(req: CreateRideRequest) {
   });
 
   // Determine ride type and rescue settings
-  const rideType = req.rideType || 'NORMAL';
   const rescueMultiDriver = req.rescueMultiDriver || false;
-  const isRescue = rideType === 'RESCUE';
   
   // Determine if this is a scheduled ride (>5 min in the future)
   const isScheduled = !isRescue && req.scheduledTime && req.scheduledTime.getTime() > Date.now() + 5 * 60 * 1000;
@@ -529,15 +493,16 @@ export async function createRide(req: CreateRideRequest) {
     let phase1Drivers: typeof nearbyDrivers;
     if (isCabRide) {
       // Phase 1: strict same-rank match (e.g., only cab_mini for cab_mini request)
-      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) => {
-        const driverRank = getVehicleRank((d.vehicleType as string | null | undefined) ?? null);
-        return driverRank === rideRank;
+      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; vehicleType?: string | null; serviceTypes?: string[] | null; [key: string]: any }) => {
+        const driverRank = getVehicleRank(d.vehicleType ?? null, d.serviceTypes);
+        // Same-tier cab match, but exclude non-car categories (e.g. independent drivers)
+        return driverRank === rideRank && normalizeVehicleType(d.vehicleType ?? null) === 'cab';
       });
       logger.info(`[RIDE] Phase 1 (same-tier): ${phase1Drivers.length} drivers with rank=${rideRank}`);
     } else {
       // Non-cab: single-phase strict match
-      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; [key: string]: any }) =>
-        isDriverCompatibleForRide(effectiveVehicleType, (d.vehicleType as string | null | undefined) ?? null),
+      phase1Drivers = (nearbyDrivers || []).filter((d: { id: string; vehicleType?: string | null; serviceTypes?: string[] | null; [key: string]: any }) =>
+        isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType ?? null, d.serviceTypes),
       );
     }
 
@@ -556,16 +521,19 @@ export async function createRide(req: CreateRideRequest) {
         select: {
           id: true,
           vehicleType: true,
+          serviceTypes: true,
         },
         take: 200,
       });
 
       if (isCabRide) {
-        // Phase 1 fallback: same-rank only from all online
-        typeFilteredDrivers = onlineDrivers.filter((d) => getVehicleRank(d.vehicleType) === rideRank);
+        // Phase 1 fallback: same-rank cab drivers only (exclude non-car categories)
+        typeFilteredDrivers = onlineDrivers.filter(
+          (d) => getVehicleRank(d.vehicleType, d.serviceTypes) === rideRank && normalizeVehicleType(d.vehicleType) === 'cab',
+        );
       } else {
         typeFilteredDrivers = onlineDrivers.filter((d) =>
-          isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType),
+          isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType, d.serviceTypes),
         );
       }
 
@@ -659,9 +627,10 @@ export async function createRide(req: CreateRideRequest) {
           }
 
           // Filter to ONLY higher-tier drivers (exclude same-rank since Phase 1 already covered them)
-          let higherTierDrivers = (spilloverDrivers || []).filter((d: { id: string; [key: string]: any }) => {
-            const driverRank = getVehicleRank((d.vehicleType as string | null | undefined) ?? null);
-            return driverRank > rideRank;
+          let higherTierDrivers = (spilloverDrivers || []).filter((d: { vehicleType?: string | null; serviceTypes?: string[] | null; [key: string]: any }) => {
+            const driverRank = getVehicleRank(d.vehicleType ?? null, d.serviceTypes);
+            // Higher-tier cab drivers only (exclude non-car categories like independent drivers)
+            return driverRank > rideRank && normalizeVehicleType(d.vehicleType ?? null) === 'cab';
           });
 
           // Fallback to DB if no higher-tier nearby
@@ -672,11 +641,11 @@ export async function createRide(req: CreateRideRequest) {
                 isActive: true,
                 isVerified: true,
               },
-              select: { id: true, vehicleType: true },
+              select: { id: true, vehicleType: true, serviceTypes: true },
               take: 200,
             });
             higherTierDrivers = onlineHigherTier.filter((d) => {
-              const driverRank = getVehicleRank(d.vehicleType);
+              const driverRank = getVehicleRank(d.vehicleType, d.serviceTypes);
               return normalizeVehicleType(d.vehicleType) === 'cab' && driverRank > rideRank;
             });
           }
@@ -839,7 +808,7 @@ export async function assignDriver(rideId: string, driverId: string) {
     // Check if driver exists and is available
     const driver = await tx.driver.findUnique({
       where: { id: driverId },
-      select: { id: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true, vehicleType: true },
+      select: { id: true, isOnline: true, isActive: true, isVerified: true, onboardingStatus: true, vehicleType: true, serviceTypes: true },
     });
 
     if (!driver) {
@@ -856,7 +825,7 @@ export async function assignDriver(rideId: string, driverId: string) {
     }
 
     // Validate vehicle type compatibility (strict)
-    if (currentRide.vehicleType && !isDriverCompatibleForRide(currentRide.vehicleType, driver.vehicleType)) {
+    if (currentRide.vehicleType && !isDriverCompatibleForRide(currentRide.vehicleType, driver.vehicleType, driver.serviceTypes)) {
       throw new Error(
         `Vehicle type mismatch: ride requires ${currentRide.vehicleType} but driver has ${driver.vehicleType}`
       );
@@ -1739,9 +1708,10 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
   // Fetch driver's vehicle type to only show compatible rides
   const driverRecord = await prisma.driver.findUnique({
     where: { id: _driverId },
-    select: { vehicleType: true },
+    select: { vehicleType: true, serviceTypes: true },
   });
   const driverVehicleType = driverRecord?.vehicleType;
+  const driverServiceTypes = driverRecord?.serviceTypes;
 
   const pendingRides = await prisma.ride.findMany({
     where: { status: 'PENDING', driverId: null },
@@ -1754,7 +1724,7 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
 
   const filtered = pendingRides.filter((r) => {
     if (calcDistance(lat, lng, r.pickupLatitude, r.pickupLongitude) > radiusKm) return false;
-    if (!isDriverCompatibleForRide(r.vehicleType, driverVehicleType)) return false;
+    if (!isDriverCompatibleForRide(r.vehicleType, driverVehicleType, driverServiceTypes)) return false;
     return true;
   });
 

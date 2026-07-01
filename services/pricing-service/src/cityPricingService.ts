@@ -4,6 +4,9 @@
  */
 
 import { CityPricingParams } from './algorithms';
+import { normalizeCity, getCityFromCoordinates } from '@raahi/shared';
+
+export { getCityFromCoordinates, normalizeCity };
 
 // Static fallback city pricing (used if DB not available)
 const STATIC_CITY_PRICING: Record<string, Record<string, CityPricingParams>> = {
@@ -48,57 +51,6 @@ const STATIC_CITY_PRICING: Record<string, Record<string, CityPricingParams>> = {
     personal_driver: { startingFee: 149, ratePerKm: 0, ratePerMin: 3.5, minimumFare: 149 },
   },
 };
-
-// City name normalization mapping
-const CITY_ALIASES: Record<string, string> = {
-  'new delhi': 'delhi',
-  'delhi ncr': 'delhi',
-  'gurugram': 'gurgaon',
-  'greater noida': 'noida',
-};
-
-/**
- * Normalize city name for lookup
- */
-function normalizeCity(city: string): string {
-  const lower = city.toLowerCase().trim();
-  return CITY_ALIASES[lower] || lower;
-}
-
-/**
- * Reverse geocode coordinates to city name using Google Maps API
- * Falls back to 'delhi' if API unavailable
- */
-export async function getCityFromCoordinates(lat: number, lng: number): Promise<string> {
-  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) {
-    console.log('[CityPricing] No Google Maps API key, defaulting to delhi');
-    return 'delhi';
-  }
-
-  try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}&result_type=locality|administrative_area_level_2`;
-    const response = await fetch(url);
-    const data = await response.json();
-
-    if (data.status === 'OK' && data.results?.length > 0) {
-      for (const result of data.results) {
-        for (const component of result.address_components || []) {
-          if (component.types?.includes('locality') || component.types?.includes('administrative_area_level_2')) {
-            const city = normalizeCity(component.long_name);
-            console.log(`[CityPricing] Detected city: ${city} from coordinates (${lat}, ${lng})`);
-            return city;
-          }
-        }
-      }
-    }
-  } catch (error) {
-    console.error('[CityPricing] Reverse geocode failed:', error);
-  }
-
-  console.log('[CityPricing] Could not detect city, defaulting to delhi');
-  return 'delhi';
-}
 
 /**
  * Get city pricing for a vehicle type

@@ -112,6 +112,50 @@ export function getKRing(h3Index: string, k: number): string[] {
 }
 
 /**
+ * Convert a polygon into the set of H3 cells that cover it. Used to turn an
+ * operational zone geofence (GeoJSON polygon) into an H3 cell set for fast,
+ * deterministic point-in-zone lookups.
+ *
+ * @param coordinates - Polygon rings. First ring is the outer boundary, any
+ *   further rings are holes. By default each vertex is GeoJSON order [lng, lat].
+ * @param resolution - H3 resolution to fill at (defaults to configured resolution)
+ * @param isGeoJson - true if coordinates are [lng, lat] (GeoJSON); false for [lat, lng]
+ * @returns Array of H3 index strings covering the polygon
+ */
+export function polygonToCells(
+  coordinates: number[][][] | number[][],
+  resolution?: number,
+  isGeoJson: boolean = true,
+): string[] {
+  const res = resolution ?? H3_RESOLUTION;
+  // h3-js accepts either a single ring or an array of rings (outer + holes).
+  const rings = (Array.isArray(coordinates[0][0]) ? coordinates : [coordinates]) as number[][][];
+  return h3.polygonToCells(rings as any, res, isGeoJson);
+}
+
+/**
+ * Approximate a circular zone as an H3 cell set (handy for quick zone seeding
+ * when a precise polygon isn't available).
+ *
+ * @param lat - Center latitude
+ * @param lng - Center longitude
+ * @param radiusKm - Approximate radius in km
+ * @param resolution - H3 resolution (defaults to configured resolution)
+ */
+export function circleToCells(
+  lat: number,
+  lng: number,
+  radiusKm: number,
+  resolution?: number,
+): string[] {
+  const res = resolution ?? H3_RESOLUTION;
+  const edge = H3_EDGE_LENGTH_KM[res] || 0.17;
+  // Each ring adds ~2*edge to the radius; solve for k that covers radiusKm.
+  const k = Math.max(0, Math.ceil((radiusKm / edge - 1) / 2));
+  return getKRing(latLngToH3(lat, lng, res), k);
+}
+
+/**
  * Check if an H3 cell is within k rings of another cell
  * 
  * @param targetH3 - The H3 index to check

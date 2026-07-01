@@ -637,6 +637,283 @@ app.get(
   })
 );
 
+// ============================================================
+// Cross-Zone Rules Management
+// ============================================================
+
+/**
+ * @openapi
+ * /api/pricing/cross-zone-rules:
+ *   get:
+ *     tags: [Pricing Rules]
+ *     summary: Get all cross-zone vehicle restriction rules
+ *     responses:
+ *       200:
+ *         description: List of rules
+ */
+app.get(
+  '/api/pricing/cross-zone-rules',
+  authenticateOrInternal,
+  asyncHandler(async (_req, res) => {
+    const { prisma } = require('@raahi/shared');
+    const rules = await prisma.crossZoneRule.findMany({
+      orderBy: [
+        { origin: 'asc' },
+        { destination: 'asc' },
+      ],
+    });
+    res.status(200).json({ success: true, data: rules });
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/cross-zone-rules:
+ *   post:
+ *     tags: [Pricing Rules]
+ *     summary: Create or update a cross-zone vehicle restriction rule
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [origin, destination, vehicleType, isAllowed]
+ *             properties:
+ *               origin:
+ *                 type: string
+ *                 example: "delhi"
+ *               destination:
+ *                 type: string
+ *                 example: "noida"
+ *               vehicleType:
+ *                 type: string
+ *                 example: "auto"
+ *               isAllowed:
+ *                 type: boolean
+ *                 example: false
+ *               reason:
+ *                 type: string
+ *                 example: "Auto-rickshaws do not have a permit to cross the Delhi-UP state border."
+ *     responses:
+ *       200:
+ *         description: Rule updated successfully
+ */
+app.post(
+  '/api/pricing/cross-zone-rules',
+  authenticateInternal,
+  [
+    body('origin').isString().notEmpty().toLowerCase().trim(),
+    body('destination').isString().notEmpty().toLowerCase().trim(),
+    body('vehicleType').isString().notEmpty().toLowerCase().trim(),
+    body('isAllowed').isBoolean(),
+    body('reason').optional().isString(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+
+    const { origin, destination, vehicleType, isAllowed, reason } = req.body;
+    const { prisma, invalidateCrossZoneCache } = require('@raahi/shared');
+
+    const rule = await prisma.crossZoneRule.upsert({
+      where: {
+        origin_destination_vehicleType: {
+          origin,
+          destination,
+          vehicleType,
+        },
+      },
+      update: {
+        isAllowed,
+        reason: reason || null,
+      },
+      create: {
+        origin,
+        destination,
+        vehicleType,
+        isAllowed,
+        reason: reason || null,
+      },
+    });
+
+    invalidateCrossZoneCache();
+
+    res.status(200).json({ success: true, message: 'Cross-zone rule saved successfully', data: rule });
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/cross-zone-rules/{id}:
+ *   delete:
+ *     tags: [Pricing Rules]
+ *     summary: Delete a cross-zone vehicle restriction rule
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Rule deleted successfully
+ */
+app.delete(
+  '/api/pricing/cross-zone-rules/:id',
+  authenticateInternal,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { prisma, invalidateCrossZoneCache } = require('@raahi/shared');
+
+    try {
+      await prisma.crossZoneRule.delete({
+        where: { id },
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Cross-zone rule not found' });
+        return;
+      }
+      throw error;
+    }
+
+    invalidateCrossZoneCache();
+
+    res.status(200).json({ success: true, message: 'Cross-zone rule deleted successfully' });
+  })
+);
+
+// ============================================================
+// Zone geofence management (H3-based operational zones)
+// ============================================================
+
+/**
+ * @openapi
+ * /api/pricing/zones:
+ *   get:
+ *     tags: [Pricing Rules]
+ *     summary: List operational zones and their H3 cell counts
+ *     responses:
+ *       200:
+ *         description: List of zones
+ */
+app.get(
+  '/api/pricing/zones',
+  authenticateOrInternal,
+  asyncHandler(async (_req, res) => {
+    const { listZones } = require('@raahi/shared');
+    const zones = await listZones();
+    res.status(200).json({ success: true, data: zones });
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/zones:
+ *   post:
+ *     tags: [Pricing Rules]
+ *     summary: Create or replace a zone geofence (from GeoJSON polygon, circle, or H3 cells)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code, name]
+ *             properties:
+ *               code: { type: string, example: "noida" }
+ *               name: { type: string, example: "Noida" }
+ *               type: { type: string, example: "city" }
+ *               polygon:
+ *                 type: array
+ *                 description: GeoJSON polygon rings ([lng,lat]); first ring outer, rest holes
+ *               circle:
+ *                 type: object
+ *                 properties:
+ *                   lat: { type: number }
+ *                   lng: { type: number }
+ *                   radiusKm: { type: number }
+ *               h3Cells:
+ *                 type: array
+ *                 items: { type: string }
+ *     responses:
+ *       200:
+ *         description: Zone saved
+ */
+app.post(
+  '/api/pricing/zones',
+  authenticateInternal,
+  [
+    body('code').isString().notEmpty().trim(),
+    body('name').isString().notEmpty().trim(),
+    body('type').optional().isString(),
+    body('polygon').optional().isArray(),
+    body('circle').optional().isObject(),
+    body('circle.lat').optional().isFloat({ min: -90, max: 90 }),
+    body('circle.lng').optional().isFloat({ min: -180, max: 180 }),
+    body('circle.radiusKm').optional().isFloat({ min: 0.1, max: 200 }),
+    body('h3Cells').optional().isArray(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    const { upsertZoneGeofence } = require('@raahi/shared');
+    try {
+      const result = await upsertZoneGeofence({
+        code: req.body.code,
+        name: req.body.name,
+        type: req.body.type,
+        polygon: req.body.polygon,
+        circle: req.body.circle,
+        h3Cells: req.body.h3Cells,
+      });
+      res.status(200).json({ success: true, message: 'Zone saved successfully', data: result });
+    } catch (error) {
+      res.status(400).json({ success: false, message: (error as Error).message });
+    }
+  })
+);
+
+/**
+ * @openapi
+ * /api/pricing/zones/{code}:
+ *   delete:
+ *     tags: [Pricing Rules]
+ *     summary: Delete a zone and its geofence cells
+ *     parameters:
+ *       - in: path
+ *         name: code
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Zone deleted
+ */
+app.delete(
+  '/api/pricing/zones/:code',
+  authenticateInternal,
+  asyncHandler(async (req, res) => {
+    const { deleteZone } = require('@raahi/shared');
+    try {
+      await deleteZone(req.params.code);
+    } catch (error: any) {
+      if (error?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Zone not found' });
+        return;
+      }
+      throw error;
+    }
+    res.status(200).json({ success: true, message: 'Zone deleted successfully' });
+  })
+);
+
 app.use(notFound);
 app.use(errorHandler);
 

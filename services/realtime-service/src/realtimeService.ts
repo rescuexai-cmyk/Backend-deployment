@@ -1,5 +1,6 @@
 import { prisma, latLngToH3, getH3Config, getKRing } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
+import { isDriverCompatibleForRide } from '@raahi/shared';
 import type { Server as SocketServer } from 'socket.io';
 import { eventBus, CHANNELS } from './eventBus';
 import { sseManager } from './sseManager';
@@ -173,55 +174,6 @@ function distanceMeters(lat1: number, lng1: number, lat2: number, lng2: number):
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return earthRadius * c;
-}
-
-function normalizeVehicleCategory(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase().trim().replace(/-/g, '_');
-  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
-  if (value === 'auto') return 'auto';
-  if (
-    [
-      'cab',
-      'cab_mini',
-      'cab_sedan',
-      'cab_xl',
-      'cab_suv',
-      'cab_premium',
-      'personal_driver',
-      'commercial_car',
-    ].includes(value)
-  ) {
-    return 'cab';
-  }
-  return null;
-}
-
-function getVehicleRank(vehicleType: string | null | undefined): number {
-  if (!vehicleType) return 0;
-  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
-  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
-  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
-  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
-  return 0;
-}
-
-function isVehicleCompatible(
-  rideVehicleType: string | null | undefined,
-  driverVehicleType: string | null | undefined,
-): boolean {
-  const rideCategory = normalizeVehicleCategory(rideVehicleType);
-  if (!rideCategory) return true;
-  const driverCategory = normalizeVehicleCategory(driverVehicleType);
-  if (!driverCategory) return false;
-
-  // Non-cab categories: strict match (bike, auto unchanged)
-  if (rideCategory !== 'cab' || driverCategory !== 'cab') {
-    return rideCategory === driverCategory;
-  }
-
-  // Cab category: downward-compatible — driver rank must be >= ride request rank
-  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
 }
 
 // Shared driver tracking maps (set by index.ts)
@@ -490,13 +442,13 @@ export async function findNearbyDrivers(lat: number, lng: number, radius: number
     
     const drivers = await prisma.driver.findMany({
       where: whereClause,
-      select: { id: true, currentLatitude: true, currentLongitude: true, vehicleType: true },
+      select: { id: true, currentLatitude: true, currentLongitude: true, vehicleType: true, serviceTypes: true },
     });
     
     // Filter by actual distance
     const nearbyDrivers = drivers.filter(d => {
       if (!d.currentLatitude || !d.currentLongitude) return false;
-      if (!isVehicleCompatible(vehicleType, d.vehicleType)) return false;
+      if (!isDriverCompatibleForRide(vehicleType, d.vehicleType, d.serviceTypes)) return false;
       const dist = Math.sqrt(
         Math.pow((d.currentLatitude - lat) * 111, 2) + 
         Math.pow((d.currentLongitude - lng) * 111 * Math.cos(lat * Math.PI / 180), 2)
@@ -516,12 +468,12 @@ export async function findNearbyDrivers(lat: number, lng: number, radius: number
       isOnline: true,
       isActive: true,
     },
-    select: { id: true, vehicleType: true },
+    select: { id: true, vehicleType: true, serviceTypes: true },
     take: 200,
   });
 
   const compatible = fallbackDrivers
-    .filter((driver) => isVehicleCompatible(vehicleType, driver.vehicleType))
+    .filter((driver) => isDriverCompatibleForRide(vehicleType, driver.vehicleType, driver.serviceTypes))
     .map((driver) => driver.id);
 
   logger.info(

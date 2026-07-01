@@ -1105,4 +1105,104 @@ router.post(
   })
 );
 
+// ─── Account Deletion ───────────────────────────────────────────────────
+
+/**
+ * @openapi
+ * /api/auth/account:
+ *   delete:
+ *     tags: [User Profile]
+ *     summary: Delete user account
+ *     description: |
+ *       Permanently deletes the authenticated user's account following industry standards (Uber/Ola/Rapido model).
+ *
+ *       **Immediate effects:**
+ *       - All active sessions/tokens are revoked (user is logged out on all devices)
+ *       - All personal data (name, phone, email, profile image) is anonymized immediately
+ *       - Firebase account is deleted
+ *       - Account is deactivated (soft-deleted with a 30-day grace period)
+ *
+ *       **Blocked if:** User has an active or ongoing ride (PENDING, DRIVER_ASSIGNED, ARRIVED, IN_PROGRESS).
+ *
+ *       **Ride history:** Past completed rides are retained (anonymized) for regulatory and driver-earnings records.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Optional reason for account deletion
+ *                 example: "I no longer need this service"
+ *     responses:
+ *       200:
+ *         description: Account deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: Account deleted successfully
+ *       401:
+ *         description: Unauthorized
+ *       409:
+ *         description: Cannot delete account — active ride in progress
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: Cannot delete account while a ride is in progress.
+ *                 code:
+ *                   type: string
+ *                   example: ACTIVE_RIDE_IN_PROGRESS
+ */
+router.delete(
+  '/account',
+  authenticate,
+  [body('reason').optional().isString().isLength({ max: 500 })],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { reason } = req.body;
+
+    try {
+      await AuthService.deleteAccount(req.user!.id, reason);
+      res.status(200).json({
+        success: true,
+        message: 'Your account has been deleted. All personal data has been removed.',
+      });
+    } catch (error: any) {
+      if (error.name === 'ActiveRideError') {
+        res.status(409).json({
+          success: false,
+          message: error.message,
+          code: 'ACTIVE_RIDE_IN_PROGRESS',
+        });
+        return;
+      }
+      throw error;
+    }
+  })
+);
+
 export default router;
+

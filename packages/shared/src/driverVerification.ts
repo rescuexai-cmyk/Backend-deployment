@@ -6,7 +6,7 @@
  */
 
 /**
- * Required documents for driver verification.
+ * Required documents for standard vehicle-owning drivers.
  * A driver must upload ALL of these to be eligible for verification.
  */
 export const REQUIRED_DOCUMENTS = [
@@ -18,7 +18,36 @@ export const REQUIRED_DOCUMENTS = [
   'PROFILE_PHOTO',
 ] as const;
 
+/**
+ * Required documents for Independent Drivers (no vehicle ownership).
+ * RC and INSURANCE are excluded because they do not own the vehicle.
+ * Used for drivers registering for personal_driver / rescue service roles.
+ */
+export const INDEPENDENT_DRIVER_DOCUMENTS = [
+  'LICENSE',
+  'PAN_CARD',
+  'AADHAAR_CARD',
+  'PROFILE_PHOTO',
+] as const;
+
 export type RequiredDocumentType = typeof REQUIRED_DOCUMENTS[number];
+export type IndependentDriverDocumentType = typeof INDEPENDENT_DRIVER_DOCUMENTS[number];
+
+/** Sentinel vehicleType value used to identify independent drivers */
+export const INDEPENDENT_DRIVER_VEHICLE_TYPE = 'independent_driver';
+
+/**
+ * Returns the required document set for a given driver type.
+ * Independent drivers (no vehicle) skip RC and Insurance.
+ *
+ * @param vehicleType - The driver's vehicleType field from the DB
+ */
+export function getRequiredDocuments(vehicleType?: string | null): readonly string[] {
+  if (vehicleType === INDEPENDENT_DRIVER_VEHICLE_TYPE) {
+    return INDEPENDENT_DRIVER_DOCUMENTS;
+  }
+  return REQUIRED_DOCUMENTS;
+}
 
 /**
  * Onboarding status that indicates a fully verified driver
@@ -87,22 +116,29 @@ export const DRIVER_NOT_VERIFIED_RIDE_ERROR = {
 } as const;
 
 /**
- * Check if all required documents have been uploaded
+ * Check if all required documents have been uploaded for a given driver type.
+ * Pass vehicleType to get the correct document set for independent drivers.
  * 
  * @param uploadedDocTypes - Array of document types that have been uploaded
+ * @param vehicleType - Driver's vehicleType (pass to get per-type requirements)
  * @returns Object with isComplete flag and missing documents list
  */
-export function checkRequiredDocuments(uploadedDocTypes: string[]): {
+export function checkRequiredDocuments(
+  uploadedDocTypes: string[],
+  vehicleType?: string | null,
+): {
   isComplete: boolean;
   missing: string[];
   uploaded: string[];
 } {
+  const required = getRequiredDocuments(vehicleType);
   const uploadedSet = new Set(uploadedDocTypes.map(t => t.toUpperCase()));
-  const missing = REQUIRED_DOCUMENTS.filter(doc => !uploadedSet.has(doc));
-  
+  const missing = required.filter(doc => !uploadedSet.has(doc));
+
   return {
     isComplete: missing.length === 0,
     missing: [...missing],
-    uploaded: REQUIRED_DOCUMENTS.filter(doc => uploadedSet.has(doc)),
+    uploaded: required.filter(doc => uploadedSet.has(doc)),
   };
 }
+

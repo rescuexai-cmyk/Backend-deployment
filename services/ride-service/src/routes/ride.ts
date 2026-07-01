@@ -202,7 +202,7 @@ router.post(
     body('dropLng').isFloat({ min: -180, max: 180 }),
     body('pickupAddress').isString().notEmpty(),
     body('dropAddress').isString().notEmpty(),
-    body('paymentMethod').isIn(['CASH', 'CARD', 'UPI', 'WALLET']),
+    body('paymentMethod').isIn(['CASH', 'CARD', 'UPI', 'WALLET', 'SCAN_TO_PAY']),
     body('scheduledTime').optional().isISO8601(),
     body('vehicleType').optional().isString(),
     // Rescue service fields

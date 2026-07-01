@@ -2,6 +2,11 @@ import { Queue, Worker, Job } from 'bullmq';
 import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import {
+  normalizeVehicleType,
+  getVehicleRank,
+  isDriverCompatibleForRide,
+} from '@raahi/shared';
+import {
   broadcastRideRequest as httpBroadcastRideRequest,
   getNearbyDrivers as httpGetNearbyDrivers,
   getNearbyDriversFromMemory,
@@ -28,35 +33,6 @@ function parseRedisUrl(url: string) {
 }
 
 const redisConnection = parseRedisUrl(REDIS_URL);
-
-// ─── Vehicle Ranking (mirrored from rideService.ts) ──────────────────────────
-
-function normalizeVehicleType(raw: string | null | undefined): 'bike' | 'auto' | 'cab' | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase().trim().replace(/-/g, '_');
-  if (['bike', 'bike_rescue', 'motorbike'].includes(value)) return 'bike';
-  if (value === 'auto') return 'auto';
-  if (['cab', 'cab_mini', 'cab_sedan', 'cab_xl', 'cab_suv', 'cab_premium', 'personal_driver', 'commercial_car'].includes(value)) return 'cab';
-  return null;
-}
-
-function getVehicleRank(vehicleType: string | null | undefined): number {
-  if (!vehicleType) return 0;
-  const v = vehicleType.toLowerCase().trim().replace(/-/g, '_');
-  if (['cab_premium', 'personal_driver'].includes(v)) return 3;
-  if (['cab_xl', 'cab_suv'].includes(v)) return 2;
-  if (['cab', 'cab_mini', 'cab_sedan', 'commercial_car'].includes(v)) return 1;
-  return 0;
-}
-
-function isDriverCompatibleForRide(rideVehicleType: string | null | undefined, driverVehicleType: string | null | undefined): boolean {
-  const rideKind = normalizeVehicleType(rideVehicleType);
-  if (!rideKind) return true;
-  const driverKind = normalizeVehicleType(driverVehicleType);
-  if (!driverKind) return false;
-  if (rideKind !== 'cab' || driverKind !== 'cab') return rideKind === driverKind;
-  return getVehicleRank(driverVehicleType) >= getVehicleRank(rideVehicleType);
-}
 
 // ─── Queue & Worker ──────────────────────────────────────────────────────────
 
@@ -228,10 +204,12 @@ async function handleDispatch(job: Job): Promise<void> {
 
   let filteredDrivers: typeof nearbyDrivers;
   if (isCabRide) {
-    filteredDrivers = (nearbyDrivers || []).filter((d: any) => getVehicleRank(d.vehicleType) === rideRank);
+    filteredDrivers = (nearbyDrivers || []).filter(
+      (d: any) => getVehicleRank(d.vehicleType, d.serviceTypes) === rideRank && normalizeVehicleType(d.vehicleType) === 'cab',
+    );
   } else {
     filteredDrivers = (nearbyDrivers || []).filter((d: any) =>
-      isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType),
+      isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType, d.serviceTypes),
     );
   }
 
@@ -239,13 +217,15 @@ async function handleDispatch(job: Job): Promise<void> {
   if (filteredDrivers.length === 0) {
     const onlineDrivers = await prisma.driver.findMany({
       where: { isOnline: true, isActive: true, isVerified: true },
-      select: { id: true, vehicleType: true },
+      select: { id: true, vehicleType: true, serviceTypes: true },
       take: 200,
     });
     if (isCabRide) {
-      filteredDrivers = onlineDrivers.filter((d) => getVehicleRank(d.vehicleType) === rideRank);
+      filteredDrivers = onlineDrivers.filter(
+        (d) => getVehicleRank(d.vehicleType, d.serviceTypes) === rideRank && normalizeVehicleType(d.vehicleType) === 'cab',
+      );
     } else {
-      filteredDrivers = onlineDrivers.filter((d) => isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType));
+      filteredDrivers = onlineDrivers.filter((d) => isDriverCompatibleForRide(effectiveVehicleType, d.vehicleType, d.serviceTypes));
     }
   }
 
@@ -289,14 +269,16 @@ async function handleDispatch(job: Job): Promise<void> {
           spilloverDrivers = await httpGetNearbyDrivers(ride.pickupLatitude, ride.pickupLongitude, 10, effectiveVehicleType);
         }
 
-        let higherTier = (spilloverDrivers || []).filter((d: any) => getVehicleRank(d.vehicleType) > rideRank);
+        let higherTier = (spilloverDrivers || []).filter(
+          (d: any) => getVehicleRank(d.vehicleType, d.serviceTypes) > rideRank && normalizeVehicleType(d.vehicleType) === 'cab',
+        );
         if (higherTier.length === 0) {
           const online = await prisma.driver.findMany({
             where: { isOnline: true, isActive: true, isVerified: true },
-            select: { id: true, vehicleType: true },
+            select: { id: true, vehicleType: true, serviceTypes: true },
             take: 200,
           });
-          higherTier = online.filter((d) => normalizeVehicleType(d.vehicleType) === 'cab' && getVehicleRank(d.vehicleType) > rideRank);
+          higherTier = online.filter((d) => normalizeVehicleType(d.vehicleType) === 'cab' && getVehicleRank(d.vehicleType, d.serviceTypes) > rideRank);
         }
 
         const spilloverIds = Array.from(new Set(higherTier.map((d: any) => d.id)));

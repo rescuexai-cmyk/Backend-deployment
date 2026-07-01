@@ -208,3 +208,22 @@ export async function getFirebaseUserByPhone(phone: string): Promise<admin.auth.
     return null;
   }
 }
+
+/**
+ * Permanently delete a Firebase user by UID.
+ * Called during account deletion — best-effort, failure is non-blocking.
+ */
+export async function deleteFirebaseUser(uid: string): Promise<boolean> {
+  if (!isFirebaseReady()) {
+    logger.warn('[FIREBASE] Cannot delete user — Firebase not initialized');
+    return false;
+  }
+  try {
+    await admin.auth().deleteUser(uid);
+    logger.info(`[FIREBASE] Deleted Firebase user: ${uid}`);
+    return true;
+  } catch (error: any) {
+    logger.warn(`[FIREBASE] Could not delete Firebase user ${uid}: ${error.message}`);
+    return false;
+  }
+}
