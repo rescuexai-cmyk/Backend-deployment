@@ -209,6 +209,8 @@ app.use('/api/driver/documents', createProxyMiddleware(uploadProxyOptions));
 app.use('/api/driver', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
+// Promo codes live on the pricing-service (validate/apply are user-facing)
+app.use('/api/promo', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
 app.use('/api/notifications', createProxyMiddleware({ target: NOTIFICATION_SERVICE, ...proxyOptions }));
 // SSE endpoints need special proxy config (no buffering)
 app.use('/api/realtime/sse', createProxyMiddleware(sseProxyOptions));
