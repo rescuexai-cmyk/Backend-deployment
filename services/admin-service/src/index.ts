@@ -1,4 +1,6 @@
 import path from 'path';
+import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import express, { NextFunction, Response } from 'express';
 import cors from 'cors';
 import { body, query, validationResult } from 'express-validator';
@@ -15,6 +17,21 @@ const PORT = process.env.PORT || 5008;
 
 const PRICING_SERVICE_URL = process.env.PRICING_SERVICE_URL || 'http://localhost:5005';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+
+function verifyAdminPassword(input: string, expected: string): boolean {
+  if (!expected) return false;
+  const inputHash = crypto.createHash('sha256').update(input).digest();
+  const expectedHash = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(inputHash, expectedHash);
+}
+
+function signAdminToken(email: string): string {
+  const jwtSecret = process.env.JWT_SECRET || 'fallback-secret-key';
+  const jwtAny = jwt as any;
+  return jwtAny.sign({ type: 'admin', email }, jwtSecret, { expiresIn: '7d' });
+}
 
 /**
  * Forward a promo-management request to the pricing-service admin API using the
@@ -79,6 +96,64 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'admin-service', timestamp: new Date().toISOString() });
 });
 
+/**
+ * @openapi
+ * /api/admin/login:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Admin dashboard login (email + password)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email: { type: string }
+ *               password: { type: string }
+ *     responses:
+ *       200: { description: JWT access token }
+ *       401: { description: Invalid credentials }
+ */
+app.post(
+  '/api/admin/login',
+  [body('email').isEmail().normalizeEmail(), body('password').isString().notEmpty()],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Valid email and password required', errors: errors.array() });
+      return;
+    }
+
+    if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+      logger.error('[ADMIN] ADMIN_EMAIL or ADMIN_PASSWORD not configured');
+      res.status(503).json({ success: false, message: 'Admin login not configured' });
+      return;
+    }
+
+    const email = String(req.body.email).trim().toLowerCase();
+    const password = String(req.body.password);
+
+    if (email !== ADMIN_EMAIL || !verifyAdminPassword(password, ADMIN_PASSWORD)) {
+      logger.warn('[ADMIN] Failed login attempt', { email });
+      res.status(401).json({ success: false, message: 'Invalid email or password' });
+      return;
+    }
+
+    const accessToken = signAdminToken(email);
+    logger.info('[ADMIN] Dashboard login', { email });
+    res.json({
+      success: true,
+      data: {
+        accessToken,
+        expiresIn: 7 * 24 * 60 * 60,
+        email,
+      },
+    });
+  }),
+);
+
 // Admin role check middleware
 // In production, this should check against an admin users table or role field
 const requireAdmin = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -92,9 +167,16 @@ const requireAdmin = asyncHandler(async (req: AuthRequest, res: Response, next: 
   // In development, allow any authenticated user to access admin endpoints
   // In production, this should check req.user.role === 'admin' or similar
   if (process.env.NODE_ENV === 'production') {
-    // Check if user email ends with @raahi.com or is in admin list
-    const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase());
     const userEmail = req.user.email?.toLowerCase();
+
+    // Dashboard admin account (ADMIN_EMAIL + ADMIN_PASSWORD login)
+    if (req.user.id === 'admin' && ADMIN_EMAIL && userEmail === ADMIN_EMAIL) {
+      next();
+      return;
+    }
+
+    // Legacy allow-list for app users with JWT
+    const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
     
     if (!userEmail || !adminEmails.includes(userEmail)) {
       logger.warn(`Non-admin user attempted to access admin endpoint`, { 

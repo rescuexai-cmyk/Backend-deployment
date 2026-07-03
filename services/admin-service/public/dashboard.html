@@ -106,21 +106,31 @@
   </header>
 
   <div class="container">
-    <!-- Auth token -->
-    <div class="card token-bar">
-      <div class="row">
+    <!-- Auth -->
+    <div class="card token-bar" id="loginBar">
+      <div class="row" id="loginForm">
         <div class="field">
-          <label>Admin API token (Bearer JWT)</label>
-          <input id="token" type="password" placeholder="Paste your admin login token…" autocomplete="off" />
-          <div class="hint">Stored only in this browser. Your account email must be in the admin allow-list.</div>
+          <label>Email</label>
+          <input id="email" type="email" placeholder="admin@raahi.com" autocomplete="username" />
         </div>
-        <button id="saveToken" class="primary">Save token</button>
+        <div class="field">
+          <label>Password</label>
+          <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
+        </div>
+        <button id="loginBtn" class="primary">Log in</button>
+      </div>
+      <div class="row" id="loggedInBar" style="display:none">
+        <div class="field" style="flex:1;margin-bottom:0">
+          <label>Signed in as</label>
+          <div id="loggedInEmail" class="muted"></div>
+        </div>
         <button id="refresh" class="ghost">Refresh</button>
         <button id="newPromo" class="primary">+ New promo</button>
+        <button id="logoutBtn" class="danger">Log out</button>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="promoTable" style="display:none">
       <table>
         <thead>
           <tr>
@@ -227,7 +237,48 @@
     const API = ''; // same origin (admin-service)
     const $ = (id) => document.getElementById(id);
     let token = localStorage.getItem('raahi_admin_token') || '';
-    $('token').value = token;
+    let adminEmail = localStorage.getItem('raahi_admin_email') || '';
+
+    function setLoggedIn(email, accessToken) {
+      token = accessToken;
+      adminEmail = email;
+      localStorage.setItem('raahi_admin_token', token);
+      localStorage.setItem('raahi_admin_email', email);
+      $('loginForm').style.display = 'none';
+      $('loggedInBar').style.display = 'flex';
+      $('loggedInEmail').textContent = email;
+      $('promoTable').style.display = 'block';
+    }
+
+    function setLoggedOut() {
+      token = '';
+      adminEmail = '';
+      localStorage.removeItem('raahi_admin_token');
+      localStorage.removeItem('raahi_admin_email');
+      $('loginForm').style.display = 'flex';
+      $('loggedInBar').style.display = 'none';
+      $('promoTable').style.display = 'none';
+      $('rows').innerHTML = '';
+      $('summary').textContent = '';
+    }
+
+    async function login() {
+      const email = $('email').value.trim();
+      const password = $('password').value;
+      if (!email || !password) { toast('Enter email and password', 'err'); return; }
+      try {
+        const res = await fetch(API + '/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.message || 'Login failed');
+        setLoggedIn(data.data.email, data.data.accessToken);
+        toast('Logged in', 'ok');
+        load();
+      } catch (e) { toast(e.message, 'err'); }
+    }
 
     function toast(msg, kind) {
       const t = $('toast');
@@ -237,7 +288,7 @@
     }
 
     async function api(method, path, body) {
-      if (!token) { toast('Enter your admin token first', 'err'); throw new Error('no token'); }
+      if (!token) { toast('Log in first', 'err'); throw new Error('not logged in'); }
       const res = await fetch(API + path, {
         method,
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
@@ -401,12 +452,9 @@
     }
 
     // wire up
-    $('saveToken').onclick = () => {
-      token = $('token').value.trim();
-      localStorage.setItem('raahi_admin_token', token);
-      toast('Token saved', 'ok');
-      load();
-    };
+    $('loginBtn').onclick = login;
+    $('password').onkeydown = (e) => { if (e.key === 'Enter') login(); };
+    $('logoutBtn').onclick = () => { setLoggedOut(); toast('Logged out', 'ok'); };
     $('refresh').onclick = load;
     $('newPromo').onclick = () => openModal(null);
     $('closeModal').onclick = closeModal;
@@ -415,7 +463,10 @@
     $('f_type').onchange = updateValueHint;
     $('overlay').onclick = (e) => { if (e.target === $('overlay')) closeModal(); };
 
-    if (token) load();
+    if (token && adminEmail) {
+      setLoggedIn(adminEmail, token);
+      load();
+    }
   </script>
 </body>
 </html>

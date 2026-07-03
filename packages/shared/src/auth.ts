@@ -108,6 +108,26 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     const decoded = jwt.verify(token, jwtSecret) as any;
+
+    // Dashboard admin login (env-configured email/password, no DB user)
+    if (decoded.type === 'admin') {
+      const configuredEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+      const tokenEmail = (decoded.email || '').toLowerCase();
+      if (!configuredEmail || tokenEmail !== configuredEmail) {
+        res.status(401).json({ success: false, message: 'Invalid admin token' });
+        return;
+      }
+      req.user = {
+        id: 'admin',
+        email: decoded.email,
+        phone: '',
+        firstName: 'Admin',
+        isVerified: true,
+        isActive: true,
+      };
+      next();
+      return;
+    }
     
     // Fetch actual user data from database for proper authorization
     if (decoded.userId) {
