@@ -3,7 +3,11 @@
  */
 
 import { prisma } from './database';
-import { normalizeCity } from './cityUtils';
+import {
+  areCoordinatesInSameOperationalZone,
+  getOperationalZoneFromCoordinates,
+  normalizeCity,
+} from './cityUtils';
 import { resolveZone } from './zoneService';
 
 export class CrossZoneBlockedError extends Error {
@@ -184,6 +188,20 @@ export async function assertVehicleAllowedForCoordinates(params: {
   dropLng: number;
   vehicleType: string;
 }): Promise<{ origin: string; destination: string }> {
+  // Noida ↔ Greater Noida (same UP district) must never trigger Delhi–UP border rules.
+  if (
+    areCoordinatesInSameOperationalZone(
+      params.pickupLat,
+      params.pickupLng,
+      params.dropLat,
+      params.dropLng,
+    )
+  ) {
+    const zone =
+      getOperationalZoneFromCoordinates(params.pickupLat, params.pickupLng) ?? 'noida';
+    return { origin: zone, destination: zone };
+  }
+
   const [origin, destination] = await Promise.all([
     resolveZone(params.pickupLat, params.pickupLng),
     resolveZone(params.dropLat, params.dropLng),

@@ -14,7 +14,11 @@
 
 import { prisma } from './database';
 import { latLngToH3, polygonToCells, circleToCells } from './h3Utils';
-import { getCityFromCoordinates, normalizeCity } from './cityUtils';
+import {
+  getCityFromCoordinates,
+  getOperationalZoneFromCoordinates,
+  normalizeCity,
+} from './cityUtils';
 import { createLogger } from './logger';
 
 const logger = createLogger('zone-service');
@@ -103,7 +107,10 @@ export async function resolveZone(lat: number, lng: number): Promise<string> {
     });
   }
 
-  // Fallback: reverse geocode to a city slug (keeps behavior during rollout).
+  // Fallback: NCR bounding boxes, then reverse geocode (keeps behavior during rollout).
+  if (!zone) {
+    zone = getOperationalZoneFromCoordinates(lat, lng);
+  }
   if (!zone) {
     zone = await getCityFromCoordinates(lat, lng);
   }
