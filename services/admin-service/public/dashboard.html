@@ -3,55 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Raahi · Promo Codes</title>
+  <title>Raahi · Marketing</title>
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #171a21;
-      --panel-2: #1f232c;
-      --border: #2a2f3a;
-      --text: #e7eaf0;
-      --muted: #9aa3b2;
-      --accent: #5b8cff;
-      --accent-2: #3f6fe0;
-      --green: #2ecc71;
-      --red: #ff5c6c;
-      --amber: #f5a623;
-      --radius: 12px;
+      --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --border: #2a2f3a;
+      --text: #e7eaf0; --muted: #9aa3b2; --accent: #5b8cff; --accent-2: #3f6fe0;
+      --green: #2ecc71; --red: #ff5c6c; --radius: 12px;
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      font-size: 14px;
-    }
-    header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 18px 28px; border-bottom: 1px solid var(--border);
-      background: var(--panel); position: sticky; top: 0; z-index: 5;
-    }
-    header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+    header h1 { font-size: 18px; margin: 0; }
     header h1 span { color: var(--accent); }
     .container { max-width: 1200px; margin: 0 auto; padding: 24px 28px 80px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-    .spacer { flex: 1; }
-    button {
-      font: inherit; border: 1px solid var(--border); background: var(--panel-2);
-      color: var(--text); padding: 9px 16px; border-radius: 9px; cursor: pointer;
-      transition: .15s; white-space: nowrap;
-    }
+    button { font: inherit; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); padding: 9px 16px; border-radius: 9px; cursor: pointer; transition: .15s; white-space: nowrap; }
     button:hover { border-color: var(--accent); }
     button.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
-    button.primary:hover { background: var(--accent); }
     button.danger { color: var(--red); }
     button.ghost { background: transparent; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    input, select {
-      font: inherit; background: var(--panel-2); border: 1px solid var(--border);
-      color: var(--text); padding: 9px 11px; border-radius: 9px; width: 100%;
-    }
+    input, select { font: inherit; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 9px 11px; border-radius: 9px; width: 100%; }
     input:focus, select:focus { outline: none; border-color: var(--accent); }
     label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
     .field { margin-bottom: 14px; }
@@ -60,12 +31,16 @@
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
     .token-bar { padding: 14px 16px; margin-bottom: 20px; }
     .token-bar .row { align-items: flex-end; }
-    .token-bar .field { flex: 1; margin-bottom: 0; min-width: 260px; }
+    .token-bar .field { flex: 1; margin-bottom: 0; min-width: 200px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab { padding: 10px 18px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; color: var(--muted); }
+    .tab.active { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
     th { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
     tbody tr:hover { background: var(--panel-2); }
-    .code { font-weight: 700; letter-spacing: .5px; }
+    .thumb { width: 96px; height: 36px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); }
+    .code { font-weight: 700; }
     .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
     .pill.on { background: rgba(46,204,113,.15); color: var(--green); }
     .pill.off { background: rgba(255,92,108,.15); color: var(--red); }
@@ -74,11 +49,7 @@
     .actions { display: flex; gap: 6px; justify-content: flex-end; }
     .actions button { padding: 6px 10px; font-size: 12px; }
     .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
-    /* modal */
-    .overlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
-      align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 20; overflow: auto;
-    }
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 20; overflow: auto; }
     .overlay.show { display: flex; }
     .modal { width: 100%; max-width: 640px; }
     .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--border); }
@@ -88,178 +59,172 @@
     .checkbox { display: flex; align-items: center; gap: 8px; }
     .checkbox input { width: auto; }
     .hint { font-size: 11px; color: var(--muted); margin-top: 5px; }
-    #toast {
-      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-      background: var(--panel-2); border: 1px solid var(--border); padding: 12px 18px;
-      border-radius: 10px; opacity: 0; transition: .2s; pointer-events: none; z-index: 40;
-    }
+    .preview { max-width: 100%; max-height: 120px; border-radius: 8px; margin-top: 8px; border: 1px solid var(--border); }
+    #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); padding: 12px 18px; border-radius: 10px; opacity: 0; transition: .2s; z-index: 40; }
     #toast.show { opacity: 1; }
     #toast.err { border-color: var(--red); color: var(--red); }
     #toast.ok { border-color: var(--green); color: var(--green); }
     .stat { color: var(--muted); font-size: 12px; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Raahi <span>·</span> Promo Codes</h1>
+    <h1>Raahi <span>·</span> Marketing</h1>
     <div class="stat" id="summary"></div>
   </header>
 
   <div class="container">
-    <!-- Auth -->
     <div class="card token-bar" id="loginBar">
       <div class="row" id="loginForm">
-        <div class="field">
-          <label>Email</label>
-          <input id="email" type="email" placeholder="admin@raahi.com" autocomplete="username" />
-        </div>
-        <div class="field">
-          <label>Password</label>
-          <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
-        </div>
+        <div class="field"><label>Email</label><input id="email" type="email" placeholder="admin@raahi.com" autocomplete="username" /></div>
+        <div class="field"><label>Password</label><input id="password" type="password" placeholder="••••••••" autocomplete="current-password" /></div>
         <button id="loginBtn" class="primary">Log in</button>
       </div>
       <div class="row" id="loggedInBar" style="display:none">
-        <div class="field" style="flex:1;margin-bottom:0">
-          <label>Signed in as</label>
-          <div id="loggedInEmail" class="muted"></div>
-        </div>
+        <div class="field" style="flex:1;margin-bottom:0"><label>Signed in as</label><div id="loggedInEmail" class="muted"></div></div>
         <button id="refresh" class="ghost">Refresh</button>
-        <button id="newPromo" class="primary">+ New promo</button>
+        <button id="newItem" class="primary">+ New</button>
         <button id="logoutBtn" class="danger">Log out</button>
       </div>
     </div>
 
-    <div class="card" id="promoTable" style="display:none">
-      <table>
-        <thead>
-          <tr>
-            <th>Code</th>
-            <th>Type</th>
-            <th>Value</th>
-            <th>Limits</th>
-            <th>Validity</th>
-            <th>Used</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-      <div id="empty" class="empty" style="display:none">No promo codes yet. Click <b>+ New promo</b> to create one.</div>
+    <div id="mainContent" style="display:none">
+      <div class="tabs">
+        <button class="tab active" data-tab="promos">Promo codes</button>
+        <button class="tab" data-tab="banners">Banners</button>
+      </div>
+
+      <div class="tab-panel active" id="panel-promos">
+        <div class="card">
+          <table>
+            <thead><tr><th>Code</th><th>Type</th><th>Value</th><th>Limits</th><th>Validity</th><th>Used</th><th>Status</th><th></th></tr></thead>
+            <tbody id="promoRows"></tbody>
+          </table>
+          <div id="promoEmpty" class="empty" style="display:none">No promo codes yet.</div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="panel-banners">
+        <div class="card">
+          <table>
+            <thead><tr><th>Preview</th><th>Title</th><th>Screen</th><th>Order</th><th>Validity</th><th>Status</th><th></th></tr></thead>
+            <tbody id="bannerRows"></tbody>
+          </table>
+          <div id="bannerEmpty" class="empty" style="display:none">No banners yet.</div>
+        </div>
+      </div>
     </div>
   </div>
 
-  <!-- Editor modal -->
-  <div class="overlay" id="overlay">
+  <!-- Promo modal -->
+  <div class="overlay" id="promoOverlay">
     <div class="card modal">
-      <div class="modal-head">
-        <h2 id="modalTitle">New promo</h2>
-        <button class="ghost" id="closeModal">✕</button>
-      </div>
+      <div class="modal-head"><h2 id="promoModalTitle">New promo</h2><button class="ghost" id="closePromoModal">✕</button></div>
       <div class="modal-body">
         <input type="hidden" id="f_id" />
         <div class="grid2">
-          <div class="field">
-            <label>Code *</label>
-            <input id="f_code" placeholder="MONSOON40" />
-            <div class="hint">Auto-uppercased. Editing an existing code updates it.</div>
-          </div>
-          <div class="field">
-            <label>Type *</label>
-            <select id="f_type">
-              <option value="PERCENT">PERCENT — % off</option>
-              <option value="FLAT">FLAT — ₹ off</option>
-              <option value="CASHBACK">CASHBACK — ₹ to wallet</option>
-            </select>
-          </div>
+          <div class="field"><label>Code *</label><input id="f_code" placeholder="MONSOON40" /></div>
+          <div class="field"><label>Type *</label><select id="f_type"><option value="PERCENT">PERCENT</option><option value="FLAT">FLAT</option><option value="CASHBACK">CASHBACK</option></select></div>
         </div>
         <div class="grid3">
-          <div class="field">
-            <label>Value * <span class="muted" id="valueHint">(%)</span></label>
-            <input id="f_value" type="number" min="0" step="1" placeholder="40" />
-          </div>
-          <div class="field">
-            <label>Max discount (₹)</label>
-            <input id="f_maxDiscount" type="number" min="0" step="1" placeholder="120" />
-          </div>
-          <div class="field">
-            <label>Min fare (₹)</label>
-            <input id="f_minFare" type="number" min="0" step="1" placeholder="149" />
-          </div>
+          <div class="field"><label>Value *</label><input id="f_value" type="number" min="0" /></div>
+          <div class="field"><label>Max discount (₹)</label><input id="f_maxDiscount" type="number" min="0" /></div>
+          <div class="field"><label>Min fare (₹)</label><input id="f_minFare" type="number" min="0" /></div>
         </div>
         <div class="grid2">
-          <div class="field">
-            <label>Total usage limit</label>
-            <input id="f_usageLimit" type="number" min="1" step="1" placeholder="Unlimited" />
-          </div>
-          <div class="field">
-            <label>Per-user limit *</label>
-            <input id="f_perUserLimit" type="number" min="1" step="1" value="1" />
-          </div>
+          <div class="field"><label>Total usage limit</label><input id="f_usageLimit" type="number" min="1" /></div>
+          <div class="field"><label>Per-user limit</label><input id="f_perUserLimit" type="number" min="1" value="1" /></div>
         </div>
         <div class="grid2">
-          <div class="field">
-            <label>Valid from</label>
-            <input id="f_validFrom" type="datetime-local" />
-          </div>
-          <div class="field">
-            <label>Valid to</label>
-            <input id="f_validTo" type="datetime-local" />
-            <div class="hint">Leave empty for no expiry.</div>
-          </div>
+          <div class="field"><label>Valid from</label><input id="f_validFrom" type="datetime-local" /></div>
+          <div class="field"><label>Valid to</label><input id="f_validTo" type="datetime-local" /></div>
         </div>
         <div class="grid2">
-          <div class="field">
-            <label>Vehicle types (comma-separated)</label>
-            <input id="f_vehicleTypes" placeholder="cab_mini, auto — blank = all" />
-          </div>
-          <div class="field">
-            <label>Cities (comma-separated)</label>
-            <input id="f_cities" placeholder="delhi, mumbai — blank = all" />
-          </div>
+          <div class="field"><label>Vehicle types</label><input id="f_vehicleTypes" placeholder="cab_mini, auto" /></div>
+          <div class="field"><label>Cities</label><input id="f_cities" placeholder="delhi, mumbai" /></div>
         </div>
-        <div class="row" style="gap:24px; margin-top:4px">
-          <div class="checkbox"><input type="checkbox" id="f_isFirstRideOnly" /> <label style="margin:0">First ride only</label></div>
-          <div class="checkbox"><input type="checkbox" id="f_isActive" checked /> <label style="margin:0">Active</label></div>
-        </div>
+        <div class="row" style="gap:24px"><div class="checkbox"><input type="checkbox" id="f_isFirstRideOnly" /><label style="margin:0">First ride only</label></div><div class="checkbox"><input type="checkbox" id="f_isActive" checked /><label style="margin:0">Active</label></div></div>
       </div>
-      <div class="modal-foot">
-        <button class="ghost" id="cancelModal">Cancel</button>
-        <button class="primary" id="saveModal">Save promo</button>
+      <div class="modal-foot"><button class="ghost" id="cancelPromoModal">Cancel</button><button class="primary" id="savePromoModal">Save promo</button></div>
+    </div>
+  </div>
+
+  <!-- Banner modal -->
+  <div class="overlay" id="bannerOverlay">
+    <div class="card modal">
+      <div class="modal-head"><h2 id="bannerModalTitle">New banner</h2><button class="ghost" id="closeBannerModal">✕</button></div>
+      <div class="modal-body">
+        <input type="hidden" id="b_id" />
+        <div class="field"><label>Title *</label><input id="b_title" placeholder="Monsoon offer" /></div>
+        <div class="field">
+          <label>Banner image * <span class="muted">(320 × 120 px)</span></label>
+          <input type="file" id="b_file" accept="image/png,image/jpeg" />
+          <div class="hint">Required size: <strong>320 × 120 pixels</strong> (PNG or JPG, max 5 MB). Or paste a URL below.</div>
+          <input id="b_imageUrl" placeholder="https://…" style="margin-top:8px" />
+          <img id="b_preview" class="preview" style="display:none; width:320px; height:120px; object-fit:cover" alt="preview" />
+          <div id="b_dimWarn" class="hint" style="display:none; color: var(--red)"></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Screen placement *</label><select id="b_placement"><option value="HOME">HOME — home carousel</option><option value="RIDES">RIDES — ride screen</option><option value="PROFILE">PROFILE — profile screen</option></select></div>
+          <div class="field"><label>Sort order</label><input id="b_sortOrder" type="number" value="0" /><div class="hint">Lower = shown first</div></div>
+        </div>
+        <div class="field"><label>Link URL (optional)</label><input id="b_linkUrl" placeholder="raahi://promo/MONSOON40 or https://…" /></div>
+        <div class="grid2">
+          <div class="field"><label>Valid from</label><input id="b_validFrom" type="datetime-local" /></div>
+          <div class="field"><label>Valid to</label><input id="b_validTo" type="datetime-local" /></div>
+        </div>
+        <div class="field"><label>Cities (comma-separated, blank = all)</label><input id="b_cities" placeholder="delhi, mumbai" /></div>
+        <div class="checkbox"><input type="checkbox" id="b_isActive" checked /><label style="margin:0">Active</label></div>
       </div>
+      <div class="modal-foot"><button class="ghost" id="cancelBannerModal">Cancel</button><button class="primary" id="saveBannerModal">Save banner</button></div>
     </div>
   </div>
 
   <div id="toast"></div>
 
   <script>
-    const API = ''; // same origin (admin-service)
+    const API = '';
     const $ = (id) => document.getElementById(id);
     let token = localStorage.getItem('raahi_admin_token') || '';
     let adminEmail = localStorage.getItem('raahi_admin_email') || '';
+    let currentTab = localStorage.getItem('raahi_marketing_tab') || 'promos';
+    const BANNER_W = 320, BANNER_H = 120;
 
     function setLoggedIn(email, accessToken) {
-      token = accessToken;
-      adminEmail = email;
+      token = accessToken; adminEmail = email;
       localStorage.setItem('raahi_admin_token', token);
       localStorage.setItem('raahi_admin_email', email);
       $('loginForm').style.display = 'none';
       $('loggedInBar').style.display = 'flex';
       $('loggedInEmail').textContent = email;
-      $('promoTable').style.display = 'block';
+      $('mainContent').style.display = 'block';
+      switchTab(currentTab);
+      updateNewButton();
     }
 
     function setLoggedOut() {
-      token = '';
-      adminEmail = '';
+      token = ''; adminEmail = '';
       localStorage.removeItem('raahi_admin_token');
       localStorage.removeItem('raahi_admin_email');
       $('loginForm').style.display = 'flex';
       $('loggedInBar').style.display = 'none';
-      $('promoTable').style.display = 'none';
-      $('rows').innerHTML = '';
+      $('mainContent').style.display = 'none';
       $('summary').textContent = '';
+    }
+
+    function switchTab(tab) {
+      currentTab = tab;
+      localStorage.setItem('raahi_marketing_tab', tab);
+      document.querySelectorAll('.tab').forEach((el) => el.classList.toggle('active', el.dataset.tab === tab));
+      document.querySelectorAll('.tab-panel').forEach((el) => el.classList.toggle('active', el.id === 'panel-' + tab));
+      updateNewButton();
+      loadCurrent();
+    }
+
+    function updateNewButton() {
+      $('newItem').textContent = currentTab === 'banners' ? '+ New banner' : '+ New promo';
     }
 
     async function login() {
@@ -267,131 +232,91 @@
       const password = $('password').value;
       if (!email || !password) { toast('Enter email and password', 'err'); return; }
       try {
-        const res = await fetch(API + '/api/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
-        });
+        const res = await fetch(API + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.message || 'Login failed');
         setLoggedIn(data.data.email, data.data.accessToken);
         toast('Logged in', 'ok');
-        load();
       } catch (e) { toast(e.message, 'err'); }
     }
 
     function toast(msg, kind) {
-      const t = $('toast');
-      t.textContent = msg;
-      t.className = 'show ' + (kind || '');
+      const t = $('toast'); t.textContent = msg; t.className = 'show ' + (kind || '');
       setTimeout(() => (t.className = ''), 2800);
     }
 
     async function api(method, path, body) {
       if (!token) { toast('Log in first', 'err'); throw new Error('not logged in'); }
-      const res = await fetch(API + path, {
-        method,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      const res = await fetch(API + path, { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: body ? JSON.stringify(body) : undefined });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const msg = (data && (data.message || (data.errors && data.errors[0] && data.errors[0].msg))) || ('HTTP ' + res.status);
-        throw new Error(msg);
-      }
+      if (!res.ok) throw new Error(data.message || (data.errors && data.errors[0] && data.errors[0].msg) || ('HTTP ' + res.status));
       return data;
     }
 
     function fmtDate(d) {
       if (!d) return '<span class="muted">—</span>';
-      const dt = new Date(d);
-      return dt.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
+      return new Date(d).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
     }
-    function validity(p) {
-      const from = fmtDate(p.validFrom);
-      const to = p.validTo ? fmtDate(p.validTo) : '<span class="muted">no expiry</span>';
-      const expired = p.validTo && new Date(p.validTo) < new Date();
+    function validity(item) {
+      const from = fmtDate(item.validFrom);
+      const to = item.validTo ? fmtDate(item.validTo) : '<span class="muted">no expiry</span>';
+      const expired = item.validTo && new Date(item.validTo) < new Date();
       return from + ' → ' + to + (expired ? ' <span class="pill off">expired</span>' : '');
     }
-    function valueLabel(p) {
-      if (p.type === 'PERCENT') return p.value + '%' + (p.maxDiscount ? ' <span class="muted">(≤₹' + p.maxDiscount + ')</span>' : '');
-      if (p.type === 'FLAT') return '₹' + p.value;
-      return '₹' + p.value + ' <span class="muted">cashback</span>';
-    }
-    function limits(p) {
-      const parts = [];
-      parts.push((p.usageLimit ? p.usageLimit + ' total' : '∞'));
-      parts.push(p.perUserLimit + '/user');
-      if (p.minFare) parts.push('min ₹' + p.minFare);
-      if (p.isFirstRideOnly) parts.push('1st ride');
-      return '<span class="muted">' + parts.join(' · ') + '</span>';
+    function csv(v) { return v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean); }
+    function toLocalInput(d) {
+      if (!d) return '';
+      const dt = new Date(d);
+      return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
     }
 
-    async function load() {
+    function loadCurrent() { return currentTab === 'banners' ? loadBanners() : loadPromos(); }
+
+    async function loadPromos() {
       try {
         const { data } = await api('GET', '/api/admin/promos');
-        const rows = $('rows');
-        rows.innerHTML = '';
+        const rows = $('promoRows'); rows.innerHTML = '';
         const promos = data || [];
-        $('empty').style.display = promos.length ? 'none' : 'block';
+        $('promoEmpty').style.display = promos.length ? 'none' : 'block';
         let active = 0;
         for (const p of promos) {
           if (p.isActive) active++;
-          const used = (p._count && p._count.usages) || 0;
-          const scope = [];
-          if (p.vehicleTypes && p.vehicleTypes.length) scope.push(p.vehicleTypes.join(','));
-          if (p.cities && p.cities.length) scope.push(p.cities.join(','));
           const tr = document.createElement('tr');
-          tr.innerHTML =
-            '<td><span class="code">' + p.code + '</span>' + (scope.length ? '<div class="hint">' + scope.join(' · ') + '</div>' : '') + '</td>' +
-            '<td><span class="pill type">' + p.type + '</span></td>' +
-            '<td>' + valueLabel(p) + '</td>' +
-            '<td>' + limits(p) + '</td>' +
-            '<td>' + validity(p) + '</td>' +
-            '<td>' + used + '</td>' +
-            '<td><span class="pill ' + (p.isActive ? 'on">Active' : 'off">Off') + '</span></td>' +
-            '<td><div class="actions">' +
-              '<button data-act="toggle">' + (p.isActive ? 'Disable' : 'Enable') + '</button>' +
-              '<button data-act="edit">Edit</button>' +
-              '<button data-act="del" class="danger">Delete</button>' +
-            '</div></td>';
-          tr.querySelector('[data-act=toggle]').onclick = () => toggle(p);
-          tr.querySelector('[data-act=edit]').onclick = () => openModal(p);
-          tr.querySelector('[data-act=del]').onclick = () => del(p);
+          tr.innerHTML = '<td><span class="code">' + p.code + '</span></td><td><span class="pill type">' + p.type + '</span></td><td>' + p.value + '</td><td class="muted">' + (p.usageLimit || '∞') + '</td><td>' + validity(p) + '</td><td>' + ((p._count && p._count.usages) || 0) + '</td><td><span class="pill ' + (p.isActive ? 'on">Active' : 'off">Off') + '</span></td><td><div class="actions"><button data-t>Toggle</button><button data-e>Edit</button><button data-d class="danger">Delete</button></div></td>';
+          tr.querySelector('[data-t]').onclick = () => api('PATCH', '/api/admin/promos/' + p.id, { isActive: !p.isActive }).then(() => { toast('Updated', 'ok'); loadPromos(); });
+          tr.querySelector('[data-e]').onclick = () => openPromoModal(p);
+          tr.querySelector('[data-d]').onclick = () => { if (confirm('Delete ' + p.code + '?')) api('DELETE', '/api/admin/promos/' + p.id).then(() => { toast('Deleted', 'ok'); loadPromos(); }); };
           rows.appendChild(tr);
         }
         $('summary').textContent = promos.length + ' promos · ' + active + ' active';
       } catch (e) { toast(e.message, 'err'); }
     }
 
-    async function toggle(p) {
+    async function loadBanners() {
       try {
-        await api('PATCH', '/api/admin/promos/' + p.id, { isActive: !p.isActive });
-        toast(p.code + (p.isActive ? ' disabled' : ' enabled'), 'ok');
-        load();
-      } catch (e) { toast(e.message, 'err'); }
-    }
-    async function del(p) {
-      if (!confirm('Delete promo ' + p.code + '? This also removes its usage history.')) return;
-      try {
-        await api('DELETE', '/api/admin/promos/' + p.id);
-        toast(p.code + ' deleted', 'ok');
-        load();
+        const { data } = await api('GET', '/api/admin/banners');
+        const rows = $('bannerRows'); rows.innerHTML = '';
+        const banners = data || [];
+        $('bannerEmpty').style.display = banners.length ? 'none' : 'block';
+        let active = 0;
+        for (const b of banners) {
+          if (b.isActive) active++;
+          const tr = document.createElement('tr');
+          tr.innerHTML = '<td><img class="thumb" src="' + b.imageUrl + '" alt="" onerror="this.style.display=\'none\'" /></td><td><strong>' + b.title + '</strong>' + (b.linkUrl ? '<div class="hint">' + b.linkUrl + '</div>' : '') + '</td><td><span class="pill type">' + b.placement + '</span></td><td>' + b.sortOrder + '</td><td>' + validity(b) + '</td><td><span class="pill ' + (b.isActive ? 'on">Active' : 'off">Off') + '</span></td><td><div class="actions"><button data-t>Toggle</button><button data-e>Edit</button><button data-d class="danger">Delete</button></div></td>';
+          tr.querySelector('[data-t]').onclick = () => api('PATCH', '/api/admin/banners/' + b.id, { isActive: !b.isActive }).then(() => { toast('Updated', 'ok'); loadBanners(); });
+          tr.querySelector('[data-e]').onclick = () => openBannerModal(b);
+          tr.querySelector('[data-d]').onclick = () => { if (confirm('Delete banner "' + b.title + '"?')) api('DELETE', '/api/admin/banners/' + b.id).then(() => { toast('Deleted', 'ok'); loadBanners(); }); };
+          rows.appendChild(tr);
+        }
+        $('summary').textContent = banners.length + ' banners · ' + active + ' active';
       } catch (e) { toast(e.message, 'err'); }
     }
 
-    function toLocalInput(d) {
-      if (!d) return '';
-      const dt = new Date(d);
-      const off = dt.getTimezoneOffset();
-      return new Date(dt.getTime() - off * 60000).toISOString().slice(0, 16);
-    }
-
-    function openModal(p) {
-      $('modalTitle').textContent = p ? 'Edit ' + p.code : 'New promo';
+    function openPromoModal(p) {
+      $('promoModalTitle').textContent = p ? 'Edit ' + p.code : 'New promo';
       $('f_id').value = p ? p.id : '';
       $('f_code').value = p ? p.code : '';
-      $('f_code').disabled = !!p; // code is the upsert key
+      $('f_code').disabled = !!p;
       $('f_type').value = p ? p.type : 'PERCENT';
       $('f_value').value = p ? p.value : '';
       $('f_maxDiscount').value = p && p.maxDiscount != null ? p.maxDiscount : '';
@@ -404,69 +329,140 @@
       $('f_cities').value = p && p.cities ? p.cities.join(', ') : '';
       $('f_isFirstRideOnly').checked = p ? !!p.isFirstRideOnly : false;
       $('f_isActive').checked = p ? !!p.isActive : true;
-      updateValueHint();
-      $('overlay').classList.add('show');
-    }
-    function closeModal() { $('overlay').classList.remove('show'); }
-
-    function updateValueHint() {
-      const t = $('f_type').value;
-      $('valueHint').textContent = t === 'PERCENT' ? '(%)' : '(₹)';
+      $('promoOverlay').classList.add('show');
     }
 
-    function csv(v) {
-      return v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    function openBannerModal(b) {
+      $('bannerModalTitle').textContent = b ? 'Edit ' + b.title : 'New banner';
+      $('b_id').value = b ? b.id : '';
+      $('b_title').value = b ? b.title : '';
+      $('b_imageUrl').value = b ? b.imageUrl : '';
+      $('b_file').value = '';
+      $('b_placement').value = b ? b.placement : 'HOME';
+      $('b_sortOrder').value = b ? b.sortOrder : 0;
+      $('b_linkUrl').value = b && b.linkUrl ? b.linkUrl : '';
+      $('b_validFrom').value = b ? toLocalInput(b.validFrom) : '';
+      $('b_validTo').value = b ? toLocalInput(b.validTo) : '';
+      $('b_cities').value = b && b.cities ? b.cities.join(', ') : '';
+      $('b_isActive').checked = b ? !!b.isActive : true;
+      updateBannerPreview($('b_imageUrl').value);
+      $('bannerOverlay').classList.add('show');
     }
 
-    async function save() {
+    function showDimWarn(msg) {
+      const el = $('b_dimWarn');
+      if (msg) { el.textContent = msg; el.style.display = 'block'; }
+      else { el.textContent = ''; el.style.display = 'none'; }
+    }
+
+    function checkBannerDimensions(fileOrUrl, isFile) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const ok = img.naturalWidth === BANNER_W && img.naturalHeight === BANNER_H;
+          if (!ok) showDimWarn('Image is ' + img.naturalWidth + '×' + img.naturalHeight + 'px — must be exactly 320×120px');
+          else showDimWarn('');
+          resolve(ok);
+        };
+        img.onerror = () => { showDimWarn('Could not load image to check size'); resolve(false); };
+        img.src = isFile ? URL.createObjectURL(fileOrUrl) : fileOrUrl;
+      });
+    }
+
+    function updateBannerPreview(url) {
+      const img = $('b_preview');
+      if (url) {
+        img.src = url;
+        img.style.display = 'block';
+        checkBannerDimensions(url, false);
+      } else {
+        img.style.display = 'none';
+        showDimWarn('');
+      }
+    }
+
+    async function uploadBannerFile(file) {
+      const ok = await checkBannerDimensions(file, true);
+      if (!ok) throw new Error('Banner must be exactly 320×120px');
+      const fd = new FormData();
+      fd.append('image', file);
+      const res = await fetch(API + '/api/admin/banners/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Upload failed');
+      return data.data.imageUrl;
+    }
+
+    async function savePromo() {
       const id = $('f_id').value;
       const num = (v) => (v === '' ? undefined : Number(v));
       const payload = {
-        code: $('f_code').value.trim(),
-        type: $('f_type').value,
-        value: num($('f_value').value),
-        maxDiscount: num($('f_maxDiscount').value) ?? null,
-        minFare: num($('f_minFare').value) ?? null,
-        usageLimit: num($('f_usageLimit').value) ?? null,
-        perUserLimit: num($('f_perUserLimit').value) ?? 1,
+        code: $('f_code').value.trim(), type: $('f_type').value, value: num($('f_value').value),
+        maxDiscount: num($('f_maxDiscount').value) ?? null, minFare: num($('f_minFare').value) ?? null,
+        usageLimit: num($('f_usageLimit').value) ?? null, perUserLimit: num($('f_perUserLimit').value) ?? 1,
         validFrom: $('f_validFrom').value ? new Date($('f_validFrom').value).toISOString() : undefined,
         validTo: $('f_validTo').value ? new Date($('f_validTo').value).toISOString() : null,
-        vehicleTypes: csv($('f_vehicleTypes').value),
-        cities: csv($('f_cities').value),
-        isFirstRideOnly: $('f_isFirstRideOnly').checked,
-        isActive: $('f_isActive').checked,
+        vehicleTypes: csv($('f_vehicleTypes').value), cities: csv($('f_cities').value),
+        isFirstRideOnly: $('f_isFirstRideOnly').checked, isActive: $('f_isActive').checked,
       };
-      if (!payload.code) { toast('Code is required', 'err'); return; }
-      if (payload.value == null || isNaN(payload.value)) { toast('Value is required', 'err'); return; }
+      if (!payload.code || payload.value == null) { toast('Code and value required', 'err'); return; }
       try {
-        if (id) {
-          delete payload.code; // cannot change the upsert key on edit
-          await api('PATCH', '/api/admin/promos/' + id, payload);
-        } else {
-          await api('POST', '/api/admin/promos', payload);
-        }
-        toast('Saved · live on the app within ~1 min', 'ok');
-        closeModal();
-        load();
+        if (id) { delete payload.code; await api('PATCH', '/api/admin/promos/' + id, payload); }
+        else await api('POST', '/api/admin/promos', payload);
+        toast('Promo saved', 'ok'); $('promoOverlay').classList.remove('show'); loadPromos();
       } catch (e) { toast(e.message, 'err'); }
     }
 
-    // wire up
+    async function saveBanner() {
+      const id = $('b_id').value;
+      let imageUrl = $('b_imageUrl').value.trim();
+      const file = $('b_file').files[0];
+      if (file) {
+        try { imageUrl = await uploadBannerFile(file); $('b_imageUrl').value = imageUrl; }
+        catch (e) { toast(e.message, 'err'); return; }
+      } else if (imageUrl) {
+        const ok = await checkBannerDimensions(imageUrl, false);
+        if (!ok) { toast('Banner image must be exactly 320×120px', 'err'); return; }
+      }
+      if (!imageUrl) { toast('Banner image required', 'err'); return; }
+      const payload = {
+        title: $('b_title').value.trim(), imageUrl, linkUrl: $('b_linkUrl').value.trim() || null,
+        placement: $('b_placement').value, sortOrder: Number($('b_sortOrder').value) || 0,
+        validFrom: $('b_validFrom').value ? new Date($('b_validFrom').value).toISOString() : undefined,
+        validTo: $('b_validTo').value ? new Date($('b_validTo').value).toISOString() : null,
+        cities: csv($('b_cities').value), isActive: $('b_isActive').checked,
+      };
+      if (!payload.title) { toast('Title required', 'err'); return; }
+      try {
+        if (id) await api('PATCH', '/api/admin/banners/' + id, payload);
+        else await api('POST', '/api/admin/banners', payload);
+        toast('Banner saved · live on app within ~1 min', 'ok');
+        $('bannerOverlay').classList.remove('show'); loadBanners();
+      } catch (e) { toast(e.message, 'err'); }
+    }
+
+    document.querySelectorAll('.tab').forEach((el) => el.onclick = () => switchTab(el.dataset.tab));
     $('loginBtn').onclick = login;
     $('password').onkeydown = (e) => { if (e.key === 'Enter') login(); };
     $('logoutBtn').onclick = () => { setLoggedOut(); toast('Logged out', 'ok'); };
-    $('refresh').onclick = load;
-    $('newPromo').onclick = () => openModal(null);
-    $('closeModal').onclick = closeModal;
-    $('cancelModal').onclick = closeModal;
-    $('saveModal').onclick = save;
-    $('f_type').onchange = updateValueHint;
-    $('overlay').onclick = (e) => { if (e.target === $('overlay')) closeModal(); };
+    $('refresh').onclick = loadCurrent;
+    $('newItem').onclick = () => currentTab === 'banners' ? openBannerModal(null) : openPromoModal(null);
+    $('closePromoModal').onclick = $('cancelPromoModal').onclick = () => $('promoOverlay').classList.remove('show');
+    $('closeBannerModal').onclick = $('cancelBannerModal').onclick = () => $('bannerOverlay').classList.remove('show');
+    $('savePromoModal').onclick = savePromo;
+    $('saveBannerModal').onclick = saveBanner;
+    $('b_imageUrl').oninput = (e) => updateBannerPreview(e.target.value);
+    $('b_file').onchange = async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      $('b_preview').src = url;
+      $('b_preview').style.display = 'block';
+      await checkBannerDimensions(f, true);
+    };
+    $('promoOverlay').onclick = (e) => { if (e.target === $('promoOverlay')) $('promoOverlay').classList.remove('show'); };
+    $('bannerOverlay').onclick = (e) => { if (e.target === $('bannerOverlay')) $('bannerOverlay').classList.remove('show'); };
 
-    if (token && adminEmail) {
-      setLoggedIn(adminEmail, token);
-      load();
-    }
+    if (token && adminEmail) setLoggedIn(adminEmail, token);
   </script>
 </body>
 </html>

@@ -9,6 +9,7 @@ import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
+import { bannerUploadMiddleware, uploadBannerImage } from './bannerUpload';
 import { OnboardingStatus } from '@prisma/client';
 
 const logger = createLogger('admin-service');
@@ -16,6 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 5008;
 
 const PRICING_SERVICE_URL = process.env.PRICING_SERVICE_URL || 'http://localhost:5005';
+const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://localhost:5002';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -45,6 +47,21 @@ async function pricingProxy(
 ): Promise<{ status: number; data: any }> {
   const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
   const resp = await doFetch(`${PRICING_SERVICE_URL}${proxyPath}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  return { status: resp.status, data };
+}
+
+async function userProxy(
+  method: string,
+  proxyPath: string,
+  body?: unknown,
+): Promise<{ status: number; data: any }> {
+  const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
+  const resp = await doFetch(`${USER_SERVICE_URL}${proxyPath}`, {
     method,
     headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -697,6 +714,78 @@ app.delete(
     res.status(status).json(data);
   }),
 );
+
+// ==================== BANNER MANAGEMENT (Marketing) ====================
+
+app.get(
+  '/api/admin/banners',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (_req: AuthRequest, res) => {
+    const { status, data } = await userProxy('GET', '/api/banners/admin');
+    res.status(status).json(data);
+  }),
+);
+
+app.post(
+  '/api/admin/banners',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Banner create by ${req.user?.email || req.user?.id}: ${req.body?.title}`);
+    const { status, data } = await userProxy('POST', '/api/banners/admin', req.body);
+    res.status(status).json(data);
+  }),
+);
+
+app.patch(
+  '/api/admin/banners/:id',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Banner update by ${req.user?.email || req.user?.id}: ${req.params.id}`);
+    const { status, data } = await userProxy('PATCH', `/api/banners/admin/${req.params.id}`, req.body);
+    res.status(status).json(data);
+  }),
+);
+
+app.delete(
+  '/api/admin/banners/:id',
+  authenticate,
+  requireAdmin,
+  asyncHandler(async (req: AuthRequest, res) => {
+    logger.info(`[ADMIN] Banner delete by ${req.user?.email || req.user?.id}: ${req.params.id}`);
+    const { status, data } = await userProxy('DELETE', `/api/banners/admin/${req.params.id}`);
+    res.status(status).json(data);
+  }),
+);
+
+app.post(
+  '/api/admin/banners/upload',
+  authenticate,
+  requireAdmin,
+  (req, res, next) => {
+    bannerUploadMiddleware(req, res, (err: any) => {
+      if (err) {
+        res.status(400).json({ success: false, message: err.message || 'Upload failed' });
+        return;
+      }
+      next();
+    });
+  },
+  asyncHandler(async (req: AuthRequest, res) => {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ success: false, message: 'Image file required (field: image)' });
+      return;
+    }
+    const imageUrl = await uploadBannerImage(file);
+    res.json({ success: true, data: { imageUrl } });
+  }),
+);
+
+// Serve local banner uploads in dev when S3 is not configured
+app.use('/uploads/banners', express.static(path.join(process.cwd(), 'uploads', 'banners')));
 
 // Serve the marketing dashboard (static HTML; API calls are auth-gated above).
 app.get(['/promos', '/dashboard', '/dashboard/promos'], (_req, res) => {

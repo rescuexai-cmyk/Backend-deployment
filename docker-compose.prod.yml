@@ -289,9 +289,15 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       PRICING_SERVICE_URL: http://pricing-service:5005
+      USER_SERVICE_URL: http://user-service:5002
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      AWS_S3_REGION: ${AWS_S3_REGION:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_CLOUDFRONT_DOMAIN: ${AWS_CLOUDFRONT_DOMAIN:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5008/health"]
       interval: 15s

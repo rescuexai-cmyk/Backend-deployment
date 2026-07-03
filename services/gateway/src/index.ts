@@ -211,11 +211,15 @@ app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOpti
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
 // Promo codes live on the pricing-service (validate/apply are user-facing)
 app.use('/api/promo', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
+// Marketing banners (home screen carousels)
+app.use('/api/banners', createProxyMiddleware({ target: USER_SERVICE, ...proxyOptions }));
 app.use('/api/notifications', createProxyMiddleware({ target: NOTIFICATION_SERVICE, ...proxyOptions }));
 // SSE endpoints need special proxy config (no buffering)
 app.use('/api/realtime/sse', createProxyMiddleware(sseProxyOptions));
 // Other realtime endpoints use standard proxy
 app.use('/api/realtime', createProxyMiddleware({ target: REALTIME_SERVICE, ...proxyOptions }));
+const adminUploadProxyOptions = { ...uploadProxyOptions, target: ADMIN_SERVICE };
+app.use('/api/admin/banners/upload', createProxyMiddleware(adminUploadProxyOptions));
 app.use('/api/admin', createProxyMiddleware({ target: ADMIN_SERVICE, ...proxyOptions }));
 app.use('/api/rescue', createProxyMiddleware({ target: RESCUE_SERVICE, ...proxyOptions }));
 app.use('/uploads', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));

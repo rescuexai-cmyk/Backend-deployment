@@ -611,6 +611,30 @@ model PromoUsage {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Marketing banners (home screen carousels, etc.)
+// ─────────────────────────────────────────────────────────────
+
+model Banner {
+  id        String          @id @default(cuid())
+  title     String
+  imageUrl  String
+  linkUrl   String?         // deeplink or external URL when tapped
+  placement BannerPlacement @default(HOME)
+  sortOrder Int             @default(0) // lower = shown first
+  validFrom DateTime        @default(now())
+  validTo   DateTime?
+  cities    String[]        // [] = all cities
+  isActive  Boolean         @default(true)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([placement, isActive])
+  @@index([sortOrder])
+  @@index([validFrom, validTo])
+  @@map("banners")
+}
+
+// ─────────────────────────────────────────────────────────────
 // Cancellation policy
 // ─────────────────────────────────────────────────────────────
 
@@ -678,6 +702,12 @@ enum PromoType {
   PERCENT
   FLAT
   CASHBACK
+}
+
+enum BannerPlacement {
+  HOME
+  RIDES
+  PROFILE
 }
 
 enum IncentiveType {

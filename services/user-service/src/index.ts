@@ -3,10 +3,30 @@ import cors from 'cors';
 import { body, validationResult, query } from 'express-validator';
 import { connectDatabase, authenticate, errorHandler, notFound, asyncHandler, prisma, AuthRequest, setupSwagger } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
+import {
+  getActiveBanners,
+  listAllBanners,
+  createBanner,
+  updateBanner,
+  deleteBanner,
+  normalizePlacement,
+  BANNER_WIDTH,
+  BANNER_HEIGHT,
+} from './bannerService';
 
 const logger = createLogger('user-service');
 const app = express();
 const PORT = process.env.PORT || 5002;
+
+function authenticateInternal(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const internalApiKey = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+  const provided = req.headers['x-internal-api-key'] as string | undefined;
+  if (!provided || provided !== internalApiKey) {
+    res.status(401).json({ success: false, message: 'Unauthorized internal API request' });
+    return;
+  }
+  next();
+}
 
 // Constants for validation
 const MAX_PAGINATION_LIMIT = 100;
@@ -767,6 +787,135 @@ app.get('/api/user/support/:id', authenticate, asyncHandler(async (req: AuthRequ
     },
   });
 }));
+
+// ==================== MARKETING BANNERS ====================
+
+/**
+ * GET /api/banners/active — active banners for a screen placement (app-facing).
+ */
+app.get(
+  '/api/banners/active',
+  [
+    query('placement').optional().isString(),
+    query('city').optional().isString(),
+  ],
+  asyncHandler(async (req, res) => {
+    const placement = normalizePlacement(req.query.placement as string | undefined);
+    const city = req.query.city as string | undefined;
+    const banners = await getActiveBanners(placement, city);
+    res.json({
+      success: true,
+      meta: { width: BANNER_WIDTH, height: BANNER_HEIGHT },
+      data: banners.map((b) => ({
+        id: b.id,
+        title: b.title,
+        imageUrl: b.imageUrl,
+        linkUrl: b.linkUrl,
+        placement: b.placement,
+        sortOrder: b.sortOrder,
+        width: BANNER_WIDTH,
+        height: BANNER_HEIGHT,
+      })),
+    });
+  }),
+);
+
+const BANNER_PLACEMENTS = ['HOME', 'RIDES', 'PROFILE'];
+
+app.get(
+  '/api/banners/admin',
+  authenticateInternal,
+  asyncHandler(async (_req, res) => {
+    const banners = await listAllBanners();
+    res.json({ success: true, data: banners });
+  }),
+);
+
+app.post(
+  '/api/banners/admin',
+  authenticateInternal,
+  [
+    body('title').isString().notEmpty().trim(),
+    body('imageUrl').isString().notEmpty().trim(),
+    body('linkUrl').optional({ nullable: true }).isString(),
+    body('placement').optional().isString().custom((v) => BANNER_PLACEMENTS.includes(String(v).toUpperCase())),
+    body('sortOrder').optional().isInt(),
+    body('validFrom').optional().isISO8601(),
+    body('validTo').optional({ nullable: true }).isISO8601(),
+    body('cities').optional().isArray(),
+    body('isActive').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+    const b = req.body;
+    const banner = await createBanner({
+      title: b.title,
+      imageUrl: b.imageUrl,
+      linkUrl: b.linkUrl,
+      placement: normalizePlacement(b.placement),
+      sortOrder: b.sortOrder,
+      validFrom: b.validFrom ? new Date(b.validFrom) : undefined,
+      validTo: b.validTo ? new Date(b.validTo) : null,
+      cities: b.cities,
+      isActive: b.isActive,
+    });
+    res.status(200).json({ success: true, message: 'Banner created', data: banner });
+  }),
+);
+
+app.patch(
+  '/api/banners/admin/:id',
+  authenticateInternal,
+  [
+    body('title').optional().isString().notEmpty().trim(),
+    body('imageUrl').optional().isString().notEmpty().trim(),
+    body('linkUrl').optional({ nullable: true }).isString(),
+    body('placement').optional().isString().custom((v) => BANNER_PLACEMENTS.includes(String(v).toUpperCase())),
+    body('sortOrder').optional().isInt(),
+    body('validFrom').optional().isISO8601(),
+    body('validTo').optional({ nullable: true }).isISO8601(),
+    body('cities').optional().isArray(),
+    body('isActive').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+    try {
+      const banner = await updateBanner(req.params.id, req.body);
+      res.status(200).json({ success: true, message: 'Banner updated', data: banner });
+    } catch (err: any) {
+      if (err?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Banner not found' });
+        return;
+      }
+      throw err;
+    }
+  }),
+);
+
+app.delete(
+  '/api/banners/admin/:id',
+  authenticateInternal,
+  asyncHandler(async (req, res) => {
+    try {
+      await deleteBanner(req.params.id);
+      res.status(200).json({ success: true, message: 'Banner deleted' });
+    } catch (err: any) {
+      if (err?.code === 'P2025') {
+        res.status(404).json({ success: false, message: 'Banner not found' });
+        return;
+      }
+      throw err;
+    }
+  }),
+);
 
 app.use(notFound);
 app.use(errorHandler);
