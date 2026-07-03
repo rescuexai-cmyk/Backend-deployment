@@ -15,6 +15,8 @@ export interface AuthTokens {
   expiresIn: number;
 }
 
+export type UserType = 'rider' | 'driver' | 'both';
+
 export interface UserProfile {
   id: string;
   email?: string;
@@ -26,6 +28,9 @@ export interface UserProfile {
   isActive: boolean;
   createdAt: Date;
   lastLoginAt?: Date;
+  /** rider = passenger only; driver = driver profile, no rides yet; both = driver + has booked rides */
+  user_type: UserType;
+  userType: UserType;
 }
 
 function normalizePhoneDigits(phone: string): string {
@@ -86,7 +91,7 @@ function toUserProfile(user: {
   id: string; email: string | null; phone: string; firstName: string;
   lastName: string | null; profileImage: string | null; isVerified: boolean;
   isActive: boolean; createdAt: Date; lastLoginAt: Date | null;
-}): UserProfile {
+}, userType: UserType): UserProfile {
   return {
     id: user.id,
     email: user.email ?? undefined,
@@ -98,7 +103,28 @@ function toUserProfile(user: {
     isActive: user.isActive,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt ?? undefined,
+    user_type: userType,
+    userType,
   };
+}
+
+/** Derive app role from linked driver profile and passenger ride history. */
+export async function resolveUserType(userId: string): Promise<UserType> {
+  const [driver, passengerRide] = await Promise.all([
+    prisma.driver.findFirst({ where: { userId }, select: { id: true } }),
+    prisma.ride.findFirst({ where: { passengerId: userId }, select: { id: true } }),
+  ]);
+  if (!driver) return 'rider';
+  return passengerRide ? 'both' : 'driver';
+}
+
+async function buildUserProfile(user: {
+  id: string; email: string | null; phone: string; firstName: string;
+  lastName: string | null; profileImage: string | null; isVerified: boolean;
+  isActive: boolean; createdAt: Date; lastLoginAt: Date | null;
+}): Promise<UserProfile> {
+  const userType = await resolveUserType(user.id);
+  return toUserProfile(user, userType);
 }
 
 // ─── Firebase Phone Authentication ─────────────────────────────────────
@@ -171,7 +197,7 @@ export async function authenticateWithFirebasePhone(
 
   logger.info(`[AUTH] Firebase Phone auth successful for user: ${user.id}`);
 
-  return { user: toUserProfile(user), tokens, isNewUser };
+  return { user: await buildUserProfile(user), tokens, isNewUser };
 }
 
 /**
@@ -240,7 +266,7 @@ export async function authenticateWithVerifiedPhone(
   await saveRefreshToken(user.id, tokens.refreshToken);
   await applyTestDriverOverrides(user.id, user.phone);
 
-  return { user: toUserProfile(user), tokens, isNewUser };
+  return { user: await buildUserProfile(user), tokens, isNewUser };
 }
 
 // ─── Google Authentication ──────────────────────────────────────────────
@@ -305,7 +331,7 @@ export async function authenticateWithGoogle(idToken: string): Promise<{ user: U
   const requiresPhone = user.phone.startsWith('google_') || user.phone === '';
 
   return {
-    user: toUserProfile(user),
+    user: await buildUserProfile(user),
     tokens,
     isNewUser,
     requiresPhone,
@@ -409,7 +435,7 @@ export async function authenticateWithTruecaller(
   await saveRefreshToken(user.id, tokens.refreshToken);
   await applyTestDriverOverrides(user.id, user.phone);
 
-  return { user: toUserProfile(user), tokens, isNewUser };
+  return { user: await buildUserProfile(user), tokens, isNewUser };
 }
 
 async function verifyTruecallerToken(accessToken: string, expectedPhone: string): Promise<{ valid: boolean; phoneNumber?: string }> {
@@ -522,7 +548,7 @@ export async function addPhoneWithFirebase(
 
   logger.info(`[AUTH] Phone number added via Firebase for user ${userId}: ${phone}`);
 
-  return { user: toUserProfile(user) };
+  return { user: await buildUserProfile(user) };
 }
 
 // ─── Token Management ───────────────────────────────────────────────────
@@ -559,7 +585,7 @@ export async function logout(userId: string, refreshToken: string): Promise<void
 export async function getUserProfile(userId: string): Promise<UserProfile | null> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return null;
-  return toUserProfile(user);
+  return buildUserProfile(user);
 }
 
 export class DuplicateEmailError extends Error {
@@ -598,7 +624,7 @@ export async function updateUserProfile(
   if (Object.keys(filteredUpdates).length === 0) {
     const currentUser = await prisma.user.findUnique({ where: { id: userId } });
     if (!currentUser) throw new Error('User not found');
-    return toUserProfile(currentUser);
+    return buildUserProfile(currentUser);
   }
 
   if (filteredUpdates.email) {
@@ -614,7 +640,7 @@ export async function updateUserProfile(
       data: { ...filteredUpdates, updatedAt: new Date() },
     });
     logger.info(`[AUTH] User profile updated for ${userId}: ${Object.keys(filteredUpdates).join(', ')}`);
-    return toUserProfile(user);
+    return buildUserProfile(user);
   } catch (error: any) {
     if (error.code === 'P2002' && error.meta?.target?.includes('email')) {
       throw new DuplicateEmailError(filteredUpdates.email!);

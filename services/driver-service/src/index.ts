@@ -15,6 +15,7 @@ import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
 import { startVerificationWorker, stopVerificationWorker } from './documentVerificationWorker';
 import { isVisionConfigured } from './visionService';
 import * as PayoutService from './payoutService';
+import { formatDocumentDetail, formatVerificationSummary, withVisionFieldAliases } from './documentResponse';
 
 // Helper function to get platform config with error handling
 async function getPlatformConfig(key: string, defaultValue: string): Promise<string> {
@@ -2158,7 +2159,10 @@ const handleDriverDocumentUpload = asyncHandler(async (req: AuthRequest, res: ex
         uploaded_at: document.uploadedAt, 
         next_step: newStatus,
         storage_type: getStorageConfig().type,
-        verification_status: 'pending',
+        ...withVisionFieldAliases({
+          verificationStatus: document.verificationStatus,
+          aiVerified: document.aiVerified,
+        }),
         verification_queued: verificationQueued,
       } 
     });
@@ -2289,13 +2293,7 @@ app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(a
 
   await prisma.driver.update({ where: { id: driver.id }, data: { onboardingStatus: OnboardingStatus.DOCUMENT_VERIFICATION, documentsSubmittedAt: new Date() } });
 
-  const verificationSummary = driver.documents.map((d: any) => ({
-    type: d.documentType,
-    verification_status: d.verificationStatus,
-    ai_verified: d.aiVerified,
-    ai_confidence: d.aiConfidence,
-    mismatch_reason: d.aiMismatchReason,
-  }));
+  const verificationSummary = driver.documents.map((d) => formatVerificationSummary(d));
   const pendingCount = verificationSummary.filter((d) => d.verification_status !== 'verified').length;
 
   res.json({
@@ -2340,16 +2338,18 @@ app.get('/api/driver/documents/:id/verification-status', authenticate, asyncHand
     data: {
       document_id: document.id,
       document_type: document.documentType,
-      verification_status: document.verificationStatus,
       is_verified: document.isVerified,
-      ai_verified: document.aiVerified,
-      ai_confidence: document.aiConfidence,
       ai_extracted_data: document.aiExtractedData,
-      ai_verified_at: document.aiVerifiedAt,
-      mismatch_reason: document.aiMismatchReason,
       verified_at: document.verifiedAt,
       verified_by: document.verifiedBy,
       rejection_reason: document.rejectionReason,
+      ...withVisionFieldAliases({
+        verificationStatus: document.verificationStatus,
+        aiVerified: document.aiVerified,
+        aiConfidence: document.aiConfidence,
+        aiMismatchReason: document.aiMismatchReason,
+        aiVerifiedAt: document.aiVerifiedAt,
+      }),
     },
   });
 }));
@@ -2449,38 +2449,9 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
         required: requiredDocs,
         uploaded: uploadedDocTypes,
         verified: verifiedDocTypes,
-        pending: pendingDocs.map((d) => ({
-          type: d.documentType,
-          url: d.documentUrl,
-          uploaded_at: d.uploadedAt,
-          rejection_reason: d.rejectionReason,
-          verification_status: d.verificationStatus,
-          ai_verified: d.aiVerified,
-          ai_confidence: d.aiConfidence,
-          ai_mismatch_reason: d.aiMismatchReason,
-        })),
-        flagged: flaggedDocs.map((d) => ({
-          type: d.documentType,
-          url: d.documentUrl,
-          uploaded_at: d.uploadedAt,
-          rejection_reason: d.rejectionReason,
-          verification_status: d.verificationStatus,
-          ai_verified: d.aiVerified,
-          ai_confidence: d.aiConfidence,
-          ai_mismatch_reason: d.aiMismatchReason,
-        })),
-        details: driver.documents.map(d => ({
-          type: d.documentType,
-          url: d.documentUrl,
-          uploaded_at: d.uploadedAt,
-          is_verified: d.isVerified,
-          verified_at: d.verifiedAt,
-          rejection_reason: d.rejectionReason,
-          verification_status: d.verificationStatus,
-          ai_verified: d.aiVerified,
-          ai_confidence: d.aiConfidence,
-          ai_mismatch_reason: d.aiMismatchReason,
-        })),
+        pending: pendingDocs.map(formatDocumentDetail),
+        flagged: flaggedDocs.map(formatDocumentDetail),
+        details: driver.documents.map(formatDocumentDetail),
       },
       
       // Overall status

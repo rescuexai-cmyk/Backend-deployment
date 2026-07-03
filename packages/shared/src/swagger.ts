@@ -25,6 +25,8 @@ export const commonSchemas = {
       isActive: { type: 'boolean' },
       createdAt: { type: 'string', format: 'date-time' },
       lastLoginAt: { type: 'string', format: 'date-time', nullable: true },
+      user_type: { type: 'string', enum: ['rider', 'driver', 'both'], description: 'App role for mode routing' },
+      userType: { type: 'string', enum: ['rider', 'driver', 'both'], description: 'camelCase alias of user_type' },
     },
   },
   AuthTokens: {
