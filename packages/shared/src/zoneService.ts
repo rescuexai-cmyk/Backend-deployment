@@ -94,23 +94,22 @@ export async function resolveZone(lat: number, lng: number): Promise<string> {
     return cached.zone;
   }
 
-  let zone: string | null = null;
-  try {
-    const cells = await loadZoneCells();
-    if (cells.size > 0) {
-      const h3Index = latLngToH3(lat, lng, ZONE_H3_RESOLUTION);
-      zone = cells.get(h3Index) ?? null;
+  let zone: string | null = getOperationalZoneFromCoordinates(lat, lng);
+
+  if (!zone) {
+    try {
+      const cells = await loadZoneCells();
+      if (cells.size > 0) {
+        const h3Index = latLngToH3(lat, lng, ZONE_H3_RESOLUTION);
+        zone = cells.get(h3Index) ?? null;
+      }
+    } catch (error) {
+      logger.warn('[ZONE] Geofence lookup failed, falling back to geocode', {
+        error: (error as Error).message,
+      });
     }
-  } catch (error) {
-    logger.warn('[ZONE] Geofence lookup failed, falling back to geocode', {
-      error: (error as Error).message,
-    });
   }
 
-  // Fallback: NCR bounding boxes, then reverse geocode (keeps behavior during rollout).
-  if (!zone) {
-    zone = getOperationalZoneFromCoordinates(lat, lng);
-  }
   if (!zone) {
     zone = await getCityFromCoordinates(lat, lng);
   }

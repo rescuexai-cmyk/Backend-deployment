@@ -44,6 +44,23 @@ function normalizeVehicleTypeSlug(vehicleType: string): string {
   return vehicleType.toLowerCase().trim().replace(/-/g, '_');
 }
 
+/** NCR zones where auto / bike_rescue cannot cross into a different zone. */
+const NCR_OPERATIONAL_ZONES = new Set(['delhi', 'gurgaon', 'noida', 'ghaziabad', 'faridabad']);
+const NCR_CROSS_BORDER_BLOCKED_VEHICLES = ['auto', 'bike_rescue'];
+
+function isNcrCrossBorderRoute(origin: string, destination: string): boolean {
+  const o = normalizeCity(origin);
+  const d = normalizeCity(destination);
+  return o !== d && NCR_OPERATIONAL_ZONES.has(o) && NCR_OPERATIONAL_ZONES.has(d);
+}
+
+function defaultNcrBlockReason(vehicleType: string): string {
+  if (vehicleType === 'auto') {
+    return 'Auto-rickshaws do not have a permit to cross NCR zone/state borders.';
+  }
+  return 'Two-wheeler rescue services are restricted from crossing NCR zone borders.';
+}
+
 // ─── Rule cache ───────────────────────────────────────────────────────────────
 // Cross-zone rules change rarely, but are read on every quote and booking.
 // Cache the (small) blocked-rule set with a short TTL to avoid hammering the DB.
@@ -127,6 +144,13 @@ export async function getCrossZoneBlock(
     return { blocked: true, reason: match.reason };
   }
 
+  if (
+    isNcrCrossBorderRoute(normalizedOrigin, normalizedDestination) &&
+    NCR_CROSS_BORDER_BLOCKED_VEHICLES.includes(normalizedVehicle)
+  ) {
+    return { blocked: true, reason: defaultNcrBlockReason(normalizedVehicle) };
+  }
+
   return { blocked: false };
 }
 
@@ -151,11 +175,19 @@ export async function getBlockedVehicleTypesForRoute(
   }
 
   const rules = await loadBlockedRules();
-  return new Set(
+  const blocked = new Set(
     rules
       .filter((r) => r.origin === normalizedOrigin && r.destination === normalizedDestination)
       .map((r) => r.vehicleType),
   );
+
+  if (isNcrCrossBorderRoute(normalizedOrigin, normalizedDestination)) {
+    for (const vt of NCR_CROSS_BORDER_BLOCKED_VEHICLES) {
+      blocked.add(vt);
+    }
+  }
+
+  return blocked;
 }
 
 /**
@@ -226,6 +258,12 @@ export async function getBlockedVehicleTypesForCoordinates(
   dropLat: number,
   dropLng: number,
 ): Promise<{ origin: string; destination: string; blocked: Set<string> }> {
+  // Same operational zone (e.g. Noida ↔ Greater Noida) — no cross-border blocks.
+  if (areCoordinatesInSameOperationalZone(pickupLat, pickupLng, dropLat, dropLng)) {
+    const zone = getOperationalZoneFromCoordinates(pickupLat, pickupLng) ?? 'noida';
+    return { origin: zone, destination: zone, blocked: new Set() };
+  }
+
   const [origin, destination] = await Promise.all([
     resolveZone(pickupLat, pickupLng),
     resolveZone(dropLat, dropLng),

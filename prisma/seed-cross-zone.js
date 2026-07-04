@@ -13,7 +13,13 @@ async function main() {
     { origin: 'delhi', destination: 'gurgaon', vehicleType: 'auto', isAllowed: false, reason: 'Auto-rickshaws do not have a permit to cross the Delhi-Haryana state border.' },
     { origin: 'delhi', destination: 'gurgaon', vehicleType: 'bike_rescue', isAllowed: false, reason: 'Two-wheeler rescue services are restricted from crossing state border highways.' },
     { origin: 'gurgaon', destination: 'delhi', vehicleType: 'auto', isAllowed: false, reason: 'Auto-rickshaws do not have a permit to cross the Haryana-Delhi state border.' },
-    { origin: 'gurgaon', destination: 'delhi', vehicleType: 'bike_rescue', isAllowed: false, reason: 'Two-wheeler rescue services are restricted from crossing state border highways.' }
+    { origin: 'gurgaon', destination: 'delhi', vehicleType: 'bike_rescue', isAllowed: false, reason: 'Two-wheeler rescue services are restricted from crossing state border highways.' },
+
+    // Gurgaon (Haryana) <-> Noida (UP)
+    { origin: 'gurgaon', destination: 'noida', vehicleType: 'auto', isAllowed: false, reason: 'Auto-rickshaws do not have a permit to cross the Haryana-UP state border.' },
+    { origin: 'gurgaon', destination: 'noida', vehicleType: 'bike_rescue', isAllowed: false, reason: 'Two-wheeler rescue services are restricted from crossing state border highways.' },
+    { origin: 'noida', destination: 'gurgaon', vehicleType: 'auto', isAllowed: false, reason: 'Auto-rickshaws do not have a permit to cross the UP-Haryana state border.' },
+    { origin: 'noida', destination: 'gurgaon', vehicleType: 'bike_rescue', isAllowed: false, reason: 'Two-wheeler rescue services are restricted from crossing state border highways.' },
   ];
 
   console.log('Seeding cross-zone rules...');
