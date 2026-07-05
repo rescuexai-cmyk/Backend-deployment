@@ -25,6 +25,7 @@ import {
   CityPricingParams,
 } from './algorithms';
 import { getRouteDistanceAndTime } from './routeService';
+import { getUnavailableVehicleTypesForCity } from './serviceCatalog';
 import {
   getTimeBasedFlags,
   getDemandSupplyRatio,
@@ -442,6 +443,7 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
 // ============================================================
 
 const ALL_VEHICLE_TYPES = [
+  'bike_taxi',
   'bike_rescue',
   'auto',
   'cab_mini',
@@ -471,9 +473,18 @@ export async function calculateAllFares(
 
   logger.info(`[PRICING-ALL] Route: origin=${pickupZone} (${pickupLat},${pickupLng}) -> destination=${dropZone} (${dropLat},${dropLng})`);
 
+  // 2. City rollout: drop vehicle types not live in the pickup city
+  //    (service catalog: city_pricing.isActive + service_rollout_v1 config).
+  //    Fails open to an empty set so pricing never breaks on catalog errors.
+  const cityUnavailable = await getUnavailableVehicleTypesForCity(pickupZone);
+
   // Filter allowed vehicle types
-  const allowedVehicleTypes = ALL_VEHICLE_TYPES.filter(vt => !blockedTypes.has(vt.toLowerCase()));
-  logger.info(`[PRICING-ALL] Blocked: ${[...blockedTypes].join(', ')} | Allowed: ${allowedVehicleTypes.join(', ')}`);
+  const allowedVehicleTypes = ALL_VEHICLE_TYPES.filter(
+    vt => !blockedTypes.has(vt.toLowerCase()) && !cityUnavailable.has(vt.toLowerCase())
+  );
+  logger.info(
+    `[PRICING-ALL] Blocked: ${[...blockedTypes].join(', ')} | City-unavailable: ${[...cityUnavailable].join(', ')} | Allowed: ${allowedVehicleTypes.join(', ')}`
+  );
 
   // 3. Query nearby online/active drivers within a 10km radius
   let activeVehicleTypes = allowedVehicleTypes;

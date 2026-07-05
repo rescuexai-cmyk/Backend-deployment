@@ -21,6 +21,7 @@ const CANCELLATION_POLICIES: Record<string, {
   cab_mini: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 2.0 },
   auto: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 1.5 },
   cab_xl: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 2.5 },
+  bike_taxi: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 1.0 },
   bike_rescue: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 1.0 },
   cab_premium: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 3.5 },
   personal_driver: { freeWindowMinutes: 2, freeWaitingMinutes: 3, waitingFeePerMin: 3.5 },

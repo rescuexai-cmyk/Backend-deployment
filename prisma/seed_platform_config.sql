@@ -13,3 +13,27 @@ ON CONFLICT (key) DO UPDATE SET
   value = EXCLUDED.value,
   description = EXCLUDED.description,
   "updatedAt" = NOW();
+
+-- ─────────────────────────────────────────────────────────────
+-- Service rollout config (drives GET /api/pricing/available-services)
+-- JSON shape:
+--   {
+--     "default": { "<serviceId>": "live|coming_soon|disabled" },
+--     "cities":  { "<city>": { "<serviceId>": "live|coming_soon|disabled" } }
+--   }
+-- Omitted services fall back to code defaults (cab_xl/cab_premium/personal_driver
+-- are "coming_soon"; everything else is "live"). This seed reproduces the app's
+-- previous hardcoded behaviour, so nothing changes until ops edit this row.
+-- Example: to launch Cab Premium only in Noida, set cities.noida.cab_premium = "live".
+-- ─────────────────────────────────────────────────────────────
+INSERT INTO platform_config (id, key, value, description, "updatedAt")
+VALUES
+  (
+    gen_random_uuid()::text,
+    'service_rollout_v1',
+    '{"default":{"cab_mini":"live","auto":"live","bike_taxi":"live","bike_rescue":"live","cab_xl":"live","cab_premium":"live","personal_driver":"live"},"cities":{}}',
+    'Per-city service availability (live/coming_soon/disabled) for the rider app catalog',
+    NOW()
+  )
+-- DO NOTHING: never overwrite an ops-edited rollout on re-seed.
+ON CONFLICT (key) DO NOTHING;

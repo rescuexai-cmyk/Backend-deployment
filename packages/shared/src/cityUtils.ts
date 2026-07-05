@@ -48,11 +48,17 @@ const OPERATIONAL_ZONE_BBOXES: Array<{
   minLng: number;
   maxLng: number;
 }> = [
+  // Faridabad (Haryana) — sits west of the Yamuna river (~lng 77.38). Checked
+  // BEFORE Noida so the overlapping strip is never misclassified as Noida (UP),
+  // which previously made Gurgaon→Faridabad look like a Haryana→UP border trip.
+  { zone: 'faridabad', minLat: 28.25, maxLat: 28.48, minLng: 77.2, maxLng: 77.38 },
   // Noida + Greater Noida (Gautam Buddha Nagar, UP) — same operational zone.
-  { zone: 'noida', minLat: 28.3, maxLat: 28.65, minLng: 77.29, maxLng: 77.65 },
+  // Split at the Yamuna: Noida proper is north of lat ~28.46; the southern
+  // strip (Greater Noida / Yamuna Expressway) lies east of lng ~77.38.
+  { zone: 'noida', minLat: 28.46, maxLat: 28.65, minLng: 77.29, maxLng: 77.65 },
+  { zone: 'noida', minLat: 28.3, maxLat: 28.46, minLng: 77.38, maxLng: 77.65 },
   { zone: 'ghaziabad', minLat: 28.55, maxLat: 28.78, minLng: 77.25, maxLng: 77.55 },
   { zone: 'gurgaon', minLat: 28.25, maxLat: 28.55, minLng: 76.82, maxLng: 77.15 },
-  { zone: 'faridabad', minLat: 28.25, maxLat: 28.48, minLng: 77.2, maxLng: 77.45 },
 ];
 
 function isInsideBbox(

@@ -35,6 +35,7 @@ interface VehicleTypeDef {
 const VEHICLE_CATALOG: Record<string, VehicleTypeDef> = {
   // Bike / rescue
   bike: { category: 'bike', tier: 0 },
+  bike_taxi: { category: 'bike', tier: 0 },
   bike_rescue: { category: 'bike', tier: 0 },
   motorbike: { category: 'bike', tier: 0 },
 

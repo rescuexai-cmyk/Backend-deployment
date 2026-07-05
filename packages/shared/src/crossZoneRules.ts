@@ -44,21 +44,40 @@ function normalizeVehicleTypeSlug(vehicleType: string): string {
   return vehicleType.toLowerCase().trim().replace(/-/g, '_');
 }
 
-/** NCR zones where auto / bike_rescue cannot cross into a different zone. */
-const NCR_OPERATIONAL_ZONES = new Set(['delhi', 'gurgaon', 'noida', 'ghaziabad', 'faridabad']);
-const NCR_CROSS_BORDER_BLOCKED_VEHICLES = ['auto', 'bike_rescue'];
+/**
+ * NCR zone → state mapping. Auto / bike-rescue permits are STATE-level, so
+ * crossing between zones of the same state (e.g. Gurgaon ↔ Faridabad, both
+ * Haryana; Noida ↔ Ghaziabad, both UP) must NOT trigger the border block.
+ * Only an actual state change (e.g. Delhi → Haryana, Delhi → UP) blocks.
+ */
+const NCR_ZONE_STATES: Record<string, string> = {
+  delhi: 'delhi',
+  gurgaon: 'haryana',
+  faridabad: 'haryana',
+  noida: 'uttar_pradesh',
+  ghaziabad: 'uttar_pradesh',
+};
+const NCR_CROSS_BORDER_BLOCKED_VEHICLES = ['auto', 'bike_taxi', 'bike_rescue'];
 
 function isNcrCrossBorderRoute(origin: string, destination: string): boolean {
-  const o = normalizeCity(origin);
-  const d = normalizeCity(destination);
-  return o !== d && NCR_OPERATIONAL_ZONES.has(o) && NCR_OPERATIONAL_ZONES.has(d);
+  const originState = NCR_ZONE_STATES[normalizeCity(origin)];
+  const destinationState = NCR_ZONE_STATES[normalizeCity(destination)];
+  // Both endpoints must be known NCR zones, and in DIFFERENT states.
+  return (
+    originState !== undefined &&
+    destinationState !== undefined &&
+    originState !== destinationState
+  );
 }
 
 function defaultNcrBlockReason(vehicleType: string): string {
   if (vehicleType === 'auto') {
-    return 'Auto-rickshaws do not have a permit to cross NCR zone/state borders.';
+    return 'Auto-rickshaws do not have a permit to cross state borders.';
   }
-  return 'Two-wheeler rescue services are restricted from crossing NCR zone borders.';
+  if (vehicleType === 'bike_taxi') {
+    return 'Bike taxis do not have a permit to cross state borders.';
+  }
+  return 'Two-wheeler rescue services are restricted from crossing state borders.';
 }
 
 // ─── Rule cache ───────────────────────────────────────────────────────────────

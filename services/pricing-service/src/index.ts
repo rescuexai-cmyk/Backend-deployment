@@ -20,6 +20,7 @@ import {
   invalidatePromoCache,
 } from './promoService';
 import { listZoneHealth, runMarketplaceGovernance, upsertMarketplacePolicy, getMarketplacePolicy } from './marketplacePolicy';
+import { getAvailableServices } from './serviceCatalog';
 
 const logger = createLogger('pricing-service');
 const app = express();
@@ -444,6 +445,64 @@ app.get('/api/pricing/rules', asyncHandler(async (_req, res) => {
   const rules = getPricingRules();
   res.status(200).json({ success: true, data: rules });
 }));
+
+/**
+ * @openapi
+ * /api/pricing/available-services:
+ *   get:
+ *     tags: [Pricing]
+ *     summary: Rider-facing service catalog with per-city availability
+ *     parameters:
+ *       - in: query
+ *         name: lat
+ *         schema: { type: number }
+ *       - in: query
+ *         name: lng
+ *         schema: { type: number }
+ *       - in: query
+ *         name: dropLat
+ *         schema: { type: number }
+ *       - in: query
+ *         name: dropLng
+ *         schema: { type: number }
+ *       - in: query
+ *         name: city
+ *         schema: { type: string }
+ *       - in: query
+ *         name: includeDisabled
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Service catalog for the resolved city
+ */
+app.get(
+  '/api/pricing/available-services',
+  [
+    query('lat').optional().isFloat({ min: -90, max: 90 }),
+    query('lng').optional().isFloat({ min: -180, max: 180 }),
+    query('dropLat').optional().isFloat({ min: -90, max: 90 }),
+    query('dropLng').optional().isFloat({ min: -180, max: 180 }),
+    query('city').optional().isString(),
+    query('includeDisabled').optional().isBoolean(),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const lat = req.query.lat != null ? parseFloat(req.query.lat as string) : undefined;
+    const lng = req.query.lng != null ? parseFloat(req.query.lng as string) : undefined;
+    const dropLat = req.query.dropLat != null ? parseFloat(req.query.dropLat as string) : undefined;
+    const dropLng = req.query.dropLng != null ? parseFloat(req.query.dropLng as string) : undefined;
+    const city = req.query.city as string | undefined;
+    const includeDisabled = req.query.includeDisabled === 'true';
+
+    const data = await getAvailableServices({ lat, lng, dropLat, dropLng, city, includeDisabled });
+    res.status(200).json({ success: true, data });
+  }),
+);
 
 // ============================================================
 // Marketplace policy controls (v2 scalability operations)
