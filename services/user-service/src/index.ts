@@ -10,6 +10,7 @@ import {
   updateBanner,
   deleteBanner,
   getBannerImagePayload,
+  bannerImageProxyUrl,
   normalizePlacement,
   BANNER_WIDTH,
   BANNER_HEIGHT,
@@ -803,7 +804,7 @@ app.get(
       return;
     }
     res.set('Content-Type', payload.contentType);
-    res.set('Cache-Control', 'public, max-age=300');
+    res.set('Cache-Control', 'public, max-age=3600');
     res.send(payload.buffer);
   }),
 );
@@ -827,7 +828,7 @@ app.get(
       data: banners.map((b) => ({
         id: b.id,
         title: b.title,
-        imageUrl: b.imageUrl,
+        imageUrl: bannerImageProxyUrl(b.id),
         linkUrl: b.linkUrl,
         placement: b.placement,
         sortOrder: b.sortOrder,
@@ -845,7 +846,13 @@ app.get(
   authenticateInternal,
   asyncHandler(async (_req, res) => {
     const banners = await listAllBanners();
-    res.json({ success: true, data: banners });
+    res.json({
+      success: true,
+      data: banners.map((b) => ({
+        ...b,
+        imageUrl: bannerImageProxyUrl(b.id),
+      })),
+    });
   }),
 );
 

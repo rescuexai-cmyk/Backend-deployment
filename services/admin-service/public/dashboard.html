@@ -292,6 +292,10 @@
       } catch (e) { toast(e.message, 'err'); }
     }
 
+    function bannerPreviewSrc(b) {
+      return b && b.id ? '/api/banners/image/' + b.id : '';
+    }
+
     async function loadBanners() {
       try {
         const { data } = await api('GET', '/api/admin/banners');
@@ -302,7 +306,7 @@
         for (const b of banners) {
           if (b.isActive) active++;
           const tr = document.createElement('tr');
-          tr.innerHTML = '<td><img class="thumb" src="' + b.imageUrl + '" alt="" onerror="this.style.display=\'none\'" /></td><td><strong>' + b.title + '</strong>' + (b.linkUrl ? '<div class="hint">' + b.linkUrl + '</div>' : '') + '</td><td><span class="pill type">' + b.placement + '</span></td><td>' + b.sortOrder + '</td><td>' + validity(b) + '</td><td><span class="pill ' + (b.isActive ? 'on">Active' : 'off">Off') + '</span></td><td><div class="actions"><button data-t>Toggle</button><button data-e>Edit</button><button data-d class="danger">Delete</button></div></td>';
+          tr.innerHTML = '<td><img class="thumb" src="' + bannerPreviewSrc(b) + '" alt="" loading="lazy" /></td><td><strong>' + b.title + '</strong>' + (b.linkUrl ? '<div class="hint">' + b.linkUrl + '</div>' : '') + '</td><td><span class="pill type">' + b.placement + '</span></td><td>' + b.sortOrder + '</td><td>' + validity(b) + '</td><td><span class="pill ' + (b.isActive ? 'on">Active' : 'off">Off') + '</span></td><td><div class="actions"><button data-t>Toggle</button><button data-e>Edit</button><button data-d class="danger">Delete</button></div></td>';
           tr.querySelector('[data-t]').onclick = () => api('PATCH', '/api/admin/banners/' + b.id, { isActive: !b.isActive }).then(() => { toast('Updated', 'ok'); loadBanners(); });
           tr.querySelector('[data-e]').onclick = () => openBannerModal(b);
           tr.querySelector('[data-d]').onclick = () => { if (confirm('Delete banner "' + b.title + '"?')) api('DELETE', '/api/admin/banners/' + b.id).then(() => { toast('Deleted', 'ok'); loadBanners(); }); };
@@ -336,7 +340,7 @@
       $('bannerModalTitle').textContent = b ? 'Edit ' + b.title : 'New banner';
       $('b_id').value = b ? b.id : '';
       $('b_title').value = b ? b.title : '';
-      $('b_imageUrl').value = b ? b.imageUrl : '';
+      $('b_imageUrl').value = '';
       $('b_file').value = '';
       $('b_placement').value = b ? b.placement : 'HOME';
       $('b_sortOrder').value = b ? b.sortOrder : 0;
@@ -345,7 +349,7 @@
       $('b_validTo').value = b ? toLocalInput(b.validTo) : '';
       $('b_cities').value = b && b.cities ? b.cities.join(', ') : '';
       $('b_isActive').checked = b ? !!b.isActive : true;
-      updateBannerPreview($('b_imageUrl').value);
+      updateBannerPreview(b ? bannerPreviewSrc(b) : '');
       $('bannerOverlay').classList.add('show');
     }
 
@@ -417,20 +421,23 @@
       let imageUrl = $('b_imageUrl').value.trim();
       const file = $('b_file').files[0];
       if (file) {
-        try { imageUrl = await uploadBannerFile(file); $('b_imageUrl').value = imageUrl; }
+        try { imageUrl = await uploadBannerFile(file); }
         catch (e) { toast(e.message, 'err'); return; }
+      } else if (imageUrl.startsWith('/api/banners/image/')) {
+        imageUrl = '';
       } else if (imageUrl) {
         const ok = await checkBannerDimensions(imageUrl, false);
         if (!ok) { toast('Banner image must be exactly 320×120px', 'err'); return; }
       }
-      if (!imageUrl) { toast('Banner image required', 'err'); return; }
+      if (!id && !imageUrl) { toast('Banner image required', 'err'); return; }
       const payload = {
-        title: $('b_title').value.trim(), imageUrl, linkUrl: $('b_linkUrl').value.trim() || null,
+        title: $('b_title').value.trim(), linkUrl: $('b_linkUrl').value.trim() || null,
         placement: $('b_placement').value, sortOrder: Number($('b_sortOrder').value) || 0,
         validFrom: $('b_validFrom').value ? new Date($('b_validFrom').value).toISOString() : undefined,
         validTo: $('b_validTo').value ? new Date($('b_validTo').value).toISOString() : null,
         cities: csv($('b_cities').value), isActive: $('b_isActive').checked,
       };
+      if (imageUrl) payload.imageUrl = imageUrl;
       if (!payload.title) { toast('Title required', 'err'); return; }
       try {
         if (id) await api('PATCH', '/api/admin/banners/' + id, payload);

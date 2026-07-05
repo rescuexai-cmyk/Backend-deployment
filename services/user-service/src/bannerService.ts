@@ -1,7 +1,6 @@
 import { prisma, createLogger } from '@raahi/shared';
 import { BannerPlacement } from '@prisma/client';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import fs from 'fs';
 import path from 'path';
 
 const logger = createLogger('banner-service');
@@ -172,20 +171,30 @@ function contentTypeForKey(key: string): string {
   }
 }
 
-/** Stream banner bytes for app carousel (private S3 → public API proxy). */
+export function bannerImageProxyUrl(bannerId: string): string {
+  return `/api/banners/image/${bannerId}`;
+}
+
+/** Stream banner bytes (private S3 or admin-service local disk). */
 export async function getBannerImagePayload(
   bannerId: string,
 ): Promise<{ buffer: Buffer; contentType: string } | null> {
   const banner = await prisma.banner.findUnique({ where: { id: bannerId } });
-  if (!banner || !banner.isActive || !banner.imageUrl) return null;
+  if (!banner?.imageUrl) return null;
 
   const imageUrl = banner.imageUrl;
 
   if (imageUrl.startsWith('/uploads/banners/')) {
-    const localPath = path.join(process.cwd(), imageUrl.replace(/^\//, ''));
-    if (!fs.existsSync(localPath)) return null;
-    const buffer = fs.readFileSync(localPath);
-    return { buffer, contentType: contentTypeForKey(localPath) };
+    const adminUrl = process.env.ADMIN_SERVICE_URL || 'http://localhost:5008';
+    try {
+      const resp = await fetch(`${adminUrl}${imageUrl}`);
+      if (!resp.ok) return null;
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      return { buffer, contentType: resp.headers.get('content-type') || contentTypeForKey(imageUrl) };
+    } catch (err: any) {
+      logger.warn(`[BANNER] Local image fetch failed ${bannerId}: ${err?.message || err}`);
+      return null;
+    }
   }
 
   if (!isS3Configured() || !s3Client) {
