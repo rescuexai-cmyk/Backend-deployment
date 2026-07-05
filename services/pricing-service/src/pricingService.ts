@@ -73,6 +73,10 @@ export interface EstimateResponse {
   estimatedDurationMin: number;
   vehicleType: string;
   city: string;
+  /** Pickup ETA from the nearest eligible online driver (calculate-all only). */
+  eta?: string;
+  etaMinutes?: number;
+  nearestDriverKm?: number;
   breakdown: {
     startingFee: number;
     ratePerKm: number;
@@ -488,8 +492,15 @@ export async function calculateAllFares(
 
   // 3. Query nearby online/active drivers within a 10km radius
   let activeVehicleTypes = allowedVehicleTypes;
+  // Kept for per-type pickup ETA computation below (sorted by distance).
+  let nearbyDriversForEta: Array<{
+    vehicleType: string | null;
+    serviceTypes?: string[] | null;
+    distance: number;
+  }> = [];
   try {
     const nearbyDrivers = await getNearbyDrivers(pickupLat, pickupLng, 10);
+    nearbyDriversForEta = nearbyDrivers;
     logger.info(`[PRICING-ALL] Found ${nearbyDrivers.length} online drivers within 10km radius`);
 
     // Map allowed vehicle types to whether they have matching/eligible online drivers nearby
@@ -522,6 +533,25 @@ export async function calculateAllFares(
       scheduledTime,
       stops,
     });
+  }
+
+  // 5. Per-type pickup ETA from the nearest eligible online driver.
+  //    ~22 km/h average city approach speed + 1 min accept/start buffer,
+  //    clamped to 1–30 min. Omitted when no eligible driver is nearby so the
+  //    app can show its own default.
+  const ETA_APPROACH_SPEED_KMPH = 22;
+  for (const vt of Object.keys(results)) {
+    const nearest = nearbyDriversForEta.find((d) =>
+      isDriverEligibleForVehicleType(d.vehicleType || '', vt, d.serviceTypes),
+    );
+    if (!nearest) continue;
+    const etaMinutes = Math.min(
+      30,
+      Math.max(1, Math.round(1 + (nearest.distance / ETA_APPROACH_SPEED_KMPH) * 60)),
+    );
+    results[vt].etaMinutes = etaMinutes;
+    results[vt].eta = `${etaMinutes} min`;
+    results[vt].nearestDriverKm = Math.round(nearest.distance * 10) / 10;
   }
 
   // Cheapest visible option: eco_pickup (virtual category, 10-18% lower).
