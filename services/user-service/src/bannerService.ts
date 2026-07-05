@@ -1,5 +1,8 @@
 import { prisma, createLogger } from '@raahi/shared';
 import { BannerPlacement } from '@prisma/client';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import fs from 'fs';
+import path from 'path';
 
 const logger = createLogger('banner-service');
 
@@ -117,4 +120,101 @@ export async function deleteBanner(id: string): Promise<void> {
   await prisma.banner.delete({ where: { id } });
   invalidateBannerCache();
   logger.info(`[BANNER] Deleted: ${id}`);
+}
+
+const AWS_S3_REGION = process.env.AWS_S3_REGION;
+const AWS_S3_BUCKET = process.env.AWS_S3_BUCKET;
+const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
+const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
+
+function isS3Configured(): boolean {
+  return !!(AWS_S3_REGION && AWS_S3_BUCKET && AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY);
+}
+
+let s3Client: S3Client | null = null;
+if (isS3Configured()) {
+  s3Client = new S3Client({
+    region: AWS_S3_REGION!,
+    credentials: {
+      accessKeyId: AWS_ACCESS_KEY_ID!,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY!,
+    },
+  });
+}
+
+function extractS3Key(imageUrl: string): string | null {
+  if (!imageUrl) return null;
+  if (imageUrl.startsWith('/uploads/banners/')) {
+    return imageUrl.replace(/^\/uploads\/banners\//, 'banners/');
+  }
+  try {
+    const url = new URL(imageUrl);
+    const key = url.pathname.replace(/^\/+/, '');
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
+function contentTypeForKey(key: string): string {
+  const ext = path.extname(key).toLowerCase();
+  switch (ext) {
+    case '.png':
+      return 'image/png';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    case '.jpg':
+    case '.jpeg':
+    default:
+      return 'image/jpeg';
+  }
+}
+
+/** Stream banner bytes for app carousel (private S3 → public API proxy). */
+export async function getBannerImagePayload(
+  bannerId: string,
+): Promise<{ buffer: Buffer; contentType: string } | null> {
+  const banner = await prisma.banner.findUnique({ where: { id: bannerId } });
+  if (!banner || !banner.isActive || !banner.imageUrl) return null;
+
+  const imageUrl = banner.imageUrl;
+
+  if (imageUrl.startsWith('/uploads/banners/')) {
+    const localPath = path.join(process.cwd(), imageUrl.replace(/^\//, ''));
+    if (!fs.existsSync(localPath)) return null;
+    const buffer = fs.readFileSync(localPath);
+    return { buffer, contentType: contentTypeForKey(localPath) };
+  }
+
+  if (!isS3Configured() || !s3Client) {
+    logger.warn('[BANNER] Cannot load image: S3 not configured');
+    return null;
+  }
+
+  const key = extractS3Key(imageUrl);
+  if (!key) return null;
+
+  try {
+    const response = await s3Client.send(
+      new GetObjectCommand({
+        Bucket: AWS_S3_BUCKET!,
+        Key: key,
+      }),
+    );
+    if (!response.Body) return null;
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of response.Body as AsyncIterable<Buffer | Uint8Array>) {
+      chunks.push(Buffer.from(chunk));
+    }
+    return {
+      buffer: Buffer.concat(chunks),
+      contentType: response.ContentType || contentTypeForKey(key),
+    };
+  } catch (err: any) {
+    logger.error(`[BANNER] Failed to load image ${bannerId}: ${err?.message || err}`);
+    return null;
+  }
 }

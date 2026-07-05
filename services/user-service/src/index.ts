@@ -9,6 +9,7 @@ import {
   createBanner,
   updateBanner,
   deleteBanner,
+  getBannerImagePayload,
   normalizePlacement,
   BANNER_WIDTH,
   BANNER_HEIGHT,
@@ -789,6 +790,23 @@ app.get('/api/user/support/:id', authenticate, asyncHandler(async (req: AuthRequ
 }));
 
 // ==================== MARKETING BANNERS ====================
+
+/**
+ * GET /api/banners/image/:id — serve banner image bytes (private S3 proxy).
+ */
+app.get(
+  '/api/banners/image/:id',
+  asyncHandler(async (req, res) => {
+    const payload = await getBannerImagePayload(req.params.id);
+    if (!payload) {
+      res.status(404).json({ success: false, message: 'Banner image not found' });
+      return;
+    }
+    res.set('Content-Type', payload.contentType);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.send(payload.buffer);
+  }),
+);
 
 /**
  * GET /api/banners/active — active banners for a screen placement (app-facing).
