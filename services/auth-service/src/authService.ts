@@ -551,6 +551,56 @@ export async function addPhoneWithFirebase(
   return { user: await buildUserProfile(user) };
 }
 
+/**
+ * Change the phone number on an existing account.
+ * The client must verify ownership of the NEW number via Firebase OTP and
+ * send the resulting Firebase ID token here.
+ */
+export async function changePhoneWithFirebase(
+  userId: string,
+  firebaseIdToken: string
+): Promise<{ user: UserProfile }> {
+  logger.info(`[AUTH] Changing phone via Firebase for user ${userId}`);
+
+  const result = await FirebaseAuth.verifyFirebaseToken(firebaseIdToken);
+
+  if (!result.success || !result.phone) {
+    throw new Error(result.error || 'Firebase phone verification failed');
+  }
+
+  const phone = result.phone;
+
+  const currentUser = await prisma.user.findUnique({ where: { id: userId } });
+  if (!currentUser) {
+    throw new Error('User not found');
+  }
+
+  if (currentUser.phone === phone) {
+    // No-op: verified the number they already have.
+    return { user: await buildUserProfile(currentUser) };
+  }
+
+  // The new number must not belong to another account.
+  const existingUser = await prisma.user.findUnique({ where: { phone } });
+  if (existingUser && existingUser.id !== userId) {
+    throw new DuplicatePhoneError(phone);
+  }
+
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: {
+      phone,
+      firebaseUid: result.uid,
+      isVerified: true,
+      updatedAt: new Date(),
+    },
+  });
+
+  logger.info(`[AUTH] Phone number changed via Firebase for user ${userId}: ${currentUser.phone} -> ${phone}`);
+
+  return { user: await buildUserProfile(user) };
+}
+
 // ─── Token Management ───────────────────────────────────────────────────
 
 export async function refreshAccessToken(refreshToken: string): Promise<{ accessToken: string; expiresIn: number }> {
@@ -606,19 +656,23 @@ export async function updateUserProfile(
   userId: string,
   updates: { firstName?: string; lastName?: string; email?: string; profileImage?: string }
 ): Promise<UserProfile> {
-  const filteredUpdates: { firstName?: string; lastName?: string; email?: string; profileImage?: string } = {};
+  const filteredUpdates: { firstName?: string; lastName?: string | null; email?: string; profileImage?: string | null } = {};
 
   if (updates.firstName !== undefined && updates.firstName.trim() !== '') {
     filteredUpdates.firstName = updates.firstName.trim();
   }
-  if (updates.lastName !== undefined && updates.lastName.trim() !== '') {
-    filteredUpdates.lastName = updates.lastName.trim();
+  if (updates.lastName !== undefined) {
+    // Empty string is an explicit clear (e.g. "John Doe" -> "John").
+    const trimmed = updates.lastName.trim();
+    filteredUpdates.lastName = trimmed === '' ? null : trimmed;
   }
   if (updates.email !== undefined && updates.email.trim() !== '') {
     filteredUpdates.email = updates.email.trim().toLowerCase();
   }
-  if (updates.profileImage !== undefined && updates.profileImage.trim() !== '') {
-    filteredUpdates.profileImage = updates.profileImage.trim();
+  if (updates.profileImage !== undefined) {
+    // Empty string is an explicit "remove photo".
+    const trimmed = updates.profileImage.trim();
+    filteredUpdates.profileImage = trimmed === '' ? null : trimmed;
   }
 
   if (Object.keys(filteredUpdates).length === 0) {

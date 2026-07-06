@@ -1,9 +1,11 @@
 import express, { Response } from 'express';
+import path from 'path';
 import { body, validationResult } from 'express-validator';
 import { authenticate, AuthRequest } from '@raahi/shared';
 import { asyncHandler } from '@raahi/shared';
 import * as AuthService from '../authService';
 import * as FirebaseAuth from '../firebaseAuth';
+import * as storage from '../storage';
 import { createLogger } from '@raahi/shared';
 
 const logger = createLogger('auth-routes');
@@ -1023,6 +1025,91 @@ router.put(
   })
 );
 
+/**
+ * @openapi
+ * /api/auth/profile/photo-upload-url:
+ *   post:
+ *     tags: [User Profile]
+ *     summary: Get a presigned S3 upload URL for a profile photo
+ *     description: |
+ *       Returns a short-lived presigned PUT URL. The client uploads the image
+ *       directly to S3, then calls PUT /api/auth/profile with
+ *       profileImage=downloadUrl to save it.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fileName, contentType]
+ *             properties:
+ *               fileName:
+ *                 type: string
+ *                 example: avatar.jpg
+ *               contentType:
+ *                 type: string
+ *                 example: image/jpeg
+ *     responses:
+ *       200:
+ *         description: Presigned upload URL generated successfully
+ *       400:
+ *         description: Validation failed (e.g. non-image content type)
+ *       503:
+ *         description: Storage not configured
+ */
+router.post(
+  '/profile/photo-upload-url',
+  authenticate,
+  [
+    body('fileName').isString().notEmpty(),
+    body('contentType').isString().notEmpty(),
+  ],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { fileName, contentType } = req.body as { fileName: string; contentType: string };
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+    if (!allowedTypes.includes(contentType.toLowerCase())) {
+      res.status(400).json({
+        success: false,
+        message: 'Only JPEG, PNG, WEBP or HEIC images are allowed for profile photos',
+      });
+      return;
+    }
+
+    if (!storage.isS3Configured()) {
+      res.status(503).json({ success: false, message: 'Photo storage is not available right now' });
+      return;
+    }
+
+    // Sanitize file name to prevent path traversal; keep only the extension.
+    const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const key = `profile-photos/${req.user!.id}/${Date.now()}_${safeName}`;
+
+    const uploadUrl = await storage.generatePresignedUploadUrl(key, contentType);
+    if (!uploadUrl) {
+      res.status(500).json({ success: false, message: 'Failed to generate upload URL' });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        uploadUrl,
+        downloadUrl: storage.getPublicUrl(key),
+        key,
+      },
+    });
+  })
+);
+
 // ─── Phone Number Management (for Google signup users) ──────────────────
 
 /**
@@ -1089,6 +1176,69 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Phone number verified and added successfully',
+        data: result,
+      });
+    } catch (error: any) {
+      if (error.name === 'DuplicatePhoneError') {
+        res.status(409).json({
+          success: false,
+          message: error.message,
+          code: 'PHONE_ALREADY_IN_USE',
+        });
+        return;
+      }
+      throw error;
+    }
+  })
+);
+
+/**
+ * @openapi
+ * /api/auth/change-phone:
+ *   post:
+ *     tags: [User Profile]
+ *     summary: Change the account's phone number
+ *     description: |
+ *       The client verifies the NEW phone number via Firebase OTP and sends
+ *       the resulting Firebase ID token. The number must not belong to
+ *       another account.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [idToken]
+ *             properties:
+ *               idToken:
+ *                 type: string
+ *                 description: Firebase ID token from OTP verification of the new number
+ *     responses:
+ *       200:
+ *         description: Phone number changed successfully
+ *       409:
+ *         description: Phone number already in use by another account
+ */
+router.post(
+  '/change-phone',
+  authenticate,
+  [
+    body('idToken').isString().notEmpty().withMessage('Firebase ID token is required'),
+  ],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    try {
+      const result = await AuthService.changePhoneWithFirebase(req.user!.id, req.body.idToken);
+      res.status(200).json({
+        success: true,
+        message: 'Phone number changed successfully',
         data: result,
       });
     } catch (error: any) {
