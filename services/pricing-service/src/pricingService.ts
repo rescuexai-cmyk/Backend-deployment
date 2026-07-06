@@ -25,6 +25,7 @@ import {
   CityPricingParams,
 } from './algorithms';
 import { getRouteDistanceAndTime } from './routeService';
+import { assertNotUnavailableIntercity } from './intercity';
 import { getUnavailableVehicleTypesForCity } from './serviceCatalog';
 import {
   getTimeBasedFlags,
@@ -327,6 +328,11 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
     distanceKm = 0.1;
     timeMin = 1;
   }
+
+  // Intercity routes are not priced as city trips. Throws IntercityRouteError
+  // (translated by handlers into a "coming soon" payload) until the intercity
+  // product is enabled via platform_config.
+  await assertNotUnavailableIntercity(distanceKm, timeMin);
 
   const [demandSupplyRatio, weather, isSpecialEvent] = await Promise.all([
     getDemandSupplyRatio(pickupLat, pickupLng, 5),

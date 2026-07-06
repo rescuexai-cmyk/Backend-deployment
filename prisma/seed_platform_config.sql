@@ -37,3 +37,23 @@ VALUES
   )
 -- DO NOTHING: never overwrite an ops-edited rollout on re-seed.
 ON CONFLICT (key) DO NOTHING;
+
+-- ─────────────────────────────────────────────────────────────
+-- Intercity route handling (pricing-service src/intercity.ts)
+-- Routes longer than thresholdKm are classified intercity. While
+-- enabled=false, pricing returns the Intercity (coming soon) product instead
+-- of city vehicles and ride creation rejects such routes. To launch
+-- intercity later, set "enabled": true (and "comingSoon": false) — no deploy
+-- needed; pricing-service caches this row for ~60s.
+-- ─────────────────────────────────────────────────────────────
+INSERT INTO platform_config (id, key, value, description, "updatedAt")
+VALUES
+  (
+    gen_random_uuid()::text,
+    'intercity_config_v1',
+    '{"thresholdKm":50,"enabled":false,"comingSoon":true,"name":"Intercity","description":"Outstation trips between cities","message":"Intercity is coming soon"}',
+    'Intercity route threshold + availability for rider pricing/booking',
+    NOW()
+  )
+-- DO NOTHING: never overwrite an ops-edited config on re-seed.
+ON CONFLICT (key) DO NOTHING;

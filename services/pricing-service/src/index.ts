@@ -21,6 +21,7 @@ import {
 } from './promoService';
 import { listZoneHealth, runMarketplaceGovernance, upsertMarketplacePolicy, getMarketplacePolicy } from './marketplacePolicy';
 import { getAvailableServices } from './serviceCatalog';
+import { IntercityRouteError, intercityResponsePayload } from './intercity';
 
 const logger = createLogger('pricing-service');
 const app = express();
@@ -140,16 +141,26 @@ app.post(
       return;
     }
     const { pickupLat, pickupLng, dropLat, dropLng, vehicleType, scheduledTime, stops } = req.body;
-    const pricing = await calculateFare({
-      pickupLat,
-      pickupLng,
-      dropLat,
-      dropLng,
-      vehicleType,
-      scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
-      stops,
-    });
-    res.status(200).json({ success: true, data: pricing });
+    try {
+      const pricing = await calculateFare({
+        pickupLat,
+        pickupLng,
+        dropLat,
+        dropLng,
+        vehicleType,
+        scheduledTime: scheduledTime ? new Date(scheduledTime) : undefined,
+        stops,
+      });
+      res.status(200).json({ success: true, data: pricing });
+    } catch (error: any) {
+      // Intercity routes are a valid answer, not an error: the app shows the
+      // Intercity (coming soon) product instead of city vehicles.
+      if (error instanceof IntercityRouteError) {
+        res.status(200).json({ success: true, data: intercityResponsePayload(error) });
+        return;
+      }
+      throw error;
+    }
   })
 );
 
@@ -203,15 +214,23 @@ app.post(
       return;
     }
     const { pickupLat, pickupLng, dropLat, dropLng, scheduledTime, stops } = req.body;
-    const allFares = await calculateAllFares(
-      pickupLat,
-      pickupLng,
-      dropLat,
-      dropLng,
-      scheduledTime ? new Date(scheduledTime) : undefined,
-      stops
-    );
-    res.status(200).json({ success: true, data: allFares });
+    try {
+      const allFares = await calculateAllFares(
+        pickupLat,
+        pickupLng,
+        dropLat,
+        dropLng,
+        scheduledTime ? new Date(scheduledTime) : undefined,
+        stops
+      );
+      res.status(200).json({ success: true, data: allFares });
+    } catch (error: any) {
+      if (error instanceof IntercityRouteError) {
+        res.status(200).json({ success: true, data: intercityResponsePayload(error) });
+        return;
+      }
+      throw error;
+    }
   })
 );
 

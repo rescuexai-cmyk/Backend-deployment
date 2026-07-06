@@ -327,6 +327,19 @@ export async function createRide(req: CreateRideRequest) {
     stops: req.stops,
   });
 
+  // Pricing classifies long routes as intercity (platform_config
+  // intercity_config_v1). Until intercity launches these are not bookable;
+  // reject here so stale/tampered clients can't create such rides. Rescue
+  // rides are exempt (short-radius by nature, and must never be blocked).
+  if (!isRescue && pricing?.isIntercity === true && pricing?.intercity?.available !== true) {
+    const message = pricing?.intercity?.message || 'Intercity rides are coming soon';
+    const err: any = new Error(message);
+    err.statusCode = 422;
+    err.code = 'INTERCITY_NOT_AVAILABLE';
+    err.isOperational = true;
+    throw err;
+  }
+
   // ─── Promo/coupon (booking-time discount) ─────────────────────────────────
   // Dry-run first so an invalid code is rejected cleanly BEFORE the ride row is
   // created. The discount is baked into totalFare; usage is recorded after the
