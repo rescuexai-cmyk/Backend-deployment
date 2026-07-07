@@ -410,16 +410,23 @@ app.get('/api/admin/drivers/:driverId', authenticate, requireVerifier, asyncHand
 /**
  * GET /api/admin/documents/review-queue
  *
- * Manual review queue: documents that Cloud Vision flagged / failed / left
- * pending, grouped per driver, with presigned URLs so admins can view the
- * actual uploads in the browser.
+ * Document review list with presigned URLs so admins can view the actual
+ * uploads in the browser.
+ *
+ * status:
+ *   - "all" (default): documents needing manual review (flagged/failed/pending/processing)
+ *   - "verified": documents already verified (by AI or admin)
+ *   - "everything": every uploaded document regardless of status
+ *   - or a single raw status (flagged/failed/pending/processing)
+ * search: filters by driver name, phone, or email.
  */
 app.get(
   '/api/admin/documents/review-queue',
   authenticate,
   requireVerifier,
   [
-    query('status').optional().isIn(['flagged', 'failed', 'pending', 'processing', 'all']),
+    query('status').optional().isIn(['flagged', 'failed', 'pending', 'processing', 'verified', 'everything', 'all']),
+    query('search').optional().isString().isLength({ max: 100 }),
     query('limit').optional().isInt({ min: 1, max: MAX_PAGINATION_LIMIT }),
     query('offset').optional().isInt({ min: 0 }),
   ],
@@ -431,9 +438,31 @@ app.get(
     }
     const { limit, offset } = sanitizePagination(req.query.limit as string, req.query.offset as string);
     const statusFilter = (req.query.status as string) || 'all';
-    const statuses = statusFilter === 'all' ? ['flagged', 'failed', 'pending', 'processing'] : [statusFilter];
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
 
-    const where = { isVerified: false, verificationStatus: { in: statuses } };
+    const where: any = {};
+    if (statusFilter === 'all') {
+      where.isVerified = false;
+      where.verificationStatus = { in: ['flagged', 'failed', 'pending', 'processing'] };
+    } else if (statusFilter === 'verified') {
+      where.OR = [{ isVerified: true }, { verificationStatus: 'verified' }];
+    } else if (statusFilter !== 'everything') {
+      where.isVerified = false;
+      where.verificationStatus = { in: [statusFilter] };
+    }
+    if (search) {
+      where.driver = {
+        user: {
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' } },
+            { lastName: { contains: search, mode: 'insensitive' } },
+            { phone: { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+          ],
+        },
+      };
+    }
+
     const [docs, totalCount] = await Promise.all([
       prisma.driverDocument.findMany({
         where,
@@ -442,7 +471,8 @@ app.get(
             include: { user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } } },
           },
         },
-        orderBy: { uploadedAt: 'asc' },
+        // Keep each driver's documents together so the dashboard can group them.
+        orderBy: [{ driverId: 'asc' }, { uploadedAt: 'asc' }],
         take: limit,
         skip: offset,
       }),
@@ -456,6 +486,9 @@ app.get(
         document_name: d.documentName,
         uploaded_at: d.uploadedAt,
         verification_status: d.verificationStatus,
+        is_verified: d.isVerified,
+        verified_by: d.verifiedBy,
+        verified_at: d.verifiedAt,
         ai_verified: d.aiVerified,
         ai_confidence: d.aiConfidence,
         ai_mismatch_reason: d.aiMismatchReason,

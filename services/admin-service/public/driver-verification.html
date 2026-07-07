@@ -82,10 +82,16 @@
 
     <div id="mainContent" style="display:none">
       <div class="row" style="margin-bottom:14px">
+        <div class="field" style="margin-bottom:0; flex:1; min-width:260px">
+          <label>Search driver</label>
+          <input id="docSearch" type="search" placeholder="Name or phone number…" />
+        </div>
         <div class="field" style="margin-bottom:0; width:240px">
-          <label>Filter by AI status</label>
+          <label>Show</label>
           <select id="docStatusFilter">
-            <option value="all">All needing review</option>
+            <option value="all">Needs manual review</option>
+            <option value="everything">All documents</option>
+            <option value="verified">Verified (AI or admin)</option>
             <option value="flagged">Flagged by AI</option>
             <option value="failed">Verification failed</option>
             <option value="pending">Pending (not processed)</option>
@@ -95,10 +101,10 @@
       </div>
       <div class="card">
         <table>
-          <thead><tr><th>Driver</th><th>Document</th><th>AI verdict</th><th>Uploaded</th><th></th></tr></thead>
+          <thead><tr><th>Document</th><th>Status</th><th>Verdict / reason</th><th>Uploaded</th><th></th></tr></thead>
           <tbody id="docRows"></tbody>
         </table>
-        <div id="docEmpty" class="empty" style="display:none">🎉 No documents waiting for manual review.</div>
+        <div id="docEmpty" class="empty" style="display:none">No documents match this view.</div>
       </div>
     </div>
   </div>
@@ -209,33 +215,65 @@
       return new Date(d).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     }
 
-    function aiVerdictHtml(d) {
+    function statusPillHtml(d) {
+      if (d.is_verified || d.verification_status === 'verified') {
+        const by = d.verified_by === 'AI_VISION' ? 'AI' : (d.verified_by === 'ADMIN' ? 'admin' : '');
+        return '<span class="pill on">verified' + (by ? ' · ' + by : '') + '</span>';
+      }
       const st = d.verification_status || 'pending';
-      const pill = st === 'flagged' || st === 'failed' ? 'off' : (st === 'pending' || st === 'processing' ? 'warn' : 'type');
-      let html = '<span class="pill ' + pill + '">' + esc(st) + '</span>';
-      if (d.ai_confidence != null) html += ' <span class="muted">' + Math.round(d.ai_confidence * 100) + '%</span>';
-      return html;
+      const pill = st === 'flagged' || st === 'failed' ? 'off' : 'warn';
+      return '<span class="pill ' + pill + '">' + esc(st) + '</span>';
     }
+
+    function verdictHtml(d) {
+      let html = '';
+      if (d.ai_confidence != null) html += '<span class="muted">AI confidence ' + Math.round(d.ai_confidence * 100) + '%</span>';
+      const reason = d.ai_mismatch_reason || d.rejection_reason;
+      if (reason) html += '<div class="hint" style="max-width:300px">' + esc(reason) + '</div>';
+      return html || '<span class="muted">—</span>';
+    }
+
+    let searchDebounce = null;
 
     async function loadDocs() {
       try {
         const status = $('docStatusFilter').value;
-        const { data } = await api('GET', '/api/admin/documents/review-queue?limit=100&status=' + encodeURIComponent(status));
+        const search = $('docSearch').value.trim();
+        let qs = '/api/admin/documents/review-queue?limit=100&status=' + encodeURIComponent(status);
+        if (search) qs += '&search=' + encodeURIComponent(search);
+        const { data } = await api('GET', qs);
         const docs = data.documents || [];
         const rows = $('docRows'); rows.innerHTML = '';
         $('docEmpty').style.display = docs.length ? 'none' : 'block';
+
+        // Group documents under a header row per driver.
+        let lastDriverId = null;
+        let driverCount = 0;
         for (const d of docs) {
+          if (d.driver.id !== lastDriverId) {
+            lastDriverId = d.driver.id;
+            driverCount++;
+            const head = document.createElement('tr');
+            head.innerHTML =
+              '<td colspan="5" style="background:var(--panel-2); padding:10px 14px">' +
+              '<strong>' + esc(d.driver.name) + '</strong>' +
+              ' <span class="muted">' + esc(d.driver.phone || d.driver.email || '') + '</span>' +
+              (d.driver.vehicle_type ? ' <span class="pill type">' + esc(d.driver.vehicle_type) + (d.driver.vehicle_number ? ' · ' + esc(d.driver.vehicle_number) : '') + '</span>' : '') +
+              ' <span class="muted" style="float:right">' + esc(d.driver.onboarding_status || '') + '</span>' +
+              '</td>';
+            rows.appendChild(head);
+          }
           const tr = document.createElement('tr');
           tr.innerHTML =
-            '<td><strong>' + esc(d.driver.name) + '</strong><div class="hint">' + esc(d.driver.phone || d.driver.email || '') + '</div></td>' +
-            '<td><span class="pill type">' + esc(d.document_type) + '</span></td>' +
-            '<td>' + aiVerdictHtml(d) + (d.ai_mismatch_reason ? '<div class="hint" style="max-width:280px">' + esc(d.ai_mismatch_reason) + '</div>' : '') + '</td>' +
+            '<td style="padding-left:26px"><span class="pill type">' + esc(d.document_type) + '</span></td>' +
+            '<td>' + statusPillHtml(d) + '</td>' +
+            '<td>' + verdictHtml(d) + '</td>' +
             '<td class="muted">' + fmtDate(d.uploaded_at) + '</td>' +
             '<td><div class="actions"><button data-r class="primary">Review</button></div></td>';
           tr.querySelector('[data-r]').onclick = () => openDocModal(d);
           rows.appendChild(tr);
         }
-        $('summary').textContent = docs.length + ' documents awaiting review';
+        $('summary').textContent = docs.length + ' documents · ' + driverCount + ' drivers' + (data.pagination && data.pagination.has_more ? ' (showing first 100)' : '');
       } catch (e) { toast(e.message, 'err'); }
     }
 
@@ -245,9 +283,13 @@
       $('d_driver').textContent = d.driver.name;
       $('d_contact').textContent = [d.driver.phone, d.driver.email].filter(Boolean).join(' · ');
       $('d_vehicle').textContent = d.driver.vehicle_type ? ('Vehicle: ' + d.driver.vehicle_type + (d.driver.vehicle_number ? ' · ' + d.driver.vehicle_number : '')) : '';
-      $('d_ai').innerHTML = aiVerdictHtml(d);
-      $('d_reason').textContent = d.ai_mismatch_reason || '';
+      $('d_ai').innerHTML = statusPillHtml(d) + (d.ai_confidence != null ? ' <span class="muted">' + Math.round(d.ai_confidence * 100) + '%</span>' : '');
+      $('d_reason').textContent = d.ai_mismatch_reason || d.rejection_reason || '';
       $('d_rejectReason').value = '';
+      // Already-verified docs can still be revoked (Reject) but not re-approved.
+      const alreadyVerified = !!(d.is_verified || d.verification_status === 'verified');
+      $('approveDocBtn').disabled = alreadyVerified;
+      $('approveDocBtn').textContent = alreadyVerified ? 'Already approved' : 'Approve';
 
       const wrap = $('d_previewWrap');
       wrap.innerHTML = '';
@@ -301,6 +343,11 @@
     $('logoutBtn').onclick = () => { setLoggedOut(); toast('Logged out', 'ok'); };
     $('refresh').onclick = loadDocs;
     $('docStatusFilter').onchange = loadDocs;
+    $('docSearch').oninput = () => {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(loadDocs, 350);
+    };
+    $('docSearch').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(searchDebounce); loadDocs(); } };
     $('closeDocModal').onclick = $('cancelDocModal').onclick = () => $('docOverlay').classList.remove('show');
     $('docOverlay').onclick = (e) => { if (e.target === $('docOverlay')) $('docOverlay').classList.remove('show'); };
     $('approveDocBtn').onclick = () => reviewDoc(true);
