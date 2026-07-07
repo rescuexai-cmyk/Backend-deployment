@@ -68,7 +68,9 @@ export function isVisionConfigured(): boolean {
 }
 
 /**
- * Call Vision API using REST with API Key
+ * Call Vision API using REST with API Key.
+ * Surfaces per-response Vision errors (bad key, API disabled, quota) instead of
+ * silently returning empty text that would be misreported as a blurry image.
  */
 async function callVisionApiWithKey(imageBuffer: Buffer, features: string[]): Promise<any> {
   const apiKey = getApiKey();
@@ -85,11 +87,99 @@ async function callVisionApiWithKey(imageBuffer: Buffer, features: string[]): Pr
     ],
   };
 
-  const response = await axios.post(`${VISION_API_URL}?key=${apiKey}`, requestBody, {
-    headers: { 'Content-Type': 'application/json' },
-  });
+  let response;
+  try {
+    response = await axios.post(`${VISION_API_URL}?key=${apiKey}`, requestBody, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000,
+    });
+  } catch (err: any) {
+    const apiError = err?.response?.data?.error;
+    if (apiError) {
+      throw new Error(`Vision API error ${apiError.code}: ${apiError.message}`);
+    }
+    throw err;
+  }
 
-  return response.data.responses[0];
+  const result = response.data.responses?.[0] ?? {};
+  if (result.error) {
+    throw new Error(`Vision API error ${result.error.code}: ${result.error.message}`);
+  }
+  return result;
+}
+
+const VISION_FILES_API_URL = 'https://vision.googleapis.com/v1/files:annotate';
+
+function isPdfBuffer(buffer: Buffer): boolean {
+  return buffer.length > 4 && buffer.subarray(0, 5).toString('latin1') === '%PDF-';
+}
+
+/**
+ * OCR a PDF document. Vision's images:annotate does NOT support PDFs — they
+ * must go through files:annotate (batchAnnotateFiles). DigiLocker/Parivahan
+ * documents (RC, insurance, DL extracts) are almost always PDFs.
+ */
+async function extractTextFromPdf(pdfBuffer: Buffer): Promise<string> {
+  const pages = [1, 2]; // ID documents: everything relevant is on the first pages
+
+  if (useApiKey) {
+    const apiKey = getApiKey();
+    const requestBody = {
+      requests: [
+        {
+          inputConfig: {
+            content: pdfBuffer.toString('base64'),
+            mimeType: 'application/pdf',
+          },
+          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+          pages,
+        },
+      ],
+    };
+
+    let response;
+    try {
+      response = await axios.post(`${VISION_FILES_API_URL}?key=${apiKey}`, requestBody, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60000,
+      });
+    } catch (err: any) {
+      const apiError = err?.response?.data?.error;
+      if (apiError) {
+        throw new Error(`Vision files API error ${apiError.code}: ${apiError.message}`);
+      }
+      throw err;
+    }
+
+    const fileResponse = response.data.responses?.[0];
+    if (fileResponse?.error) {
+      throw new Error(`Vision files API error: ${fileResponse.error.message}`);
+    }
+    const pageResponses = fileResponse?.responses ?? [];
+    return pageResponses
+      .map((r: any) => r?.fullTextAnnotation?.text || '')
+      .join('\n')
+      .trim();
+  }
+
+  const client = getVisionClient();
+  const [result] = await client.batchAnnotateFiles({
+    requests: [
+      {
+        inputConfig: {
+          content: pdfBuffer,
+          mimeType: 'application/pdf',
+        },
+        features: [{ type: 'DOCUMENT_TEXT_DETECTION' as any }],
+        pages,
+      },
+    ],
+  });
+  const pageResponses = result.responses?.[0]?.responses ?? [];
+  return pageResponses
+    .map((r) => r.fullTextAnnotation?.text || '')
+    .join('\n')
+    .trim();
 }
 
 export function getConfidenceThreshold(): number {
@@ -105,8 +195,17 @@ export interface ValidationResult {
 
 const PAN_REGEX = /[A-Z]{5}[0-9]{4}[A-Z]/;
 const AADHAAR_REGEX = /\b\d{4}\s?\d{4}\s?\d{4}\b/;
-const VEHICLE_REG_REGEX = /[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}/i;
-const DL_NUMBER_REGEX = /[A-Z]{2}\d{2}\s?\d{4}\s?\d{7}/;
+// Matched against separator-stripped text (spaces, hyphens, dots removed):
+// real documents print numbers like "HR-26-DK-8337" or "DL-04 2011 0149646".
+const VEHICLE_REG_REGEX = /[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{3,4}/i;
+// Standard DL format after stripping: SS + RR + YYYY + NNNNNNN (15 chars),
+// with tolerance for older 13–14 digit serials.
+const DL_NUMBER_REGEX = /[A-Z]{2}\d{12,14}/;
+
+/** Remove separators OCR keeps between ID-number groups (space, -, ., /). */
+function stripSeparators(text: string): string {
+  return text.replace(/[\s\-.]/g, '');
+}
 
 // Name extraction patterns
 const NAME_PATTERNS = {
@@ -291,27 +390,33 @@ function countKeywordMatches(text: string, keywords: string[]): number {
 }
 
 /**
- * Extract text from an image using Cloud Vision OCR
+ * Extract text from a document using Cloud Vision OCR.
+ * - PDFs are routed to files:annotate (images:annotate rejects them).
+ * - Images use DOCUMENT_TEXT_DETECTION, which handles dense ID-card text far
+ *   better than plain TEXT_DETECTION, with a TEXT_DETECTION result fallback.
  */
 export async function extractText(imageUrl: string): Promise<string> {
   const imageBuffer = await fetchImageBuffer(imageUrl);
-  
+
+  if (isPdfBuffer(imageBuffer)) {
+    logger.info('[VISION] PDF detected, using files:annotate OCR');
+    return extractTextFromPdf(imageBuffer);
+  }
+
   if (useApiKey) {
-    const result = await callVisionApiWithKey(imageBuffer, ['TEXT_DETECTION']);
+    const result = await callVisionApiWithKey(imageBuffer, ['DOCUMENT_TEXT_DETECTION']);
+    const fullText = result.fullTextAnnotation?.text;
+    if (fullText) return fullText;
     const detections = result.textAnnotations || [];
-    if (detections.length === 0) return '';
-    return detections[0].description || '';
+    return detections[0]?.description || '';
   }
-  
+
   const client = getVisionClient();
-  const [result] = await client.textDetection({ image: { content: imageBuffer } });
+  const [result] = await client.documentTextDetection({ image: { content: imageBuffer } });
+  const fullText = result.fullTextAnnotation?.text;
+  if (fullText) return fullText;
   const detections = result.textAnnotations || [];
-  
-  if (detections.length === 0) {
-    return '';
-  }
-  
-  return detections[0].description || '';
+  return detections[0]?.description || '';
 }
 
 /**
@@ -343,21 +448,21 @@ export async function validatePanCard(imageUrl: string, expectedPan?: string | n
     confidence += 0.35;
     extractedData.keywordsMatched = kwMatch;
   } else if (kwMatch >= 1) {
-    confidence += 0.15;
+    confidence += 0.25;
     extractedData.keywordsMatched = kwMatch;
   }
 
-  const panMatch = text.replace(/\s/g, '').match(PAN_REGEX);
+  const panMatch = stripSeparators(text).match(PAN_REGEX);
   if (panMatch) {
     extractedData.panNumber = panMatch[0];
-    confidence += 0.35;
+    confidence += 0.45;
 
     if (expectedPan) {
-      const normalizedExpected = expectedPan.replace(/\s/g, '').toUpperCase();
+      const normalizedExpected = stripSeparators(expectedPan).toUpperCase();
       const normalizedExtracted = panMatch[0].toUpperCase();
       
       if (normalizedExtracted === normalizedExpected) {
-        confidence += 0.30;
+        confidence += 0.25;
         extractedData.panMatched = true;
       } else {
         extractedData.panMatched = false;
@@ -416,7 +521,7 @@ export async function validateAadhaar(imageUrl: string, expectedAadhaar?: string
     confidence += 0.35;
     extractedData.keywordsMatched = kwMatch;
   } else if (kwMatch >= 1) {
-    confidence += 0.15;
+    confidence += 0.25;
     extractedData.keywordsMatched = kwMatch;
   }
 
@@ -424,13 +529,13 @@ export async function validateAadhaar(imageUrl: string, expectedAadhaar?: string
   if (aadhaarMatch) {
     const detected = aadhaarMatch[0].replace(/\s/g, '');
     extractedData.aadhaarNumber = `${detected.slice(0, 4)} ${detected.slice(4, 8)} ${detected.slice(8)}`;
-    confidence += 0.35;
+    confidence += 0.45;
 
     if (expectedAadhaar) {
-      const normalizedExpected = expectedAadhaar.replace(/\s/g, '');
+      const normalizedExpected = stripSeparators(expectedAadhaar);
       
       if (detected === normalizedExpected) {
-        confidence += 0.30;
+        confidence += 0.25;
         extractedData.aadhaarMatched = true;
       } else {
         extractedData.aadhaarMatched = false;
@@ -489,20 +594,20 @@ export async function validateLicense(imageUrl: string): Promise<ValidationResul
     confidence += 0.40;
     extractedData.keywordsMatched = kwMatch;
   } else if (kwMatch >= 1) {
-    confidence += 0.20;
+    confidence += 0.25;
     extractedData.keywordsMatched = kwMatch;
   }
 
-  const dlMatch = text.replace(/\s/g, '').match(DL_NUMBER_REGEX);
+  const dlMatch = stripSeparators(text).match(DL_NUMBER_REGEX);
   if (dlMatch) {
     extractedData.licenseNumber = dlMatch[0];
-    confidence += 0.40;
+    confidence += 0.45;
   }
 
-  const expiryMatch = text.match(/valid\s*(till|upto|to|until)[:\s]*(\d{2}[/-]\d{2}[/-]\d{4})/i);
+  const expiryMatch = text.match(/valid\s*(till|upto|to|until)?[:\s]*(\d{2}[/-]\d{2}[/-]\d{4})/i);
   if (expiryMatch) {
     extractedData.expiryDate = expiryMatch[2];
-    confidence += 0.20;
+    confidence += 0.15;
   }
 
   if (confidence < 0.3) {
@@ -552,21 +657,21 @@ export async function validateRC(imageUrl: string, expectedVehicleNumber?: strin
     confidence += 0.35;
     extractedData.keywordsMatched = kwMatch;
   } else if (kwMatch >= 1) {
-    confidence += 0.15;
+    confidence += 0.25;
     extractedData.keywordsMatched = kwMatch;
   }
 
-  const regMatch = text.replace(/\s/g, '').match(VEHICLE_REG_REGEX);
+  const regMatch = stripSeparators(text).match(VEHICLE_REG_REGEX);
   if (regMatch) {
     extractedData.vehicleNumber = regMatch[0];
-    confidence += 0.35;
+    confidence += 0.45;
 
     if (expectedVehicleNumber) {
-      const normalizedExpected = expectedVehicleNumber.replace(/[\s-]/g, '').toUpperCase();
-      const normalizedExtracted = regMatch[0].replace(/[\s-]/g, '').toUpperCase();
+      const normalizedExpected = stripSeparators(expectedVehicleNumber).toUpperCase();
+      const normalizedExtracted = stripSeparators(regMatch[0]).toUpperCase();
       
       if (normalizedExtracted === normalizedExpected) {
-        confidence += 0.30;
+        confidence += 0.25;
         extractedData.vehicleNumberMatched = true;
       } else {
         extractedData.vehicleNumberMatched = false;

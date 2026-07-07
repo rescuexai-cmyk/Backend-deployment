@@ -2355,6 +2355,67 @@ app.get('/api/driver/documents/:id/verification-status', authenticate, asyncHand
 }));
 
 /**
+ * Re-queue verification for all unverified documents of the calling driver.
+ * Used to recover drivers whose documents were flagged/failed by earlier
+ * pipeline bugs (PDF OCR unsupported, hyphenated numbers, swallowed Vision
+ * errors) without forcing a re-upload.
+ */
+app.post('/api/driver/documents/reverify', authenticate, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({
+    where: { userId: req.user!.id },
+    include: { documents: true },
+  });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver profile not found' });
+    return;
+  }
+
+  if (!isVisionConfigured() || !isQueueAvailable()) {
+    res.status(503).json({
+      success: false,
+      message: 'Document verification is temporarily unavailable. Please try again later.',
+    });
+    return;
+  }
+
+  const supportedTypes = ['LICENSE', 'PAN_CARD', 'AADHAAR_CARD', 'RC', 'INSURANCE'];
+  const toReverify = driver.documents.filter(
+    (d) => !d.isVerified && supportedTypes.includes(d.documentType),
+  );
+
+  const requeued: string[] = [];
+  for (const doc of toReverify) {
+    try {
+      await addVerificationJob(doc.id, driver.id, doc.documentType, doc.documentUrl, {
+        forceRequeue: true,
+      });
+      await prisma.driverDocument.update({
+        where: { id: doc.id },
+        data: { verificationStatus: 'pending', aiMismatchReason: null },
+      });
+      requeued.push(doc.documentType);
+    } catch (err: any) {
+      logger.error('[REVERIFY] Failed to queue document', {
+        documentId: doc.id,
+        error: err.message,
+      });
+    }
+  }
+
+  logger.info(`[REVERIFY] Re-queued ${requeued.length} document(s) for driver ${driver.id}`, {
+    documentTypes: requeued,
+  });
+
+  res.json({
+    success: true,
+    message: requeued.length > 0
+      ? `${requeued.length} document(s) re-submitted for verification`
+      : 'No unverified documents to re-verify',
+    data: { requeued },
+  });
+}));
+
+/**
  * @openapi
  * /api/driver/onboarding/status:
  *   get:

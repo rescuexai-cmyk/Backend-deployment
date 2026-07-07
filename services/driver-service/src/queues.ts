@@ -85,11 +85,18 @@ export async function addVerificationJob(
   driverId: string,
   documentType: string,
   documentUrl: string,
+  options?: { forceRequeue?: boolean },
 ): Promise<string> {
   const queue = getDocumentVerificationQueue();
   
   // Timeout after 3 seconds to avoid blocking HTTP response when Redis is down
   const timeoutMs = 3000;
+  // BullMQ dedupes by jobId (including completed/failed jobs kept for
+  // removeOnComplete/removeOnFail windows). Re-verification must use a unique
+  // id or the re-queued job is silently dropped.
+  const jobId = options?.forceRequeue
+    ? `verify-${documentId}-${Date.now()}`
+    : `verify-${documentId}`;
   const jobPromise = queue.add(
     'verify-document',
     {
@@ -99,7 +106,7 @@ export async function addVerificationJob(
       documentUrl,
     },
     {
-      jobId: `verify-${documentId}`,
+      jobId,
     },
   );
   
