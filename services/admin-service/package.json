@@ -10,6 +10,7 @@
   "dependencies": {
     "@raahi/shared": "file:../../packages/shared",
     "@aws-sdk/client-s3": "3.525.0",
+    "@aws-sdk/s3-request-presigner": "3.525.0",
     "express": "^4.18.2",
     "express-validator": "^7.0.1",
     "jsonwebtoken": "^9.0.2",

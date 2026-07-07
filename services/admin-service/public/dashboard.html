@@ -115,6 +115,7 @@
           <div id="bannerEmpty" class="empty" style="display:none">No banners yet.</div>
         </div>
       </div>
+
     </div>
   </div>
 
@@ -190,6 +191,7 @@
     let token = localStorage.getItem('raahi_admin_token') || '';
     let adminEmail = localStorage.getItem('raahi_admin_email') || '';
     let currentTab = localStorage.getItem('raahi_marketing_tab') || 'promos';
+    if (currentTab !== 'promos' && currentTab !== 'banners') currentTab = 'promos';
     const BANNER_W = 320, BANNER_H = 120;
 
     function setLoggedIn(email, accessToken) {
@@ -235,6 +237,9 @@
         const res = await fetch(API + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.message || 'Login failed');
+        if (data.data.role && data.data.role !== 'marketing') {
+          throw new Error('This account does not have access to the marketing dashboard');
+        }
         setLoggedIn(data.data.email, data.data.accessToken);
         toast('Logged in', 'ok');
       } catch (e) { toast(e.message, 'err'); }

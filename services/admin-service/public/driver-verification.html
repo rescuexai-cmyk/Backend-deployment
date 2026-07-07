@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raahi · Driver Verification</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --border: #2a2f3a;
+      --text: #e7eaf0; --muted: #9aa3b2; --accent: #5b8cff; --accent-2: #3f6fe0;
+      --green: #2ecc71; --red: #ff5c6c; --amber: #f5b544; --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+    header h1 { font-size: 18px; margin: 0; }
+    header h1 span { color: var(--accent); }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px 28px 80px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    button { font: inherit; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); padding: 9px 16px; border-radius: 9px; cursor: pointer; transition: .15s; white-space: nowrap; }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; font-weight: 600; }
+    button.danger { color: var(--red); }
+    button.ghost { background: transparent; }
+    button:disabled { opacity: .5; cursor: default; }
+    input, select { font: inherit; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 9px 11px; border-radius: 9px; width: 100%; }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
+    .field { margin-bottom: 14px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+    .token-bar { padding: 14px 16px; margin-bottom: 20px; }
+    .token-bar .row { align-items: flex-end; }
+    .token-bar .field { flex: 1; margin-bottom: 0; min-width: 200px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+    tbody tr:hover { background: var(--panel-2); }
+    .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .pill.on { background: rgba(46,204,113,.15); color: var(--green); }
+    .pill.off { background: rgba(255,92,108,.15); color: var(--red); }
+    .pill.warn { background: rgba(245,181,68,.15); color: var(--amber); }
+    .pill.type { background: rgba(91,140,255,.15); color: var(--accent); }
+    .muted { color: var(--muted); }
+    .actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .actions button { padding: 6px 10px; font-size: 12px; }
+    .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 20; overflow: auto; }
+    .overlay.show { display: flex; }
+    .modal { width: 100%; max-width: 820px; }
+    .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .modal-head h2 { margin: 0; font-size: 16px; }
+    .modal-body { padding: 20px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--border); }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 5px; }
+    #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); padding: 12px 18px; border-radius: 10px; opacity: 0; transition: .2s; z-index: 40; }
+    #toast.show { opacity: 1; }
+    #toast.err { border-color: var(--red); color: var(--red); }
+    #toast.ok { border-color: var(--green); color: var(--green); }
+    .stat { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Raahi <span>·</span> Driver Verification</h1>
+    <div class="stat" id="summary"></div>
+  </header>
+
+  <div class="container">
+    <div class="card token-bar" id="loginBar">
+      <div class="row" id="loginForm">
+        <div class="field"><label>Email</label><input id="email" type="email" placeholder="admin@raahi.com" autocomplete="username" /></div>
+        <div class="field"><label>Password</label><input id="password" type="password" placeholder="••••••••" autocomplete="current-password" /></div>
+        <button id="loginBtn" class="primary">Log in</button>
+      </div>
+      <div class="row" id="loggedInBar" style="display:none">
+        <div class="field" style="flex:1;margin-bottom:0"><label>Signed in as</label><div id="loggedInEmail" class="muted"></div></div>
+        <button id="refresh" class="ghost">Refresh</button>
+        <button id="logoutBtn" class="danger">Log out</button>
+      </div>
+    </div>
+
+    <div id="mainContent" style="display:none">
+      <div class="row" style="margin-bottom:14px">
+        <div class="field" style="margin-bottom:0; width:240px">
+          <label>Filter by AI status</label>
+          <select id="docStatusFilter">
+            <option value="all">All needing review</option>
+            <option value="flagged">Flagged by AI</option>
+            <option value="failed">Verification failed</option>
+            <option value="pending">Pending (not processed)</option>
+            <option value="processing">Processing</option>
+          </select>
+        </div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th>Driver</th><th>Document</th><th>AI verdict</th><th>Uploaded</th><th></th></tr></thead>
+          <tbody id="docRows"></tbody>
+        </table>
+        <div id="docEmpty" class="empty" style="display:none">🎉 No documents waiting for manual review.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Document review modal -->
+  <div class="overlay" id="docOverlay">
+    <div class="card modal">
+      <div class="modal-head"><h2 id="docModalTitle">Review document</h2><button class="ghost" id="closeDocModal">✕</button></div>
+      <div class="modal-body">
+        <div class="grid2" style="margin-bottom:14px">
+          <div>
+            <label>Driver</label><div id="d_driver" style="font-weight:600"></div>
+            <div id="d_contact" class="hint"></div>
+            <div id="d_vehicle" class="hint"></div>
+          </div>
+          <div>
+            <label>AI analysis</label>
+            <div id="d_ai"></div>
+            <div id="d_reason" class="hint" style="color:var(--red)"></div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Document preview <span class="muted">(click image or link to open full-size)</span></label>
+          <div id="d_previewWrap" style="text-align:center; background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:10px; min-height:120px"></div>
+        </div>
+        <details id="d_extractedWrap" style="display:none">
+          <summary class="muted" style="cursor:pointer">Data extracted by AI (OCR)</summary>
+          <pre id="d_extracted" style="white-space:pre-wrap; font-size:12px; color:var(--muted); max-height:200px; overflow:auto"></pre>
+        </details>
+        <div class="field" style="margin-top:14px">
+          <label>Rejection reason <span class="muted">(required only when rejecting — shown to the driver)</span></label>
+          <input id="d_rejectReason" placeholder="e.g. Photo is blurry, please re-upload a clear image" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost" id="cancelDocModal">Cancel</button>
+        <button class="danger" id="rejectDocBtn">Reject</button>
+        <button class="primary" id="approveDocBtn">Approve</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    const API = '';
+    const $ = (id) => document.getElementById(id);
+    // Separate storage keys from the marketing dashboard so sessions don't leak
+    // between /promos and /driver-verification on the same origin.
+    let token = localStorage.getItem('raahi_verifier_token') || '';
+    let adminEmail = localStorage.getItem('raahi_verifier_email') || '';
+    let currentDoc = null;
+
+    function setLoggedIn(email, accessToken) {
+      token = accessToken; adminEmail = email;
+      localStorage.setItem('raahi_verifier_token', token);
+      localStorage.setItem('raahi_verifier_email', email);
+      $('loginForm').style.display = 'none';
+      $('loggedInBar').style.display = 'flex';
+      $('loggedInEmail').textContent = email;
+      $('mainContent').style.display = 'block';
+      loadDocs();
+    }
+
+    function setLoggedOut() {
+      token = ''; adminEmail = '';
+      localStorage.removeItem('raahi_verifier_token');
+      localStorage.removeItem('raahi_verifier_email');
+      $('loginForm').style.display = 'flex';
+      $('loggedInBar').style.display = 'none';
+      $('mainContent').style.display = 'none';
+      $('summary').textContent = '';
+    }
+
+    async function login() {
+      const email = $('email').value.trim();
+      const password = $('password').value;
+      if (!email || !password) { toast('Enter email and password', 'err'); return; }
+      try {
+        const res = await fetch(API + '/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.message || 'Login failed');
+        if (data.data.role && data.data.role !== 'verifier') {
+          throw new Error('This account does not have access to driver verification');
+        }
+        setLoggedIn(data.data.email, data.data.accessToken);
+        toast('Logged in', 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    }
+
+    function toast(msg, kind) {
+      const t = $('toast'); t.textContent = msg; t.className = 'show ' + (kind || '');
+      setTimeout(() => (t.className = ''), 2800);
+    }
+
+    async function api(method, path, body) {
+      if (!token) { toast('Log in first', 'err'); throw new Error('not logged in'); }
+      const res = await fetch(API + path, { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: body ? JSON.stringify(body) : undefined });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) { setLoggedOut(); throw new Error(data.message || 'Session expired — log in again'); }
+      if (!res.ok) throw new Error(data.message || (data.errors && data.errors[0] && data.errors[0].msg) || ('HTTP ' + res.status));
+      return data;
+    }
+
+    function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+    function fmtDate(d) {
+      if (!d) return '<span class="muted">—</span>';
+      return new Date(d).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function aiVerdictHtml(d) {
+      const st = d.verification_status || 'pending';
+      const pill = st === 'flagged' || st === 'failed' ? 'off' : (st === 'pending' || st === 'processing' ? 'warn' : 'type');
+      let html = '<span class="pill ' + pill + '">' + esc(st) + '</span>';
+      if (d.ai_confidence != null) html += ' <span class="muted">' + Math.round(d.ai_confidence * 100) + '%</span>';
+      return html;
+    }
+
+    async function loadDocs() {
+      try {
+        const status = $('docStatusFilter').value;
+        const { data } = await api('GET', '/api/admin/documents/review-queue?limit=100&status=' + encodeURIComponent(status));
+        const docs = data.documents || [];
+        const rows = $('docRows'); rows.innerHTML = '';
+        $('docEmpty').style.display = docs.length ? 'none' : 'block';
+        for (const d of docs) {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td><strong>' + esc(d.driver.name) + '</strong><div class="hint">' + esc(d.driver.phone || d.driver.email || '') + '</div></td>' +
+            '<td><span class="pill type">' + esc(d.document_type) + '</span></td>' +
+            '<td>' + aiVerdictHtml(d) + (d.ai_mismatch_reason ? '<div class="hint" style="max-width:280px">' + esc(d.ai_mismatch_reason) + '</div>' : '') + '</td>' +
+            '<td class="muted">' + fmtDate(d.uploaded_at) + '</td>' +
+            '<td><div class="actions"><button data-r class="primary">Review</button></div></td>';
+          tr.querySelector('[data-r]').onclick = () => openDocModal(d);
+          rows.appendChild(tr);
+        }
+        $('summary').textContent = docs.length + ' documents awaiting review';
+      } catch (e) { toast(e.message, 'err'); }
+    }
+
+    function openDocModal(d) {
+      currentDoc = d;
+      $('docModalTitle').textContent = 'Review · ' + d.document_type.replace(/_/g, ' ');
+      $('d_driver').textContent = d.driver.name;
+      $('d_contact').textContent = [d.driver.phone, d.driver.email].filter(Boolean).join(' · ');
+      $('d_vehicle').textContent = d.driver.vehicle_type ? ('Vehicle: ' + d.driver.vehicle_type + (d.driver.vehicle_number ? ' · ' + d.driver.vehicle_number : '')) : '';
+      $('d_ai').innerHTML = aiVerdictHtml(d);
+      $('d_reason').textContent = d.ai_mismatch_reason || '';
+      $('d_rejectReason').value = '';
+
+      const wrap = $('d_previewWrap');
+      wrap.innerHTML = '';
+      if (d.view_url) {
+        const isPdf = /\.pdf($|\?)/i.test(d.view_url.split('?')[0]) || /\.pdf$/i.test(d.document_name || '');
+        if (isPdf) {
+          wrap.innerHTML = '<iframe src="' + esc(d.view_url) + '" style="width:100%;height:420px;border:0;border-radius:8px"></iframe>';
+        } else {
+          const img = document.createElement('img');
+          img.src = d.view_url;
+          img.style.cssText = 'max-width:100%;max-height:420px;border-radius:8px;cursor:zoom-in';
+          img.onclick = () => window.open(d.view_url, '_blank');
+          wrap.appendChild(img);
+        }
+        const open = document.createElement('div');
+        open.innerHTML = '<a href="' + esc(d.view_url) + '" target="_blank" style="color:var(--accent);font-size:12px">Open in new tab ↗</a>';
+        wrap.appendChild(open);
+      } else {
+        wrap.innerHTML = '<div class="muted" style="padding:40px 0">Preview unavailable (could not presign URL)</div>';
+      }
+
+      const extracted = d.ai_extracted_data;
+      if (extracted && typeof extracted === 'object' && Object.keys(extracted).length) {
+        $('d_extracted').textContent = JSON.stringify(extracted, null, 2);
+        $('d_extractedWrap').style.display = 'block';
+      } else {
+        $('d_extractedWrap').style.display = 'none';
+      }
+      $('docOverlay').classList.add('show');
+    }
+
+    async function reviewDoc(approved) {
+      if (!currentDoc) return;
+      const reason = $('d_rejectReason').value.trim();
+      if (!approved && !reason) { toast('Enter a rejection reason for the driver', 'err'); return; }
+      const btn = approved ? $('approveDocBtn') : $('rejectDocBtn');
+      btn.disabled = true;
+      try {
+        const res = await api('POST', '/api/admin/documents/' + currentDoc.id + '/verify', approved ? { approved: true } : { approved: false, rejection_reason: reason });
+        const ds = res.data && res.data.driver_status;
+        if (approved && ds && ds.all_documents_verified) toast('Approved — driver is now fully verified 🎉', 'ok');
+        else toast(approved ? 'Document approved' : 'Document rejected', 'ok');
+        $('docOverlay').classList.remove('show');
+        loadDocs();
+      } catch (e) { toast(e.message, 'err'); }
+      finally { btn.disabled = false; }
+    }
+
+    $('loginBtn').onclick = login;
+    $('password').onkeydown = (e) => { if (e.key === 'Enter') login(); };
+    $('logoutBtn').onclick = () => { setLoggedOut(); toast('Logged out', 'ok'); };
+    $('refresh').onclick = loadDocs;
+    $('docStatusFilter').onchange = loadDocs;
+    $('closeDocModal').onclick = $('cancelDocModal').onclick = () => $('docOverlay').classList.remove('show');
+    $('docOverlay').onclick = (e) => { if (e.target === $('docOverlay')) $('docOverlay').classList.remove('show'); };
+    $('approveDocBtn').onclick = () => reviewDoc(true);
+    $('rejectDocBtn').onclick = () => reviewDoc(false);
+
+    if (token && adminEmail) setLoggedIn(adminEmail, token);
+  </script>
+</body>
+</html>

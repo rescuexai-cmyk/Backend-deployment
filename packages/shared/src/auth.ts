@@ -22,6 +22,8 @@ export interface AuthRequest extends Request {
     lastName?: string;
     isVerified: boolean;
     isActive: boolean;
+    /** Dashboard role for env-configured admin logins ('marketing' | 'verifier'). */
+    adminRole?: string;
   };
 }
 
@@ -109,11 +111,17 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
 
     const decoded = jwt.verify(token, jwtSecret) as any;
 
-    // Dashboard admin login (env-configured email/password, no DB user)
+    // Dashboard admin login (env-configured email/password, no DB user).
+    // Two dashboard identities are supported:
+    //   ADMIN_EMAIL    -> marketing dashboard (/promos)
+    //   VERIFIER_EMAIL -> driver verification dashboard (/driver-verification)
     if (decoded.type === 'admin') {
-      const configuredEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+      const adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+      const verifierEmail = (process.env.VERIFIER_EMAIL || '').trim().toLowerCase();
       const tokenEmail = (decoded.email || '').toLowerCase();
-      if (!configuredEmail || tokenEmail !== configuredEmail) {
+      const isAdmin = !!adminEmail && tokenEmail === adminEmail;
+      const isVerifier = !!verifierEmail && tokenEmail === verifierEmail;
+      if (!isAdmin && !isVerifier) {
         res.status(401).json({ success: false, message: 'Invalid admin token' });
         return;
       }
@@ -124,6 +132,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
         firstName: 'Admin',
         isVerified: true,
         isActive: true,
+        adminRole: decoded.role || (isVerifier ? 'verifier' : 'marketing'),
       };
       next();
       return;

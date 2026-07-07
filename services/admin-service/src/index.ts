@@ -8,8 +8,9 @@ import { connectDatabase, authenticate, AuthRequest, setupSwagger } from '@raahi
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
-import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS } from '@raahi/shared';
+import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS, checkRequiredDocuments } from '@raahi/shared';
 import { bannerUploadMiddleware, uploadBannerImage } from './bannerUpload';
+import { presignDocumentUrl, notifyDriverVerification } from './driverDocs';
 import { OnboardingStatus } from '@prisma/client';
 
 const logger = createLogger('admin-service');
@@ -21,6 +22,12 @@ const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://localhost:5002'
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+// Separate credentials for the driver verification dashboard so the marketing
+// team (ADMIN_EMAIL) cannot access the document review flow.
+const VERIFIER_EMAIL = (process.env.VERIFIER_EMAIL || '').trim().toLowerCase();
+const VERIFIER_PASSWORD = process.env.VERIFIER_PASSWORD || '';
+
+type DashboardRole = 'marketing' | 'verifier';
 
 function verifyAdminPassword(input: string, expected: string): boolean {
   if (!expected) return false;
@@ -29,10 +36,10 @@ function verifyAdminPassword(input: string, expected: string): boolean {
   return crypto.timingSafeEqual(inputHash, expectedHash);
 }
 
-function signAdminToken(email: string): string {
+function signAdminToken(email: string, role: DashboardRole): string {
   const jwtSecret = process.env.JWT_SECRET || 'fallback-secret-key';
   const jwtAny = jwt as any;
-  return jwtAny.sign({ type: 'admin', email }, jwtSecret, { expiresIn: '7d' });
+  return jwtAny.sign({ type: 'admin', email, role }, jwtSecret, { expiresIn: '7d' });
 }
 
 /**
@@ -143,8 +150,8 @@ app.post(
       return;
     }
 
-    if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
-      logger.error('[ADMIN] ADMIN_EMAIL or ADMIN_PASSWORD not configured');
+    if (!ADMIN_EMAIL && !VERIFIER_EMAIL) {
+      logger.error('[ADMIN] No dashboard credentials configured (ADMIN_EMAIL / VERIFIER_EMAIL)');
       res.status(503).json({ success: false, message: 'Admin login not configured' });
       return;
     }
@@ -152,61 +159,85 @@ app.post(
     const email = String(req.body.email).trim().toLowerCase();
     const password = String(req.body.password);
 
-    if (email !== ADMIN_EMAIL || !verifyAdminPassword(password, ADMIN_PASSWORD)) {
+    let role: DashboardRole | null = null;
+    if (ADMIN_EMAIL && ADMIN_PASSWORD && email === ADMIN_EMAIL && verifyAdminPassword(password, ADMIN_PASSWORD)) {
+      role = 'marketing';
+    } else if (VERIFIER_EMAIL && VERIFIER_PASSWORD && email === VERIFIER_EMAIL && verifyAdminPassword(password, VERIFIER_PASSWORD)) {
+      role = 'verifier';
+    }
+
+    if (!role) {
       logger.warn('[ADMIN] Failed login attempt', { email });
       res.status(401).json({ success: false, message: 'Invalid email or password' });
       return;
     }
 
-    const accessToken = signAdminToken(email);
-    logger.info('[ADMIN] Dashboard login', { email });
+    const accessToken = signAdminToken(email, role);
+    logger.info('[ADMIN] Dashboard login', { email, role });
     res.json({
       success: true,
       data: {
         accessToken,
         expiresIn: 7 * 24 * 60 * 60,
         email,
+        role,
       },
     });
   }),
 );
 
-// Admin role check middleware
-// In production, this should check against an admin users table or role field
-const requireAdmin = asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
-  // For now, we check if user exists - in production, add proper admin role check
-  // TODO: Add proper admin role field to User model or create Admin model
-  if (!req.user) {
-    res.status(401).json({ success: false, message: 'Authentication required' });
-    return;
-  }
-  
-  // In development, allow any authenticated user to access admin endpoints
-  // In production, this should check req.user.role === 'admin' or similar
-  if (process.env.NODE_ENV === 'production') {
-    const userEmail = req.user.email?.toLowerCase();
-
-    // Dashboard admin account (ADMIN_EMAIL + ADMIN_PASSWORD login)
-    if (req.user.id === 'admin' && ADMIN_EMAIL && userEmail === ADMIN_EMAIL) {
-      next();
+// Role-based dashboard access control.
+// Dashboard logins carry a role in their JWT ('marketing' or 'verifier');
+// each route family only accepts its own role, so the marketing account
+// cannot touch driver verification APIs and vice versa.
+// Legacy ADMIN_EMAILS allow-list app users keep full access (ops/superadmin).
+const requireRole = (...allowedRoles: DashboardRole[]) =>
+  asyncHandler(async (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Authentication required' });
       return;
     }
 
-    // Legacy allow-list for app users with JWT
-    const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
-    
-    if (!userEmail || !adminEmails.includes(userEmail)) {
-      logger.warn(`Non-admin user attempted to access admin endpoint`, { 
-        userId: req.user.id, 
-        email: req.user.email 
-      });
-      res.status(403).json({ success: false, message: 'Admin access required' });
-      return;
+    // In development, allow any authenticated user to access admin endpoints
+    if (process.env.NODE_ENV === 'production') {
+      const userEmail = req.user.email?.toLowerCase();
+
+      // Dashboard account (env-configured email/password login)
+      if (req.user.id === 'admin') {
+        const role = req.user.adminRole as DashboardRole | undefined;
+        if (role && allowedRoles.includes(role)) {
+          next();
+          return;
+        }
+        logger.warn('[ADMIN] Dashboard account attempted to access endpoint outside its role', {
+          email: userEmail,
+          role,
+          required: allowedRoles,
+        });
+        res.status(403).json({ success: false, message: 'Your account does not have access to this section' });
+        return;
+      }
+
+      // Legacy allow-list for app users with JWT — full access
+      const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+
+      if (!userEmail || !adminEmails.includes(userEmail)) {
+        logger.warn(`Non-admin user attempted to access admin endpoint`, {
+          userId: req.user.id,
+          email: req.user.email,
+        });
+        res.status(403).json({ success: false, message: 'Admin access required' });
+        return;
+      }
     }
-  }
-  
-  next();
-});
+
+    next();
+  });
+
+// Marketing dashboard routes (promos, banners)
+const requireAdmin = requireRole('marketing');
+// Driver verification dashboard routes (drivers, documents)
+const requireVerifier = requireRole('verifier');
 
 function formatDriver(driver: any) {
   const allDocsVerified = driver.documents.length > 0 && driver.documents.every((d: any) => d.isVerified);
@@ -217,7 +248,7 @@ function formatDriver(driver: any) {
     user: { id: driver.user.id, name: `${driver.user.firstName} ${driver.user.lastName}`, email: driver.user.email, phone: driver.user.phone, created_at: driver.user.createdAt },
     onboarding_status: driver.onboardingStatus,
     vehicle_info: { type: driver.vehicleType, model: driver.vehicleModel, number: driver.vehicleNumber, color: driver.vehicleColor, year: driver.vehicleYear },
-    documents: driver.documents.map((d: any) => ({ id: d.id, type: d.documentType, url: d.documentUrl, name: d.documentName, size: d.documentSize, is_verified: d.isVerified, verified_at: d.verifiedAt, verified_by: d.verifiedBy, rejection_reason: d.rejectionReason, uploaded_at: d.uploadedAt })),
+    documents: driver.documents.map((d: any) => ({ id: d.id, type: d.documentType, url: d.documentUrl, name: d.documentName, size: d.documentSize, is_verified: d.isVerified, verified_at: d.verifiedAt, verified_by: d.verifiedBy, rejection_reason: d.rejectionReason, uploaded_at: d.uploadedAt, verification_status: d.verificationStatus, ai_verified: d.aiVerified, ai_confidence: d.aiConfidence, ai_mismatch_reason: d.aiMismatchReason, ai_verified_at: d.aiVerifiedAt })),
     documents_summary: { total: driver.documents.length, verified: driver.documents.filter((d: any) => d.isVerified).length, pending: pendingDocs.length, rejected: rejectedDocs.length, all_verified: allDocsVerified, required: [...REQUIRED_DOCUMENTS] },
     submitted_at: driver.documentsSubmittedAt,
     verified_at: driver.documentsVerifiedAt,
@@ -269,7 +300,7 @@ function formatDriver(driver: any) {
 app.get(
   '/api/admin/drivers',
   authenticate,
-  requireAdmin,
+  requireVerifier,
   [
     query('limit').optional().isInt({ min: 1, max: MAX_PAGINATION_LIMIT }).withMessage(`limit must be between 1 and ${MAX_PAGINATION_LIMIT}`),
     query('offset').optional().isInt({ min: 0 }).withMessage('offset must be a non-negative integer'),
@@ -317,7 +348,7 @@ app.get(
 app.get(
   '/api/admin/drivers/pending',
   authenticate,
-  requireAdmin,
+  requireVerifier,
   [
     query('limit').optional().isInt({ min: 1, max: MAX_PAGINATION_LIMIT }).withMessage(`limit must be between 1 and ${MAX_PAGINATION_LIMIT}`),
     query('offset').optional().isInt({ min: 0 }).withMessage('offset must be a non-negative integer'),
@@ -354,7 +385,7 @@ app.get(
   })
 );
 
-app.get('/api/admin/drivers/:driverId', authenticate, requireAdmin, asyncHandler(async (req: AuthRequest, res) => {
+app.get('/api/admin/drivers/:driverId', authenticate, requireVerifier, asyncHandler(async (req: AuthRequest, res) => {
   const driver = await prisma.driver.findUnique({
     where: { id: req.params.driverId },
     include: { user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, createdAt: true } }, documents: { orderBy: { uploadedAt: 'desc' } } },
@@ -376,7 +407,101 @@ app.get('/api/admin/drivers/:driverId', authenticate, requireAdmin, asyncHandler
   });
 }));
 
-app.post('/api/admin/documents/:documentId/verify', authenticate, requireAdmin, [body('approved').isBoolean(), body('rejection_reason').optional().isString()], asyncHandler(async (req: AuthRequest, res) => {
+/**
+ * GET /api/admin/documents/review-queue
+ *
+ * Manual review queue: documents that Cloud Vision flagged / failed / left
+ * pending, grouped per driver, with presigned URLs so admins can view the
+ * actual uploads in the browser.
+ */
+app.get(
+  '/api/admin/documents/review-queue',
+  authenticate,
+  requireVerifier,
+  [
+    query('status').optional().isIn(['flagged', 'failed', 'pending', 'processing', 'all']),
+    query('limit').optional().isInt({ min: 1, max: MAX_PAGINATION_LIMIT }),
+    query('offset').optional().isInt({ min: 0 }),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, errors: errors.array() });
+      return;
+    }
+    const { limit, offset } = sanitizePagination(req.query.limit as string, req.query.offset as string);
+    const statusFilter = (req.query.status as string) || 'all';
+    const statuses = statusFilter === 'all' ? ['flagged', 'failed', 'pending', 'processing'] : [statusFilter];
+
+    const where = { isVerified: false, verificationStatus: { in: statuses } };
+    const [docs, totalCount] = await Promise.all([
+      prisma.driverDocument.findMany({
+        where,
+        include: {
+          driver: {
+            include: { user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } } },
+          },
+        },
+        orderBy: { uploadedAt: 'asc' },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.driverDocument.count({ where }),
+    ]);
+
+    const documents = await Promise.all(
+      docs.map(async (d) => ({
+        id: d.id,
+        document_type: d.documentType,
+        document_name: d.documentName,
+        uploaded_at: d.uploadedAt,
+        verification_status: d.verificationStatus,
+        ai_verified: d.aiVerified,
+        ai_confidence: d.aiConfidence,
+        ai_mismatch_reason: d.aiMismatchReason,
+        ai_extracted_data: d.aiExtractedData,
+        rejection_reason: d.rejectionReason,
+        view_url: await presignDocumentUrl(d.documentUrl),
+        driver: {
+          id: d.driver.id,
+          name: `${d.driver.user.firstName} ${d.driver.user.lastName || ''}`.trim(),
+          email: d.driver.user.email,
+          phone: d.driver.user.phone,
+          vehicle_type: d.driver.vehicleType,
+          vehicle_number: d.driver.vehicleNumber,
+          onboarding_status: d.driver.onboardingStatus,
+          verification_notes: d.driver.verificationNotes,
+        },
+      })),
+    );
+
+    res.json({
+      success: true,
+      data: { documents, pagination: { total: totalCount, limit, offset, has_more: offset + limit < totalCount } },
+    });
+  }),
+);
+
+/**
+ * GET /api/admin/documents/:documentId/view-url
+ * Fresh presigned URL for viewing a single document (e.g. after the queue's
+ * URL expired).
+ */
+app.get('/api/admin/documents/:documentId/view-url', authenticate, requireVerifier, asyncHandler(async (req: AuthRequest, res) => {
+  const document = await prisma.driverDocument.findUnique({ where: { id: req.params.documentId } });
+  if (!document) {
+    res.status(404).json({ success: false, message: 'Document not found' });
+    return;
+  }
+  const url = await presignDocumentUrl(document.documentUrl);
+  if (!url) {
+    res.status(502).json({ success: false, message: 'Could not generate view URL (S3 not configured?)' });
+    return;
+  }
+  res.json({ success: true, data: { url, expires_in: 3600 } });
+}));
+
+app.post('/api/admin/documents/:documentId/verify', authenticate, requireVerifier, [body('approved').isBoolean(), body('rejection_reason').optional().isString()], asyncHandler(async (req: AuthRequest, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     res.status(400).json({ success: false, errors: errors.array() });
@@ -384,18 +509,28 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireAdmin, 
   }
   const { documentId } = req.params;
   const { approved, rejection_reason } = req.body;
-  const document = await prisma.driverDocument.findUnique({ where: { id: documentId }, include: { driver: true } });
+  const document = await prisma.driverDocument.findUnique({
+    where: { id: documentId },
+    include: { driver: { include: { user: { select: { id: true, firstName: true } } } } },
+  });
   if (!document) {
     res.status(404).json({ success: false, message: 'Document not found' });
     return;
   }
   await prisma.driverDocument.update({
     where: { id: documentId },
-    data: { isVerified: approved, verifiedAt: approved ? new Date() : null, verifiedBy: req.user!.id, rejectionReason: approved ? null : rejection_reason },
+    data: {
+      isVerified: approved,
+      verifiedAt: approved ? new Date() : null,
+      verifiedBy: 'ADMIN',
+      rejectionReason: approved ? null : rejection_reason || 'Rejected by admin',
+      verificationStatus: approved ? 'verified' : 'failed',
+    },
   });
   const allDriverDocuments = await prisma.driverDocument.findMany({ where: { driverId: document.driverId } });
-  const allDocsVerified = allDriverDocuments.length > 0 && allDriverDocuments.every((d) => d.isVerified);
-  const hasRejectedDocs = allDriverDocuments.some((d) => d.rejectionReason);
+  const docCheck = checkRequiredDocuments(allDriverDocuments.map((d) => d.documentType), document.driver.vehicleType);
+  const allDocsVerified = docCheck.isComplete && allDriverDocuments.length > 0 && allDriverDocuments.every((d) => d.isVerified);
+  const hasRejectedDocs = allDriverDocuments.some((d) => !d.isVerified && d.rejectionReason);
   let newOnboardingStatus = document.driver.onboardingStatus;
   let isVerified = document.driver.isVerified;
   let verificationNotes = document.driver.verificationNotes;
@@ -410,8 +545,46 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireAdmin, 
   }
   await prisma.driver.update({
     where: { id: document.driverId },
-    data: { onboardingStatus: newOnboardingStatus, isVerified, documentsVerifiedAt: allDocsVerified ? new Date() : null, verificationNotes },
+    data: {
+      onboardingStatus: newOnboardingStatus,
+      isVerified,
+      ...(allDocsVerified ? { isActive: true, documentsVerifiedAt: new Date() } : { documentsVerifiedAt: null }),
+      verificationNotes,
+    },
   });
+
+  logger.info(`[ADMIN] Document ${documentId} (${document.documentType}) ${approved ? 'approved' : 'rejected'} for driver ${document.driverId}`);
+
+  // Realtime reflection in the driver app (push + in-app notification).
+  const docLabel = String(document.documentType).replace(/_/g, ' ').toLowerCase();
+  if (allDocsVerified) {
+    void notifyDriverVerification({
+      userId: document.driver.user.id,
+      event: 'VERIFIED',
+      title: 'You are verified! 🎉',
+      message: 'All your documents have been approved. You can now go online and start accepting rides.',
+      onboardingStatus: 'COMPLETED',
+    });
+  } else if (approved) {
+    void notifyDriverVerification({
+      userId: document.driver.user.id,
+      event: 'DOCUMENT_APPROVED',
+      title: 'Document approved',
+      message: `Your ${docLabel} has been approved.`,
+      documentType: document.documentType,
+      onboardingStatus: String(newOnboardingStatus),
+    });
+  } else {
+    void notifyDriverVerification({
+      userId: document.driver.user.id,
+      event: 'DOCUMENT_REJECTED',
+      title: 'Document needs attention',
+      message: `Your ${docLabel} was rejected${rejection_reason ? `: ${rejection_reason}` : ''}. Please re-upload it in the app.`,
+      documentType: document.documentType,
+      onboardingStatus: String(newOnboardingStatus),
+    });
+  }
+
   res.json({
     success: true,
     message: approved ? 'Document approved successfully' : 'Document rejected',
@@ -419,7 +592,7 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireAdmin, 
   });
 }));
 
-app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireAdmin, [body('approved').isBoolean(), body('notes').optional().isString()], asyncHandler(async (req: AuthRequest, res) => {
+app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireVerifier, [body('approved').isBoolean(), body('notes').optional().isString()], asyncHandler(async (req: AuthRequest, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     res.status(400).json({ success: false, errors: errors.array() });
@@ -427,20 +600,29 @@ app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireAdmin, 
   }
   const { driverId } = req.params;
   const { approved, notes } = req.body;
-  const driver = await prisma.driver.findUnique({ where: { id: driverId }, include: { documents: true } });
+  const driver = await prisma.driver.findUnique({ where: { id: driverId }, include: { documents: true, user: { select: { id: true } } } });
   if (!driver) {
     res.status(404).json({ success: false, message: 'Driver not found' });
     return;
   }
   await prisma.driverDocument.updateMany({
     where: { driverId },
-    data: { isVerified: approved, verifiedAt: approved ? new Date() : null, verifiedBy: req.user!.id, rejectionReason: approved ? null : 'Rejected by admin' },
+    data: { isVerified: approved, verifiedAt: approved ? new Date() : null, verifiedBy: 'ADMIN', rejectionReason: approved ? null : 'Rejected by admin', verificationStatus: approved ? 'verified' : 'failed' },
   });
   const newStatus = approved ? OnboardingStatus.COMPLETED : OnboardingStatus.REJECTED;
   const verificationNotes = notes || (approved ? 'All documents verified. You can now start accepting rides!' : 'Documents verification failed. Please re-upload valid documents.');
   await prisma.driver.update({
     where: { id: driverId },
-    data: { onboardingStatus: newStatus, isVerified: approved, documentsVerifiedAt: approved ? new Date() : null, verificationNotes },
+    data: { onboardingStatus: newStatus, isVerified: approved, ...(approved ? { isActive: true } : {}), documentsVerifiedAt: approved ? new Date() : null, verificationNotes },
+  });
+  void notifyDriverVerification({
+    userId: driver.user.id,
+    event: approved ? 'VERIFIED' : 'REJECTED',
+    title: approved ? 'You are verified! 🎉' : 'Verification unsuccessful',
+    message: approved
+      ? 'All your documents have been approved. You can now go online and start accepting rides.'
+      : 'Your documents could not be verified. Please re-upload valid documents in the app.',
+    onboardingStatus: String(newStatus),
   });
   res.json({ success: true, message: approved ? 'All documents approved successfully' : 'All documents rejected', data: { driver_id: driverId, documents_updated: driver.documents.length, onboarding_status: newStatus, is_verified: approved, can_start_rides: approved, verification_notes: verificationNotes } });
 }));
@@ -454,7 +636,7 @@ app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireAdmin, 
 app.post(
   '/api/admin/driver/:id/verify',
   authenticate,
-  requireAdmin,
+  requireVerifier,
   [body('notes').optional().isString()],
   asyncHandler(async (req: AuthRequest, res) => {
     const errors = validationResult(req);
@@ -469,7 +651,7 @@ app.post(
     
     const driver = await prisma.driver.findUnique({ 
       where: { id: driverId }, 
-      include: { documents: true, user: { select: { firstName: true, lastName: true, email: true } } } 
+      include: { documents: true, user: { select: { id: true, firstName: true, lastName: true, email: true } } } 
     });
     
     if (!driver) {
@@ -483,8 +665,9 @@ app.post(
       data: { 
         isVerified: true, 
         verifiedAt: now, 
-        verifiedBy: req.user!.id, 
+        verifiedBy: 'ADMIN', 
         rejectionReason: null,
+        verificationStatus: 'verified',
       },
     });
     
@@ -502,6 +685,14 @@ app.post(
     });
     
     logger.info(`[ADMIN] Driver ${driverId} verified by admin ${req.user!.id}`);
+    
+    void notifyDriverVerification({
+      userId: driver.user.id,
+      event: 'VERIFIED',
+      title: 'You are verified! 🎉',
+      message: 'All your documents have been approved. You can now go online and start accepting rides.',
+      onboardingStatus: 'COMPLETED',
+    });
     
     res.json({ 
       success: true, 
@@ -532,7 +723,7 @@ app.post(
 app.post(
   '/api/admin/driver/:id/reject',
   authenticate,
-  requireAdmin,
+  requireVerifier,
   [
     body('reason').isString().notEmpty().withMessage('Rejection reason is required'),
     body('notes').optional().isString(),
@@ -550,7 +741,7 @@ app.post(
     
     const driver = await prisma.driver.findUnique({ 
       where: { id: driverId }, 
-      include: { documents: true, user: { select: { firstName: true, lastName: true, email: true } } } 
+      include: { documents: true, user: { select: { id: true, firstName: true, lastName: true, email: true } } } 
     });
     
     if (!driver) {
@@ -564,8 +755,9 @@ app.post(
       data: { 
         isVerified: false, 
         verifiedAt: now, 
-        verifiedBy: req.user!.id, 
+        verifiedBy: 'ADMIN', 
         rejectionReason: reason,
+        verificationStatus: 'failed',
       },
     });
     
@@ -582,6 +774,14 @@ app.post(
     });
     
     logger.info(`[ADMIN] Driver ${driverId} rejected by admin ${req.user!.id}: ${reason}`);
+    
+    void notifyDriverVerification({
+      userId: driver.user.id,
+      event: 'REJECTED',
+      title: 'Verification unsuccessful',
+      message: `Your documents could not be verified: ${reason}. Please re-upload valid documents in the app.`,
+      onboardingStatus: 'REJECTED',
+    });
     
     res.json({ 
       success: true, 
@@ -603,7 +803,7 @@ app.post(
   })
 );
 
-app.get('/api/admin/statistics', authenticate, requireAdmin, asyncHandler(async (req: AuthRequest, res) => {
+app.get('/api/admin/statistics', authenticate, requireVerifier, asyncHandler(async (req: AuthRequest, res) => {
   const [totalDrivers, verifiedDrivers, pendingVerification, rejectedDrivers, totalDocuments, pendingDocuments, verifiedDocuments] = await Promise.all([
     prisma.driver.count(),
     prisma.driver.count({ where: { isVerified: true } }),
@@ -790,6 +990,12 @@ app.use('/uploads/banners', express.static(path.join(process.cwd(), 'uploads', '
 // Serve the marketing dashboard (static HTML; API calls are auth-gated above).
 app.get(['/promos', '/dashboard', '/dashboard/promos'], (_req, res) => {
   res.sendFile(path.resolve(__dirname, '../public/dashboard.html'));
+});
+
+// Serve the driver document verification dashboard on its own URL, separate
+// from the marketing /promos page.
+app.get(['/driver-verification', '/dashboard/driver-verification'], (_req, res) => {
+  res.sendFile(path.resolve(__dirname, '../public/driver-verification.html'));
 });
 
 app.use(notFound);
