@@ -303,7 +303,7 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
 
   const vehicle = (vehicleType || 'cab_mini').toLowerCase();
 
-  await assertVehicleAllowedForCoordinates({
+  const routeZones = await assertVehicleAllowedForCoordinates({
     pickupLat,
     pickupLng,
     dropLat,
@@ -331,8 +331,18 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
 
   // Intercity routes are not priced as city trips. Throws IntercityRouteError
   // (translated by handlers into a "coming soon" payload) until the intercity
-  // product is enabled via platform_config.
-  await assertNotUnavailableIntercity(distanceKm, timeMin);
+  // product is enabled via platform_config. Intra-metro trips (e.g. Gurgaon →
+  // Faridabad within NCR) are never intercity regardless of distance.
+  await assertNotUnavailableIntercity({
+    distanceKm,
+    durationMin: timeMin,
+    pickupLat,
+    pickupLng,
+    dropLat,
+    dropLng,
+    originZone: routeZones.origin,
+    destinationZone: routeZones.destination,
+  });
 
   const [demandSupplyRatio, weather, isSpecialEvent] = await Promise.all([
     getDemandSupplyRatio(pickupLat, pickupLng, 5),

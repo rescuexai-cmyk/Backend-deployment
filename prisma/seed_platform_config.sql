@@ -51,7 +51,7 @@ VALUES
   (
     gen_random_uuid()::text,
     'intercity_config_v1',
-    '{"thresholdKm":50,"enabled":false,"comingSoon":true,"name":"Intercity","description":"Outstation trips between cities","message":"Intercity is coming soon"}',
+    '{"thresholdKm":50,"enabled":false,"comingSoon":true,"name":"Intercity","description":"Outstation trips between cities","message":"Intercity is coming soon","metroRegions":{"ncr":["delhi","new delhi","gurgaon","gurugram","faridabad","noida","greater noida","ghaziabad","gautam buddha nagar"]}}',
     'Intercity route threshold + availability for rider pricing/booking',
     NOW()
   )

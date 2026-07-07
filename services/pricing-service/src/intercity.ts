@@ -13,7 +13,7 @@
  *     "message": "Intercity is coming soon" }
  */
 
-import { prisma, createLogger } from '@raahi/shared';
+import { prisma, createLogger, getCityFromCoordinates, normalizeCity } from '@raahi/shared';
 
 const logger = createLogger('pricing-service:intercity');
 
@@ -25,6 +25,12 @@ export interface IntercityConfig {
   name: string;
   description: string;
   message: string;
+  /**
+   * Zones that form a single metro region. Trips between zones of the same
+   * region are NEVER intercity regardless of route length (e.g. Gurgaon →
+   * Faridabad is ~55km by road but both are NCR).
+   */
+  metroRegions: Record<string, string[]>;
 }
 
 export const DEFAULT_INTERCITY_CONFIG: IntercityConfig = {
@@ -34,6 +40,19 @@ export const DEFAULT_INTERCITY_CONFIG: IntercityConfig = {
   name: 'Intercity',
   description: 'Outstation trips between cities',
   message: 'Intercity is coming soon',
+  metroRegions: {
+    ncr: [
+      'delhi',
+      'new delhi',
+      'gurgaon',
+      'gurugram',
+      'faridabad',
+      'noida',
+      'greater noida',
+      'ghaziabad',
+      'gautam buddha nagar',
+    ],
+  },
 };
 
 const CONFIG_KEY = 'intercity_config_v1';
@@ -87,19 +106,69 @@ export class IntercityRouteError extends Error {
   }
 }
 
+/** Region id for a zone/city slug, or null when it's not part of any metro region. */
+function metroRegionFor(config: IntercityConfig, zone: string): string | null {
+  const normalized = normalizeCity(zone);
+  for (const [region, zones] of Object.entries(config.metroRegions || {})) {
+    if (zones.some((z) => normalizeCity(z) === normalized)) return region;
+  }
+  return null;
+}
+
+/** True when both endpoints belong to the same metro region (e.g. both NCR). */
+export function isSameMetroRegion(
+  config: IntercityConfig,
+  originZone: string | null | undefined,
+  destinationZone: string | null | undefined,
+): boolean {
+  if (!originZone || !destinationZone) return false;
+  const originRegion = metroRegionFor(config, originZone);
+  return originRegion !== null && originRegion === metroRegionFor(config, destinationZone);
+}
+
 /**
  * Assert a route is NOT an unbookable intercity trip.
- * No-op when intercity is enabled (launched) or under the threshold.
+ * No-op when intercity is enabled (launched), under the distance threshold,
+ * or when both endpoints are within the same metro region (e.g. anywhere in
+ * NCR — Gurgaon → Faridabad must stay a regular city trip).
+ *
+ * Zones are taken from the caller when already resolved; otherwise both
+ * endpoints are reverse-geocoded here (cached in cityUtils).
  */
-export async function assertNotUnavailableIntercity(
-  distanceKm: number,
-  durationMin: number,
-): Promise<void> {
+export async function assertNotUnavailableIntercity(params: {
+  distanceKm: number;
+  durationMin: number;
+  pickupLat: number;
+  pickupLng: number;
+  dropLat: number;
+  dropLng: number;
+  originZone?: string | null;
+  destinationZone?: string | null;
+}): Promise<void> {
+  const { distanceKm, durationMin } = params;
   const config = await getIntercityConfig();
   if (config.enabled) return;
   if (distanceKm <= config.thresholdKm) return;
+
+  // Over the threshold — check whether this is still an intra-metro trip.
+  let origin = params.originZone ?? null;
+  let destination = params.destinationZone ?? null;
+  try {
+    if (!origin) origin = await getCityFromCoordinates(params.pickupLat, params.pickupLng);
+    if (!destination) destination = await getCityFromCoordinates(params.dropLat, params.dropLng);
+  } catch (error) {
+    logger.warn(`[INTERCITY] Zone resolution failed, falling back to distance-only check: ${error}`);
+  }
+
+  if (isSameMetroRegion(config, origin, destination)) {
+    logger.info(
+      `[INTERCITY] ${distanceKm.toFixed(1)}km trip ${origin} -> ${destination} is intra-metro; not intercity`,
+    );
+    return;
+  }
+
   logger.info(
-    `[INTERCITY] Route classified intercity: ${distanceKm.toFixed(1)}km > ${config.thresholdKm}km threshold`,
+    `[INTERCITY] Route classified intercity: ${distanceKm.toFixed(1)}km > ${config.thresholdKm}km (${origin ?? '?'} -> ${destination ?? '?'})`,
   );
   throw new IntercityRouteError({ distanceKm, durationMin, config });
 }
