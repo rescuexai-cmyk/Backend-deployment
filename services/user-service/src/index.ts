@@ -584,6 +584,7 @@ app.post(
     body('issue_type').isString().notEmpty().trim().isLength({ min: 1, max: 100 }).withMessage('Issue type is required (max 100 chars)'),
     body('description').isString().notEmpty().trim().isLength({ min: 10, max: MAX_DESCRIPTION_LENGTH }).withMessage(`Description is required (10-${MAX_DESCRIPTION_LENGTH} chars)`),
     body('priority').optional().isIn(['low', 'medium', 'high']).withMessage('Priority must be low, medium, or high'),
+    body('driver_id').optional().isString().trim().withMessage('Driver ID must be a string'),
   ],
   asyncHandler(async (req: AuthRequest, res) => {
     const errors = validationResult(req);
@@ -592,7 +593,7 @@ app.post(
       return;
     }
 
-    const { issue_type, description, priority } = req.body;
+    const { issue_type, description, priority, driver_id } = req.body;
 
     const priorityMap: { [key: string]: 'LOW' | 'MEDIUM' | 'HIGH' } = {
       low: 'LOW',
@@ -603,6 +604,7 @@ app.post(
     const ticket = await prisma.supportTicket.create({
       data: {
         userId: req.user!.id,
+        driverId: driver_id || null,
         issueType: issue_type,
         description,
         priority: priorityMap[priority || 'medium'],
@@ -615,6 +617,7 @@ app.post(
       data: {
         request_id: ticket.id,
         user_id: req.user!.id,
+        driver_id: ticket.driverId,
         issue_type: ticket.issueType,
         description: ticket.description,
         priority: ticket.priority.toLowerCase(),

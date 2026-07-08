@@ -207,6 +207,52 @@
     </div>
   </div>
 
+  <!-- Driver History (Complaints & Reviews) Modal -->
+  <div class="overlay" id="historyOverlay">
+    <div class="card modal" style="max-width:850px">
+      <div class="modal-head"><h2>Complaints & Feedback · <span id="historyDriverName"></span></h2><button class="ghost" id="closeHistoryModal">✕</button></div>
+      <div class="modal-body" style="max-height:500px; overflow-y:auto">
+        <h3 style="margin-top:0; font-size:14px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted)">Passenger Complaints (Support Tickets)</h3>
+        <div class="card" style="margin-bottom:20px; overflow:hidden">
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Context / Details</th>
+                <th>Passenger</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Filed At</th>
+              </tr>
+            </thead>
+            <tbody id="historyComplaintsRows"></tbody>
+          </table>
+          <div id="historyComplaintsEmpty" class="empty" style="padding:20px; display:none">No passenger complaints reported.</div>
+        </div>
+
+        <h3 style="font-size:14px; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted)">Passenger Ride Reviews & Ratings</h3>
+        <div class="card" style="overflow:hidden">
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Rating</th>
+                <th>Feedback / Reviews</th>
+                <th>Passenger</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody id="historyReviewsRows"></tbody>
+          </table>
+          <div id="historyReviewsEmpty" class="empty" style="padding:20px; display:none">No ride reviews submitted.</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="primary" id="closeHistoryModalBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const API = '';
     const $ = (id) => document.getElementById(id);
@@ -443,7 +489,9 @@
             '<td>' + accountStatusPill(acctStatus) + ' ' + driverPassPill(dr.has_driver_pass) + '</td>' +
             '<td>' + (dr.is_verified ? '<span class="pill on">Verified</span>' : '<span class="pill warn">Unverified</span>') + '</td>' +
             '<td class="muted">' + esc(dr.vehicle_info?.type || '—') + '</td>' +
+            '<td>' +
             '<div class="actions" style="flex-wrap:wrap">' +
+              '<button data-h style="font-size:11px;color:var(--accent);font-weight:600">📋 History & Feedback</button>' +
               '<button data-a="penalty" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>⚠ Penalty</button>' +
               '<button data-a="clear_penalties" style="font-size:11px;color:var(--green)"' + (isTerminated ? ' disabled' : '') + '>✓ Clear Penalties</button>' +
               '<button data-a="pass" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>' + (dr.has_driver_pass ? '🎫 Revoke Pass' : '🎫 Grant Pass') + '</button>' +
@@ -454,6 +502,7 @@
             '</td>';
 
           // Wire action buttons
+          tr.querySelector('[data-h]').onclick = () => openHistoryModal(dr);
           tr.querySelectorAll('[data-a]').forEach(btn => {
             btn.onclick = () => openActionModal(dr, btn.dataset.a);
           });
@@ -461,6 +510,74 @@
         }
         $('summary').textContent = drivers.length + ' drivers' + (data.pagination && data.pagination.has_more ? ' (showing first 100)' : '');
       } catch (e) { toast(e.message, 'err'); }
+    }
+
+    async function openHistoryModal(driver) {
+      const driverId = driver.driver_id;
+      $('historyDriverName').textContent = driver.user.name;
+      
+      const compRows = $('historyComplaintsRows'); compRows.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center">Loading complaints…</td></tr>';
+      const revRows = $('historyReviewsRows'); revRows.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center">Loading reviews…</td></tr>';
+      $('historyComplaintsEmpty').style.display = 'none';
+      $('historyReviewsEmpty').style.display = 'none';
+      
+      $('historyOverlay').classList.add('show');
+      
+      try {
+        const { data } = await api('GET', '/api/admin/drivers/' + driverId + '/history');
+        
+        // 1. Render Complaints
+        const complaints = data.complaints || [];
+        compRows.innerHTML = '';
+        if (complaints.length === 0) {
+          $('historyComplaintsEmpty').style.display = 'block';
+          compRows.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:20px">No complaints reported against this driver.</td></tr>';
+        } else {
+          for (const c of complaints) {
+            const tr = document.createElement('tr');
+            const pName = c.passenger ? esc(c.passenger.name) : '<span class="muted">Anonymous</span>';
+            const pPhone = c.passenger ? esc(c.passenger.phone) : '';
+            const priorityPill = '<span class="pill ' + (c.priority === 'HIGH' ? 'off' : 'warn') + '">' + esc(c.priority) + '</span>';
+            const statusPill = '<span class="pill ' + (c.status === 'RESOLVED' || c.status === 'CLOSED' ? 'on' : 'warn') + '">' + esc(c.status) + '</span>';
+            
+            tr.innerHTML = 
+              '<td><span class="pill type">' + esc(c.issue_type) + '</span></td>' +
+              '<td style="max-width:300px; white-space:pre-wrap">' + esc(c.description) + '</td>' +
+              '<td><strong>' + pName + '</strong><div class="hint">' + pPhone + '</div></td>' +
+              '<td>' + priorityPill + '</td>' +
+              '<td>' + statusPill + '</td>' +
+              '<td class="muted">' + fmtDate(c.created_at) + '</td>';
+            compRows.appendChild(tr);
+          }
+        }
+        
+        // 2. Render Reviews & Ratings
+        const reviews = data.ride_reviews || [];
+        revRows.innerHTML = '';
+        if (reviews.length === 0) {
+          $('historyReviewsEmpty').style.display = 'block';
+          revRows.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">No ride reviews submitted for this driver.</td></tr>';
+        } else {
+          for (const r of reviews) {
+            const tr = document.createElement('tr');
+            const pName = r.passenger ? esc(r.passenger.name) : '<span class="muted">Anonymous</span>';
+            const pPhone = r.passenger ? esc(r.passenger.phone) : '';
+            const ratingStars = '⭐'.repeat(r.rating) + ' (' + r.rating + '/5)';
+            const typeLabel = '<span class="pill type" style="font-size:10px">' + esc(r.type.replace(/_/g, ' ')) + '</span>';
+            
+            tr.innerHTML =
+              '<td>' + typeLabel + '</td>' +
+              '<td style="color:var(--amber); font-weight:600">' + ratingStars + '</td>' +
+              '<td style="max-width:350px; white-space:pre-wrap">' + (r.feedback ? esc(r.feedback) : '<em class="muted">No comment left</em>') + '</td>' +
+              '<td><strong>' + pName + '</strong><div class="hint">' + pPhone + '</div></td>' +
+              '<td class="muted">' + fmtDate(r.created_at) + '</td>';
+            revRows.appendChild(tr);
+          }
+        }
+      } catch (e) { 
+        toast(e.message, 'err'); 
+        $('historyOverlay').classList.remove('show');
+      }
     }
 
     function openActionModal(driver, action) {
@@ -584,6 +701,9 @@
     $('closeActionModal').onclick = $('cancelActionModal').onclick = () => $('actionOverlay').classList.remove('show');
     $('actionOverlay').onclick = (e) => { if (e.target === $('actionOverlay')) $('actionOverlay').classList.remove('show'); };
     $('actionSubmitBtn').onclick = submitAction;
+    // History modal listeners
+    $('closeHistoryModal').onclick = $('closeHistoryModalBtn').onclick = () => $('historyOverlay').classList.remove('show');
+    $('historyOverlay').onclick = (e) => { if (e.target === $('historyOverlay')) $('historyOverlay').classList.remove('show'); };
     // Tab buttons
     document.querySelectorAll('.tab-btn').forEach(btn => { btn.onclick = () => switchTab(btn.dataset.tab); });
 

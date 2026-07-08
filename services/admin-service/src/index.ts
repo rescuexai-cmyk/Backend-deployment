@@ -996,6 +996,131 @@ app.post(
 );
 
 /**
+ * GET /api/admin/drivers/:driverId/history
+ * Fetch driver complaints (support tickets) and passenger ride reviews/feedback.
+ */
+app.get(
+  '/api/admin/drivers/:driverId/history',
+  authenticate,
+  requireVerifier,
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { driverId } = req.params;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    // 1. Fetch Passenger Complaints (Support tickets referencing driver)
+    const complaints = await prisma.supportTicket.findMany({
+      where: { driverId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // 2. Fetch Passenger Ride Reviews (Regular Cab Rides)
+    const rideReviews = await prisma.ride.findMany({
+      where: {
+        driverId,
+        passengerRating: { not: null },
+      },
+      select: {
+        id: true,
+        passengerRating: true,
+        passengerFeedback: true,
+        createdAt: true,
+        passenger: {
+          select: {
+            firstName: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // 3. Fetch Rescue Ratings
+    const rescueReviews = await prisma.rescueRating.findMany({
+      where: { targetId: driverId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Resolve rescue rating passenger names in memory
+    const userIds = rescueReviews.map(r => r.userId);
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, firstName: true, lastName: true, phone: true },
+    });
+    const userMap = new Map(users.map(u => [u.id, u]));
+
+    const formattedRescueReviews = rescueReviews.map(r => {
+      const u = userMap.get(r.userId);
+      return {
+        id: r.id,
+        rescueId: r.rescueId,
+        rating: r.rating,
+        feedback: r.feedback,
+        targetType: r.targetType,
+        createdAt: r.createdAt,
+        passenger: u ? { name: `${u.firstName} ${u.lastName}`.trim(), phone: u.phone } : null,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        driver: {
+          id: driverId,
+          name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        },
+        complaints: complaints.map(c => ({
+          id: c.id,
+          issue_type: c.issueType,
+          description: c.description,
+          priority: c.priority,
+          status: c.status,
+          created_at: c.createdAt,
+          passenger: c.user ? { name: `${c.user.firstName} ${c.user.lastName}`.trim(), phone: c.user.phone } : null,
+        })),
+        ride_reviews: [
+          ...rideReviews.map(r => ({
+            id: r.id,
+            type: 'CAB_RIDE',
+            rating: r.passengerRating,
+            feedback: r.passengerFeedback,
+            created_at: r.createdAt,
+            passenger: r.passenger ? { name: `${r.passenger.firstName} ${r.passenger.lastName}`.trim(), phone: r.passenger.phone } : null,
+          })),
+          ...formattedRescueReviews.map(r => ({
+            id: r.id,
+            type: `RESCUE_${r.targetType}`,
+            rating: r.rating,
+            feedback: r.feedback,
+            created_at: r.createdAt,
+            passenger: r.passenger,
+          })),
+        ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
+      },
+    });
+  }),
+);
+
+/**
  * POST /api/admin/drivers/:driverId/driver-pass
  * Toggle driver pass on/off.
  */
