@@ -139,6 +139,13 @@ model Driver {
   digilockerLinked  Boolean   @default(false)  // Whether DigiLocker is linked
   digilockerToken   String?   // DigiLocker access token (encrypted)
   
+  // Account management (admin actions)
+  accountStatus       DriverAccountStatus @default(ACTIVE)
+  accountStatusReason String?             // Reason for suspend/terminate
+  accountStatusAt     DateTime?           // When status was last changed
+  accountStatusBy     String?             // Admin who changed the status
+  hasDriverPass       Boolean   @default(false) // Admin-toggled driver pass
+  
   // Settings
   notificationsEnabled Boolean @default(true)
   
@@ -160,6 +167,7 @@ model Driver {
   @@index([currentLatitude, currentLongitude])
   @@index([h3Index])  // H3 index for geospatial queries - critical for performance
   @@index([onboardingStatus])
+  @@index([accountStatus])
   @@map("drivers")
 }
 
@@ -169,6 +177,7 @@ model DriverPenalty {
   amount     Float         // in INR, e.g. 10 for "Stop Riding"
   reason     String        // e.g. "STOP_RIDING"
   status     PenaltyStatus @default(PENDING)
+  issuedBy   String?       // "SYSTEM" or "ADMIN" — who created the penalty
   createdAt  DateTime      @default(now())
   paidAt     DateTime?
   
@@ -770,6 +779,12 @@ enum PaymentStatus {
 enum PenaltyStatus {
   PENDING
   PAID
+}
+
+enum DriverAccountStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
 }
 
 enum NotificationType {

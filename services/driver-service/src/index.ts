@@ -320,6 +320,32 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
     }
   }
   
+  // When driver tries to go ONLINE: block if account is suspended or terminated
+  if (newOnlineStatus) {
+    if (driver.accountStatus === 'SUSPENDED') {
+      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} account is SUSPENDED`);
+      res.status(403).json({
+        success: false,
+        message: 'Your account is currently suspended. Contact support for assistance.',
+        code: 'ACCOUNT_SUSPENDED',
+        accountStatus: 'SUSPENDED',
+        reason: driver.accountStatusReason || 'Account suspended by admin',
+      });
+      return;
+    }
+    if (driver.accountStatus === 'TERMINATED') {
+      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} account is TERMINATED`);
+      res.status(403).json({
+        success: false,
+        message: 'Your account has been terminated. Contact support if you believe this is an error.',
+        code: 'ACCOUNT_TERMINATED',
+        accountStatus: 'TERMINATED',
+        reason: driver.accountStatusReason || 'Account terminated by admin',
+      });
+      return;
+    }
+  }
+  
   // When driver tries to go ONLINE: block if they have unpaid "Stop Riding" penalty
   if (newOnlineStatus) {
     const unpaidPenalties = await prisma.driverPenalty.findMany({
@@ -347,17 +373,22 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
     logger.info(`[DRIVER_STATUS] Session duration: ${additionalOnlineSeconds} seconds (${secondsToHours(additionalOnlineSeconds)} hours)`);
   }
   
-  // When driver goes OFFLINE (Stop Riding): charge ₹10 penalty
+  // When driver goes OFFLINE (Stop Riding): charge ₹10 penalty (skip if driver pass active)
   if (previousOnlineStatus && !newOnlineStatus) {
-    await prisma.driverPenalty.create({
-      data: {
-        driverId: driver.id,
-        amount: PENALTY_STOP_RIDING_AMOUNT,
-        reason: 'STOP_RIDING',
-        status: PenaltyStatus.PENDING,
-      },
-    });
-    logger.info(`[DRIVER_STATUS] Penalty created: driver ${driver.id}, ₹${PENALTY_STOP_RIDING_AMOUNT} (Stop Riding)`);
+    if (driver.hasDriverPass) {
+      logger.info(`[DRIVER_STATUS] Penalty skipped: driver ${driver.id} has active driver pass`);
+    } else {
+      await prisma.driverPenalty.create({
+        data: {
+          driverId: driver.id,
+          amount: PENALTY_STOP_RIDING_AMOUNT,
+          reason: 'STOP_RIDING',
+          issuedBy: 'SYSTEM',
+          status: PenaltyStatus.PENDING,
+        },
+      });
+      logger.info(`[DRIVER_STATUS] Penalty created: driver ${driver.id}, ₹${PENALTY_STOP_RIDING_AMOUNT} (Stop Riding)`);
+    }
   }
   
   // Compute H3 index if location is provided

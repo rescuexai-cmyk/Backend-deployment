@@ -124,3 +124,57 @@ export async function notifyDriverVerification(params: {
     logger.warn('[DOCS] Driver notification error', { userId, event, error: error.message });
   }
 }
+
+// ─── Admin Action Notifications ──────────────────────────────────────────────
+
+export type DriverAdminActionEvent =
+  | 'PENALTY_ISSUED'
+  | 'DRIVER_PASS_ENABLED'
+  | 'DRIVER_PASS_DISABLED'
+  | 'ACCOUNT_SUSPENDED'
+  | 'ACCOUNT_REACTIVATED'
+  | 'ACCOUNT_TERMINATED';
+
+/**
+ * Send a push + in-app notification to a driver after an admin management
+ * action (penalty, suspend, reactivate, terminate, driver-pass toggle).
+ *
+ * Fire-and-forget: notification failure must never fail the admin action.
+ */
+export async function notifyDriverAction(params: {
+  userId: string;
+  event: DriverAdminActionEvent;
+  title: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const { userId, event, title, message, metadata } = params;
+  try {
+    const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
+    const resp = await doFetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
+      body: JSON.stringify({
+        userId,
+        title,
+        message,
+        type: 'SYSTEM',
+        sendPush: true,
+        data: {
+          type: 'DRIVER_ADMIN_ACTION',
+          event,
+          ...(metadata || {}),
+        },
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      logger.warn('[ADMIN_ACTION] Driver notification failed', { userId, event, status: resp.status, body });
+    } else {
+      logger.info('[ADMIN_ACTION] Driver notified', { userId, event });
+    }
+  } catch (error: any) {
+    logger.warn('[ADMIN_ACTION] Driver notification error', { userId, event, error: error.message });
+  }
+}
+

@@ -81,33 +81,70 @@
     </div>
 
     <div id="mainContent" style="display:none">
-      <div class="row" style="margin-bottom:14px">
-        <div class="field" style="margin-bottom:0; flex:1; min-width:260px">
-          <label>Search driver</label>
-          <input id="docSearch" type="search" placeholder="Name or phone number…" />
+      <!-- Tab navigation -->
+      <div class="row" style="margin-bottom:18px;gap:8px">
+        <button class="tab-btn primary" data-tab="docs">📄 Documents</button>
+        <button class="tab-btn" data-tab="drivers">👤 Driver Management</button>
+      </div>
+
+      <!-- Documents Tab -->
+      <div id="docsTab">
+        <div class="row" style="margin-bottom:14px">
+          <div class="field" style="margin-bottom:0; flex:1; min-width:260px">
+            <label>Search driver</label>
+            <input id="docSearch" type="search" placeholder="Name or phone number…" />
+          </div>
+          <div class="field" style="margin-bottom:0; width:240px">
+            <label>Show</label>
+            <select id="docStatusFilter">
+              <option value="all">Needs manual review</option>
+              <option value="everything">All documents</option>
+              <option value="verified">Verified (AI or admin)</option>
+              <option value="flagged">Flagged by AI</option>
+              <option value="failed">Verification failed</option>
+              <option value="pending">Pending (not processed)</option>
+              <option value="processing">Processing</option>
+            </select>
+          </div>
         </div>
-        <div class="field" style="margin-bottom:0; width:240px">
-          <label>Show</label>
-          <select id="docStatusFilter">
-            <option value="all">Needs manual review</option>
-            <option value="everything">All documents</option>
-            <option value="verified">Verified (AI or admin)</option>
-            <option value="flagged">Flagged by AI</option>
-            <option value="failed">Verification failed</option>
-            <option value="pending">Pending (not processed)</option>
-            <option value="processing">Processing</option>
-          </select>
+        <div class="card">
+          <table>
+            <thead><tr><th>Document</th><th>Status</th><th>Verdict / reason</th><th>Uploaded</th><th></th></tr></thead>
+            <tbody id="docRows"></tbody>
+          </table>
+          <div id="docEmpty" class="empty" style="display:none">No documents match this view.</div>
         </div>
       </div>
-      <div class="card">
-        <table>
-          <thead><tr><th>Document</th><th>Status</th><th>Verdict / reason</th><th>Uploaded</th><th></th></tr></thead>
-          <tbody id="docRows"></tbody>
-        </table>
-        <div id="docEmpty" class="empty" style="display:none">No documents match this view.</div>
+
+      <!-- Driver Management Tab -->
+      <div id="driversTab" style="display:none">
+        <div class="row" style="margin-bottom:14px">
+          <div class="field" style="margin-bottom:0; flex:1; min-width:260px">
+            <label>Search driver</label>
+            <input id="driverSearch" type="search" placeholder="Name, phone, or email…" />
+          </div>
+          <div class="field" style="margin-bottom:0; width:200px">
+            <label>Filter</label>
+            <select id="driverFilter">
+              <option value="all">All drivers</option>
+              <option value="verified">Verified only</option>
+              <option value="pending">Pending verification</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>Driver</th><th>Account Status</th><th>Verification</th><th>Vehicle</th><th>Actions</th></tr></thead>
+            <tbody id="driverRows"></tbody>
+          </table>
+          <div id="driverEmpty" class="empty" style="display:none">No drivers found.</div>
+        </div>
       </div>
     </div>
   </div>
+
+  <div id="toast"></div>
 
   <!-- Document review modal -->
   <div class="overlay" id="docOverlay">
@@ -147,17 +184,39 @@
     </div>
   </div>
 
-  <div id="toast"></div>
+  <!-- Driver Action Modal -->
+  <div class="overlay" id="actionOverlay">
+    <div class="card modal" style="max-width:520px">
+      <div class="modal-head"><h2 id="actionModalTitle">Action</h2><button class="ghost" id="closeActionModal">✕</button></div>
+      <div class="modal-body">
+        <div id="actionDriverInfo" style="margin-bottom:14px"></div>
+        <div class="field" id="actionAmountField" style="display:none">
+          <label>Penalty Amount (₹)</label>
+          <input id="actionAmount" type="number" min="1" step="1" placeholder="e.g. 50" />
+        </div>
+        <div class="field" id="actionReasonField">
+          <label id="actionReasonLabel">Reason</label>
+          <input id="actionReason" placeholder="" />
+        </div>
+        <div id="actionWarning" class="hint" style="color:var(--red);margin-top:8px"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost" id="cancelActionModal">Cancel</button>
+        <button id="actionSubmitBtn" class="primary">Confirm</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     const API = '';
     const $ = (id) => document.getElementById(id);
-    // Separate storage keys from the marketing dashboard so sessions don't leak
-    // between /promos and /driver-verification on the same origin.
     let token = localStorage.getItem('raahi_verifier_token') || '';
     let adminEmail = localStorage.getItem('raahi_verifier_email') || '';
     let currentDoc = null;
+    let currentActionDriver = null;
+    let currentActionType = null;
 
+    // ─── Auth ───────────────────────────────────────────────────────────────────
     function setLoggedIn(email, accessToken) {
       token = accessToken; adminEmail = email;
       localStorage.setItem('raahi_verifier_token', token);
@@ -166,7 +225,7 @@
       $('loggedInBar').style.display = 'flex';
       $('loggedInEmail').textContent = email;
       $('mainContent').style.display = 'block';
-      loadDocs();
+      switchTab('docs');
     }
 
     function setLoggedOut() {
@@ -215,6 +274,16 @@
       return new Date(d).toLocaleString(undefined, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     }
 
+    // ─── Tabs ───────────────────────────────────────────────────────────────────
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('primary', b.dataset.tab === tab));
+      $('docsTab').style.display = tab === 'docs' ? 'block' : 'none';
+      $('driversTab').style.display = tab === 'drivers' ? 'block' : 'none';
+      if (tab === 'docs') loadDocs();
+      else loadDrivers();
+    }
+
+    // ─── Document Review (existing) ─────────────────────────────────────────────
     function statusPillHtml(d) {
       if (d.is_verified || d.verification_status === 'verified') {
         const by = d.verified_by === 'AI_VISION' ? 'AI' : (d.verified_by === 'ADMIN' ? 'admin' : '');
@@ -246,7 +315,6 @@
         const rows = $('docRows'); rows.innerHTML = '';
         $('docEmpty').style.display = docs.length ? 'none' : 'block';
 
-        // Group documents under a header row per driver.
         let lastDriverId = null;
         let driverCount = 0;
         for (const d of docs) {
@@ -286,7 +354,6 @@
       $('d_ai').innerHTML = statusPillHtml(d) + (d.ai_confidence != null ? ' <span class="muted">' + Math.round(d.ai_confidence * 100) + '%</span>' : '');
       $('d_reason').textContent = d.ai_mismatch_reason || d.rejection_reason || '';
       $('d_rejectReason').value = '';
-      // Already-verified docs can still be revoked (Reject) but not re-approved.
       const alreadyVerified = !!(d.is_verified || d.verification_status === 'verified');
       $('approveDocBtn').disabled = alreadyVerified;
       $('approveDocBtn').textContent = alreadyVerified ? 'Already approved' : 'Approve';
@@ -338,22 +405,182 @@
       finally { btn.disabled = false; }
     }
 
+    // ─── Driver Management ──────────────────────────────────────────────────────
+
+    function accountStatusPill(status) {
+      if (status === 'SUSPENDED') return '<span class="pill off">Suspended</span>';
+      if (status === 'TERMINATED') return '<span class="pill off" style="background:rgba(255,92,108,.25)">Terminated</span>';
+      return '<span class="pill on">Active</span>';
+    }
+
+    function driverPassPill(has) {
+      return has ? '<span class="pill on">Pass ✓</span>' : '';
+    }
+
+    let driverSearchDebounce = null;
+
+    async function loadDrivers() {
+      try {
+        const search = $('driverSearch').value.trim();
+        const filter = $('driverFilter').value;
+        let qs = '/api/admin/drivers?limit=100&filter=' + encodeURIComponent(filter);
+        if (search) qs += '&search=' + encodeURIComponent(search);
+        const { data } = await api('GET', qs);
+        const drivers = data.drivers || [];
+        const rows = $('driverRows'); rows.innerHTML = '';
+        $('driverEmpty').style.display = drivers.length ? 'none' : 'block';
+
+        for (const dr of drivers) {
+          const tr = document.createElement('tr');
+          const name = esc(dr.user.name);
+          const phone = esc(dr.user.phone || '');
+          const acctStatus = dr.account_status || 'ACTIVE';
+          const isTerminated = acctStatus === 'TERMINATED';
+          const isSuspended = acctStatus === 'SUSPENDED';
+
+          tr.innerHTML =
+            '<td><strong>' + name + '</strong><div class="hint">' + phone + '</div></td>' +
+            '<td>' + accountStatusPill(acctStatus) + ' ' + driverPassPill(dr.has_driver_pass) + '</td>' +
+            '<td>' + (dr.is_verified ? '<span class="pill on">Verified</span>' : '<span class="pill warn">Unverified</span>') + '</td>' +
+            '<td class="muted">' + esc(dr.vehicle_info?.type || '—') + '</td>' +
+            '<td>' +
+            '<div class="actions" style="flex-wrap:wrap">' +
+              '<button data-a="penalty" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>⚠ Penalty</button>' +
+              '<button data-a="pass" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>' + (dr.has_driver_pass ? '🎫 Revoke Pass' : '🎫 Grant Pass') + '</button>' +
+              (acctStatus === 'ACTIVE' ? '<button data-a="suspend" class="danger" style="font-size:11px">🚫 Suspend</button>' : '') +
+              (isSuspended ? '<button data-a="reactivate" style="font-size:11px;color:var(--green)">✅ Reactivate</button>' : '') +
+              (!isTerminated ? '<button data-a="terminate" class="danger" style="font-size:11px">❌ Terminate</button>' : '<span class="muted" style="font-size:11px">Terminated</span>') +
+            '</div>' +
+            '</td>';
+
+          // Wire action buttons
+          tr.querySelectorAll('[data-a]').forEach(btn => {
+            btn.onclick = () => openActionModal(dr, btn.dataset.a);
+          });
+          rows.appendChild(tr);
+        }
+        $('summary').textContent = drivers.length + ' drivers' + (data.pagination && data.pagination.has_more ? ' (showing first 100)' : '');
+      } catch (e) { toast(e.message, 'err'); }
+    }
+
+    function openActionModal(driver, action) {
+      currentActionDriver = driver;
+      currentActionType = action;
+      const driverId = driver.driver_id;
+
+      $('actionDriverInfo').innerHTML = '<strong>' + esc(driver.user.name) + '</strong> <span class="muted">' + esc(driver.user.phone || '') + '</span> ' + accountStatusPill(driver.account_status || 'ACTIVE');
+      $('actionAmount').value = '';
+      $('actionReason').value = '';
+      $('actionWarning').textContent = '';
+
+      const titles = {
+        penalty: '⚠️ Issue Penalty',
+        pass: driver.has_driver_pass ? '🎫 Revoke Driver Pass' : '🎫 Grant Driver Pass',
+        suspend: '🚫 Suspend Account',
+        reactivate: '✅ Reactivate Account',
+        terminate: '❌ Terminate Account',
+      };
+      const btnLabels = {
+        penalty: 'Issue Penalty',
+        pass: driver.has_driver_pass ? 'Revoke Pass' : 'Grant Pass',
+        suspend: 'Suspend Account',
+        reactivate: 'Reactivate',
+        terminate: 'Terminate Account',
+      };
+
+      $('actionModalTitle').textContent = titles[action] || 'Action';
+      $('actionSubmitBtn').textContent = btnLabels[action] || 'Confirm';
+      $('actionSubmitBtn').className = (action === 'suspend' || action === 'terminate') ? 'danger' : 'primary';
+
+      // Show/hide amount field (penalty only)
+      $('actionAmountField').style.display = action === 'penalty' ? 'block' : 'none';
+
+      // Reason field config
+      if (action === 'penalty') {
+        $('actionReasonField').style.display = 'block';
+        $('actionReasonLabel').textContent = 'Reason';
+        $('actionReason').placeholder = 'e.g. Cancelled ride without reason';
+      } else if (action === 'suspend') {
+        $('actionReasonField').style.display = 'block';
+        $('actionReasonLabel').textContent = 'Suspension Reason';
+        $('actionReason').placeholder = 'e.g. Multiple passenger complaints';
+      } else if (action === 'terminate') {
+        $('actionReasonField').style.display = 'block';
+        $('actionReasonLabel').textContent = 'Termination Reason';
+        $('actionReason').placeholder = 'e.g. Fraudulent behavior';
+        $('actionWarning').textContent = '⚠️ This action is permanent and cannot be undone from the dashboard.';
+      } else if (action === 'reactivate') {
+        $('actionReasonField').style.display = 'block';
+        $('actionReasonLabel').textContent = 'Notes (optional)';
+        $('actionReason').placeholder = 'e.g. Suspension period completed';
+      } else if (action === 'pass') {
+        $('actionReasonField').style.display = 'none';
+      }
+
+      $('actionOverlay').classList.add('show');
+    }
+
+    async function submitAction() {
+      if (!currentActionDriver || !currentActionType) return;
+      const driverId = currentActionDriver.driver_id;
+      const action = currentActionType;
+      const reason = $('actionReason').value.trim();
+      const amount = $('actionAmount').value;
+
+      $('actionSubmitBtn').disabled = true;
+
+      try {
+        if (action === 'penalty') {
+          if (!amount || parseFloat(amount) < 1) { toast('Enter a valid penalty amount', 'err'); return; }
+          if (!reason) { toast('Enter a penalty reason', 'err'); return; }
+          await api('POST', '/api/admin/drivers/' + driverId + '/penalty', { amount: parseFloat(amount), reason });
+          toast('Penalty of ₹' + amount + ' issued', 'ok');
+        } else if (action === 'pass') {
+          const enabled = !currentActionDriver.has_driver_pass;
+          await api('POST', '/api/admin/drivers/' + driverId + '/driver-pass', { enabled });
+          toast('Driver pass ' + (enabled ? 'granted' : 'revoked'), 'ok');
+        } else if (action === 'suspend') {
+          if (!reason) { toast('Enter a suspension reason', 'err'); return; }
+          await api('POST', '/api/admin/drivers/' + driverId + '/suspend', { reason });
+          toast('Account suspended', 'ok');
+        } else if (action === 'reactivate') {
+          await api('POST', '/api/admin/drivers/' + driverId + '/reactivate', { notes: reason || undefined });
+          toast('Account reactivated', 'ok');
+        } else if (action === 'terminate') {
+          if (!reason) { toast('Enter a termination reason', 'err'); return; }
+          await api('POST', '/api/admin/drivers/' + driverId + '/terminate', { reason });
+          toast('Account terminated', 'ok');
+        }
+        $('actionOverlay').classList.remove('show');
+        loadDrivers();
+      } catch (e) { toast(e.message, 'err'); }
+      finally { $('actionSubmitBtn').disabled = false; }
+    }
+
+    // ─── Event Listeners ────────────────────────────────────────────────────────
     $('loginBtn').onclick = login;
     $('password').onkeydown = (e) => { if (e.key === 'Enter') login(); };
     $('logoutBtn').onclick = () => { setLoggedOut(); toast('Logged out', 'ok'); };
-    $('refresh').onclick = loadDocs;
+    $('refresh').onclick = () => { const active = document.querySelector('.tab-btn.primary'); active?.dataset.tab === 'drivers' ? loadDrivers() : loadDocs(); };
     $('docStatusFilter').onchange = loadDocs;
-    $('docSearch').oninput = () => {
-      clearTimeout(searchDebounce);
-      searchDebounce = setTimeout(loadDocs, 350);
-    };
+    $('docSearch').oninput = () => { clearTimeout(searchDebounce); searchDebounce = setTimeout(loadDocs, 350); };
     $('docSearch').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(searchDebounce); loadDocs(); } };
     $('closeDocModal').onclick = $('cancelDocModal').onclick = () => $('docOverlay').classList.remove('show');
     $('docOverlay').onclick = (e) => { if (e.target === $('docOverlay')) $('docOverlay').classList.remove('show'); };
     $('approveDocBtn').onclick = () => reviewDoc(true);
     $('rejectDocBtn').onclick = () => reviewDoc(false);
+    // Driver management listeners
+    $('driverSearch').oninput = () => { clearTimeout(driverSearchDebounce); driverSearchDebounce = setTimeout(loadDrivers, 350); };
+    $('driverSearch').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(driverSearchDebounce); loadDrivers(); } };
+    $('driverFilter').onchange = loadDrivers;
+    $('closeActionModal').onclick = $('cancelActionModal').onclick = () => $('actionOverlay').classList.remove('show');
+    $('actionOverlay').onclick = (e) => { if (e.target === $('actionOverlay')) $('actionOverlay').classList.remove('show'); };
+    $('actionSubmitBtn').onclick = submitAction;
+    // Tab buttons
+    document.querySelectorAll('.tab-btn').forEach(btn => { btn.onclick = () => switchTab(btn.dataset.tab); });
 
     if (token && adminEmail) setLoggedIn(adminEmail, token);
   </script>
 </body>
 </html>
+

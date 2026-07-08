@@ -10,8 +10,8 @@ import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS, checkRequiredDocuments } from '@raahi/shared';
 import { bannerUploadMiddleware, uploadBannerImage } from './bannerUpload';
-import { presignDocumentUrl, notifyDriverVerification } from './driverDocs';
-import { OnboardingStatus } from '@prisma/client';
+import { presignDocumentUrl, notifyDriverVerification, notifyDriverAction } from './driverDocs';
+import { OnboardingStatus, DriverAccountStatus } from '@prisma/client';
 
 const logger = createLogger('admin-service');
 const app = express();
@@ -261,6 +261,12 @@ function formatDriver(driver: any) {
     can_start_rides: canDriverStartRides(driver),
     rating: driver.rating,
     total_trips: driver.totalRides,
+    // Account management fields
+    account_status: driver.accountStatus || 'ACTIVE',
+    account_status_reason: driver.accountStatusReason || null,
+    account_status_at: driver.accountStatusAt || null,
+    account_status_by: driver.accountStatusBy || null,
+    has_driver_pass: driver.hasDriverPass || false,
   };
 }
 
@@ -837,7 +843,7 @@ app.post(
 );
 
 app.get('/api/admin/statistics', authenticate, requireVerifier, asyncHandler(async (req: AuthRequest, res) => {
-  const [totalDrivers, verifiedDrivers, pendingVerification, rejectedDrivers, totalDocuments, pendingDocuments, verifiedDocuments] = await Promise.all([
+  const [totalDrivers, verifiedDrivers, pendingVerification, rejectedDrivers, suspendedDrivers, terminatedDrivers, totalDocuments, pendingDocuments, verifiedDocuments] = await Promise.all([
     prisma.driver.count(),
     prisma.driver.count({ where: { isVerified: true } }),
     prisma.driver.count({
@@ -847,6 +853,8 @@ app.get('/api/admin/statistics', authenticate, requireVerifier, asyncHandler(asy
       },
     }),
     prisma.driver.count({ where: { onboardingStatus: OnboardingStatus.REJECTED } }),
+    prisma.driver.count({ where: { accountStatus: DriverAccountStatus.SUSPENDED } }),
+    prisma.driver.count({ where: { accountStatus: DriverAccountStatus.TERMINATED } }),
     prisma.driverDocument.count(),
     prisma.driverDocument.count({ where: { isVerified: false, rejectionReason: null } }),
     prisma.driverDocument.count({ where: { isVerified: true } }),
@@ -854,11 +862,345 @@ app.get('/api/admin/statistics', authenticate, requireVerifier, asyncHandler(asy
   res.json({
     success: true,
     data: {
-      drivers: { total: totalDrivers, verified: verifiedDrivers, pending_verification: pendingVerification, rejected: rejectedDrivers },
+      drivers: { total: totalDrivers, verified: verifiedDrivers, pending_verification: pendingVerification, rejected: rejectedDrivers, suspended: suspendedDrivers, terminated: terminatedDrivers },
       documents: { total: totalDocuments, verified: verifiedDocuments, pending: pendingDocuments },
     },
   });
 }));
+
+// ==================== DRIVER ACCOUNT MANAGEMENT (Verifier) ====================
+
+/**
+ * POST /api/admin/drivers/:driverId/penalty
+ * Issue a custom penalty to a driver from the admin dashboard.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/penalty',
+  authenticate,
+  requireVerifier,
+  [
+    body('amount').isFloat({ min: 1 }).withMessage('Penalty amount is required (min ₹1)'),
+    body('reason').isString().notEmpty().isLength({ max: 500 }).withMessage('Penalty reason is required'),
+  ],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { driverId } = req.params;
+    const { amount, reason } = req.body;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const penalty = await prisma.driverPenalty.create({
+      data: {
+        driverId,
+        amount: parseFloat(amount),
+        reason,
+        issuedBy: 'ADMIN',
+      },
+    });
+
+    logger.info(`[ADMIN] Penalty ₹${amount} issued to driver ${driverId}: ${reason}`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: 'PENALTY_ISSUED',
+      title: '⚠️ Penalty Issued',
+      message: `A penalty of ₹${amount} has been applied to your account. Reason: ${reason}`,
+      metadata: { penaltyId: penalty.id, amount, reason },
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Penalty of ₹${amount} issued successfully`,
+      data: {
+        penalty_id: penalty.id,
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        amount: penalty.amount,
+        reason: penalty.reason,
+        status: penalty.status,
+        created_at: penalty.createdAt,
+      },
+    });
+  }),
+);
+
+/**
+ * POST /api/admin/drivers/:driverId/driver-pass
+ * Toggle driver pass on/off.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/driver-pass',
+  authenticate,
+  requireVerifier,
+  [body('enabled').isBoolean().withMessage('enabled (true/false) is required')],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { driverId } = req.params;
+    const { enabled } = req.body;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: { hasDriverPass: enabled },
+    });
+
+    logger.info(`[ADMIN] Driver pass ${enabled ? 'enabled' : 'disabled'} for driver ${driverId}`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: enabled ? 'DRIVER_PASS_ENABLED' : 'DRIVER_PASS_DISABLED',
+      title: enabled ? '🎫 Driver Pass Activated' : 'Driver Pass Deactivated',
+      message: enabled
+        ? 'Your driver pass has been activated by admin. Go-offline penalties are waived while active.'
+        : 'Your driver pass has been deactivated by admin. Standard penalty rules now apply.',
+    });
+
+    res.json({
+      success: true,
+      message: `Driver pass ${enabled ? 'enabled' : 'disabled'} successfully`,
+      data: {
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        has_driver_pass: enabled,
+      },
+    });
+  }),
+);
+
+/**
+ * POST /api/admin/drivers/:driverId/suspend
+ * Suspend a driver account — blocks going online, deactivates.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/suspend',
+  authenticate,
+  requireVerifier,
+  [body('reason').isString().notEmpty().isLength({ max: 500 }).withMessage('Suspension reason is required')],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { driverId } = req.params;
+    const { reason } = req.body;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+    if (driver.accountStatus === 'TERMINATED') {
+      res.status(400).json({ success: false, message: 'Cannot suspend a terminated account. Create a new account instead.' });
+      return;
+    }
+    if (driver.accountStatus === 'SUSPENDED') {
+      res.status(400).json({ success: false, message: 'Account is already suspended' });
+      return;
+    }
+
+    const now = new Date();
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: {
+        accountStatus: DriverAccountStatus.SUSPENDED,
+        accountStatusReason: reason,
+        accountStatusAt: now,
+        accountStatusBy: req.user?.email || req.user?.id || 'admin',
+        isActive: false,
+        isOnline: false,
+      },
+    });
+
+    logger.info(`[ADMIN] Driver ${driverId} suspended: ${reason}`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: 'ACCOUNT_SUSPENDED',
+      title: '🚫 Account Suspended',
+      message: `Your account has been suspended. Reason: ${reason}. Contact support for assistance.`,
+      metadata: { reason },
+    });
+
+    res.json({
+      success: true,
+      message: 'Driver account suspended successfully',
+      data: {
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        account_status: 'SUSPENDED',
+        reason,
+        suspended_at: now,
+        suspended_by: req.user?.email || req.user?.id,
+      },
+    });
+  }),
+);
+
+/**
+ * POST /api/admin/drivers/:driverId/reactivate
+ * Reactivate a suspended driver account — restores ACTIVE status.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/reactivate',
+  authenticate,
+  requireVerifier,
+  [body('notes').optional().isString().isLength({ max: 500 })],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { driverId } = req.params;
+    const { notes } = req.body;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+    if (driver.accountStatus === 'ACTIVE') {
+      res.status(400).json({ success: false, message: 'Account is already active' });
+      return;
+    }
+    if (driver.accountStatus === 'TERMINATED') {
+      res.status(400).json({ success: false, message: 'Cannot reactivate a terminated account' });
+      return;
+    }
+
+    const now = new Date();
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: {
+        accountStatus: DriverAccountStatus.ACTIVE,
+        accountStatusReason: notes || 'Reactivated by admin',
+        accountStatusAt: now,
+        accountStatusBy: req.user?.email || req.user?.id || 'admin',
+        isActive: true,
+      },
+    });
+
+    logger.info(`[ADMIN] Driver ${driverId} reactivated${notes ? `: ${notes}` : ''}`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: 'ACCOUNT_REACTIVATED',
+      title: '✅ Account Reactivated',
+      message: 'Your account has been reactivated! You can now go online and start accepting rides.',
+    });
+
+    res.json({
+      success: true,
+      message: 'Driver account reactivated successfully',
+      data: {
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        account_status: 'ACTIVE',
+        reactivated_at: now,
+        reactivated_by: req.user?.email || req.user?.id,
+      },
+    });
+  }),
+);
+
+/**
+ * POST /api/admin/drivers/:driverId/terminate
+ * Permanently terminate a driver account — irreversible from dashboard.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/terminate',
+  authenticate,
+  requireVerifier,
+  [body('reason').isString().notEmpty().isLength({ max: 500 }).withMessage('Termination reason is required')],
+  asyncHandler(async (req: AuthRequest, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const { driverId } = req.params;
+    const { reason } = req.body;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+    if (driver.accountStatus === 'TERMINATED') {
+      res.status(400).json({ success: false, message: 'Account is already terminated' });
+      return;
+    }
+
+    const now = new Date();
+    await prisma.driver.update({
+      where: { id: driverId },
+      data: {
+        accountStatus: DriverAccountStatus.TERMINATED,
+        accountStatusReason: reason,
+        accountStatusAt: now,
+        accountStatusBy: req.user?.email || req.user?.id || 'admin',
+        isActive: false,
+        isOnline: false,
+        isVerified: false,
+      },
+    });
+
+    logger.info(`[ADMIN] Driver ${driverId} TERMINATED: ${reason}`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: 'ACCOUNT_TERMINATED',
+      title: '❌ Account Terminated',
+      message: `Your driver account has been terminated. Reason: ${reason}. Contact support if you believe this is an error.`,
+      metadata: { reason },
+    });
+
+    res.json({
+      success: true,
+      message: 'Driver account terminated',
+      data: {
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        account_status: 'TERMINATED',
+        reason,
+        terminated_at: now,
+        terminated_by: req.user?.email || req.user?.id,
+      },
+    });
+  }),
+);
 
 // ==================== PROMO MANAGEMENT (Marketing) ====================
 // Proxies to pricing-service /api/promo/admin. Protected by admin JWT so the
