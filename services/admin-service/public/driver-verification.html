@@ -443,9 +443,9 @@
             '<td>' + accountStatusPill(acctStatus) + ' ' + driverPassPill(dr.has_driver_pass) + '</td>' +
             '<td>' + (dr.is_verified ? '<span class="pill on">Verified</span>' : '<span class="pill warn">Unverified</span>') + '</td>' +
             '<td class="muted">' + esc(dr.vehicle_info?.type || '—') + '</td>' +
-            '<td>' +
             '<div class="actions" style="flex-wrap:wrap">' +
               '<button data-a="penalty" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>⚠ Penalty</button>' +
+              '<button data-a="clear_penalties" style="font-size:11px;color:var(--green)"' + (isTerminated ? ' disabled' : '') + '>✓ Clear Penalties</button>' +
               '<button data-a="pass" style="font-size:11px"' + (isTerminated ? ' disabled' : '') + '>' + (dr.has_driver_pass ? '🎫 Revoke Pass' : '🎫 Grant Pass') + '</button>' +
               (acctStatus === 'ACTIVE' ? '<button data-a="suspend" class="danger" style="font-size:11px">🚫 Suspend</button>' : '') +
               (isSuspended ? '<button data-a="reactivate" style="font-size:11px;color:var(--green)">✅ Reactivate</button>' : '') +
@@ -475,6 +475,7 @@
 
       const titles = {
         penalty: '⚠️ Issue Penalty',
+        clear_penalties: '✓ Clear All Penalties',
         pass: driver.has_driver_pass ? '🎫 Revoke Driver Pass' : '🎫 Grant Driver Pass',
         suspend: '🚫 Suspend Account',
         reactivate: '✅ Reactivate Account',
@@ -482,6 +483,7 @@
       };
       const btnLabels = {
         penalty: 'Issue Penalty',
+        clear_penalties: 'Clear Penalties',
         pass: driver.has_driver_pass ? 'Revoke Pass' : 'Grant Pass',
         suspend: 'Suspend Account',
         reactivate: 'Reactivate',
@@ -500,6 +502,9 @@
         $('actionReasonField').style.display = 'block';
         $('actionReasonLabel').textContent = 'Reason';
         $('actionReason').placeholder = 'e.g. Cancelled ride without reason';
+      } else if (action === 'clear_penalties') {
+        $('actionReasonField').style.display = 'none';
+        $('actionWarning').textContent = 'This will clear all pending/unpaid penalties for this driver.';
       } else if (action === 'suspend') {
         $('actionReasonField').style.display = 'block';
         $('actionReasonLabel').textContent = 'Suspension Reason';
@@ -535,6 +540,9 @@
           if (!reason) { toast('Enter a penalty reason', 'err'); return; }
           await api('POST', '/api/admin/drivers/' + driverId + '/penalty', { amount: parseFloat(amount), reason });
           toast('Penalty of ₹' + amount + ' issued', 'ok');
+        } else if (action === 'clear_penalties') {
+          await api('POST', '/api/admin/drivers/' + driverId + '/clear-penalties');
+          toast('All pending penalties cleared', 'ok');
         } else if (action === 'pass') {
           const enabled = !currentActionDriver.has_driver_pass;
           await api('POST', '/api/admin/drivers/' + driverId + '/driver-pass', { enabled });

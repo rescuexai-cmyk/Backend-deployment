@@ -129,6 +129,7 @@ export async function notifyDriverVerification(params: {
 
 export type DriverAdminActionEvent =
   | 'PENALTY_ISSUED'
+  | 'PENALTIES_CLEARED'
   | 'DRIVER_PASS_ENABLED'
   | 'DRIVER_PASS_DISABLED'
   | 'ACCOUNT_SUSPENDED'

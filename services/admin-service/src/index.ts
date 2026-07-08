@@ -937,6 +937,65 @@ app.post(
 );
 
 /**
+ * POST /api/admin/drivers/:driverId/clear-penalties
+ * Clear all unpaid penalties for a driver from the admin dashboard.
+ */
+app.post(
+  '/api/admin/drivers/:driverId/clear-penalties',
+  authenticate,
+  requireVerifier,
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { driverId } = req.params;
+
+    const driver = await prisma.driver.findUnique({
+      where: { id: driverId },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!driver) {
+      res.status(404).json({ success: false, message: 'Driver not found' });
+      return;
+    }
+
+    const unpaid = await prisma.driverPenalty.findMany({
+      where: { driverId, status: 'PENDING' },
+    });
+
+    if (unpaid.length === 0) {
+      res.status(400).json({ success: false, message: 'No pending penalties found for this driver' });
+      return;
+    }
+
+    const totalCleared = unpaid.reduce((sum, p) => sum + p.amount, 0);
+
+    await prisma.driverPenalty.updateMany({
+      where: { driverId, status: 'PENDING' },
+      data: { status: 'PAID', paidAt: new Date() },
+    });
+
+    logger.info(`[ADMIN] Cleared ${unpaid.length} penalties totalling ₹${totalCleared} for driver ${driverId} (by: ${req.user?.email || req.user?.id})`);
+
+    void notifyDriverAction({
+      userId: driver.user.id,
+      event: 'PENALTIES_CLEARED',
+      title: '✅ Penalties Cleared',
+      message: 'You are ready to go, all penalty dues cleared!',
+      metadata: { totalCleared, countCleared: unpaid.length },
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully cleared ${unpaid.length} pending penalties totalling ₹${totalCleared}`,
+      data: {
+        driver_id: driverId,
+        driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
+        total_cleared: totalCleared,
+        count_cleared: unpaid.length,
+      },
+    });
+  }),
+);
+
+/**
  * POST /api/admin/drivers/:driverId/driver-pass
  * Toggle driver pass on/off.
  */
