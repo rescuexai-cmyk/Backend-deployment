@@ -209,6 +209,7 @@ router.post(
     body('rideType').optional().isIn(['NORMAL', 'RESCUE']),
     body('rescueMultiDriver').optional().isBoolean(),
     body('promoCode').optional().isString().trim(),
+    body('quotedFare').optional().isFloat({ min: 0 }),
     body('stops').optional().isArray(),
     body('stops.*.lat').isFloat({ min: -90, max: 90 }),
     body('stops.*.lng').isFloat({ min: -180, max: 180 }),
@@ -220,7 +221,7 @@ router.post(
       res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       return;
     }
-    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType, rideType, rescueMultiDriver, promoCode, stops } = req.body;
+    const { pickupLat, pickupLng, dropLat, dropLng, pickupAddress, dropAddress, paymentMethod, scheduledTime, vehicleType, rideType, rescueMultiDriver, promoCode, quotedFare, stops } = req.body;
     try {
       const ride = await rideService.createRide({
         passengerId: req.user!.id,
@@ -237,6 +238,7 @@ router.post(
         rideType: rideType || 'NORMAL',
         rescueMultiDriver: rescueMultiDriver || false,
         promoCode,
+        quotedFare: quotedFare != null ? Number(quotedFare) : undefined,
         stops,
       });
       res.status(201).json({ success: true, message: 'Ride created successfully', data: ride });

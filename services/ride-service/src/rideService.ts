@@ -203,6 +203,8 @@ export interface CreateRideRequest {
   rescueMultiDriver?: boolean;
   stops?: Array<{ lat: number; lng: number; address: string }>;
   promoCode?: string;
+  /** Fare shown to the rider on vehicle sheet / payment (lock if close to server quote). */
+  quotedFare?: number;
 }
 
 function calcDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -326,6 +328,30 @@ export async function createRide(req: CreateRideRequest) {
     scheduledTime: req.scheduledTime?.toISOString(),
     stops: req.stops,
   });
+
+  // Prefer the fare the rider already saw (vehicle sheet / payment), as long as
+  // it is within a small tolerance of the fresh server quote. This stops
+  // sheet↔payment↔driver mismatches from re-quote drift.
+  if (
+    typeof req.quotedFare === 'number' &&
+    Number.isFinite(req.quotedFare) &&
+    req.quotedFare > 0
+  ) {
+    const serverFare = pricing.totalFare;
+    const quoted = Math.round(req.quotedFare * 100) / 100;
+    const delta = Math.abs(serverFare - quoted);
+    const tolerance = Math.max(15, serverFare * 0.08); // ₹15 or 8%
+    if (delta <= tolerance) {
+      pricing.totalFare = quoted;
+      logger.info(
+        `[RIDE] Locked quoted fare ₹${quoted} (server ₹${serverFare}, Δ₹${delta.toFixed(2)})`,
+      );
+    } else {
+      logger.warn(
+        `[RIDE] Ignoring quoted fare ₹${quoted} — too far from server ₹${serverFare}`,
+      );
+    }
+  }
 
   // Pricing classifies long routes as intercity (platform_config
   // intercity_config_v1). Until intercity launches these are not bookable;
@@ -1859,7 +1885,13 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
     id: ride.id,
     ride_type: ride.vehicleType || 'cab',
     vehicleType: ride.vehicleType,
-    earning: ride.totalFare * 0.8,
+    // Show the same rider-facing total fare on driver offers (no silent 20% cut).
+    // Settlement/commission is applied at ride completion, not on the offer card.
+    earning: ride.totalFare,
+    estimatedFare: ride.totalFare,
+    total_fare: ride.totalFare,
+    totalFare: ride.totalFare,
+    fare: ride.totalFare,
     pickup_distance: `${calcDistance(lat, lng, ride.pickupLatitude, ride.pickupLongitude).toFixed(1)} km`,
     pickup_time: `${Math.ceil(calcDistance(lat, lng, ride.pickupLatitude, ride.pickupLongitude) * 3)} min`,
     drop_distance: `${ride.distance.toFixed(1)} km`,
@@ -1873,7 +1905,6 @@ export async function getAvailableRidesForDriver(lat: number, lng: number, radiu
     otp_required_at_start: true, // Driver must ask passenger for 4-digit code when starting ride
     is_golden: ride.totalFare > 500,
     created_at: ride.createdAt.toISOString(),
-    total_fare: ride.totalFare,
   }));
 }
 

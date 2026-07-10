@@ -10,7 +10,7 @@ import { prisma } from '@raahi/shared';
 import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments, getRequiredDocuments, INDEPENDENT_DRIVER_VEHICLE_TYPE, areRequiredDocumentsVerified } from '@raahi/shared';
 import { OnboardingStatus, PenaltyStatus, DocumentType } from '@prisma/client';
 import * as DigiLocker from './digilocker';
-import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument } from './storage';
+import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument, getPresignedUrl } from './storage';
 import { addVerificationJob, isQueueAvailable, closeQueues } from './queues';
 import { startVerificationWorker, stopVerificationWorker } from './documentVerificationWorker';
 import { isVisionConfigured } from './visionService';
@@ -2521,6 +2521,30 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   if (driver.aadhaarVerified) completedSteps++;
   if (driver.panVerified) completedSteps++;
   const verificationProgress = Math.round((completedSteps / totalSteps) * 100);
+
+  // Presign private S3/Spaces URLs so the driver app can preview documents in-app.
+  const withPreviewUrl = async (doc: (typeof driver.documents)[number]) => {
+    const formatted = formatDocumentDetail(doc);
+    try {
+      const presigned = await getPresignedUrl(doc.documentUrl, 3600);
+      if (presigned) {
+        formatted.url = presigned;
+        formatted.documentUrl = presigned;
+      }
+    } catch (error) {
+      logger.warn('[ONBOARDING_STATUS] Failed to presign document URL', {
+        documentType: doc.documentType,
+        error,
+      });
+    }
+    return formatted;
+  };
+
+  const [pendingDetails, flaggedDetails, documentDetails] = await Promise.all([
+    Promise.all(pendingDocs.map(withPreviewUrl)),
+    Promise.all(flaggedDocs.map(withPreviewUrl)),
+    Promise.all(driver.documents.map(withPreviewUrl)),
+  ]);
   
   res.json({
     success: true,
@@ -2567,9 +2591,9 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
         required: requiredDocs,
         uploaded: uploadedDocTypes,
         verified: verifiedDocTypes,
-        pending: pendingDocs.map(formatDocumentDetail),
-        flagged: flaggedDocs.map(formatDocumentDetail),
-        details: driver.documents.map(formatDocumentDetail),
+        pending: pendingDetails,
+        flagged: flaggedDetails,
+        details: documentDetails,
       },
       
       // Overall status
