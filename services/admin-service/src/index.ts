@@ -8,7 +8,7 @@ import { connectDatabase, authenticate, AuthRequest, setupSwagger } from '@raahi
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
-import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS, checkRequiredDocuments } from '@raahi/shared';
+import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS, checkRequiredDocuments, areRequiredDocumentsVerified } from '@raahi/shared';
 import { bannerUploadMiddleware, uploadBannerImage } from './bannerUpload';
 import { presignDocumentUrl, notifyDriverVerification, notifyDriverAction } from './driverDocs';
 import { OnboardingStatus, DriverAccountStatus } from '@prisma/client';
@@ -240,9 +240,9 @@ const requireAdmin = requireRole('marketing');
 const requireVerifier = requireRole('verifier');
 
 function formatDriver(driver: any) {
-  const allDocsVerified = driver.documents.length > 0 && driver.documents.every((d: any) => d.isVerified);
+  const allDocsVerified = areRequiredDocumentsVerified(driver.documents, driver.vehicleType);
   const pendingDocs = driver.documents.filter((d: any) => !d.isVerified);
-  const rejectedDocs = driver.documents.filter((d: any) => d.rejectionReason);
+  const rejectedDocs = driver.documents.filter((d: any) => !d.isVerified && d.rejectionReason);
   return {
     driver_id: driver.id,
     user: { id: driver.user.id, name: `${driver.user.firstName} ${driver.user.lastName}`, email: driver.user.email, phone: driver.user.phone, created_at: driver.user.createdAt },
@@ -564,11 +564,15 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireVerifie
       verifiedBy: 'ADMIN',
       rejectionReason: approved ? null : rejection_reason || 'Rejected by admin',
       verificationStatus: approved ? 'verified' : 'failed',
+      // Clear AI failure leftovers so the driver app stops showing "Verification Failed"
+      // after a manual admin override.
+      ...(approved
+        ? { aiMismatchReason: null, aiVerified: true }
+        : {}),
     },
   });
   const allDriverDocuments = await prisma.driverDocument.findMany({ where: { driverId: document.driverId } });
-  const docCheck = checkRequiredDocuments(allDriverDocuments.map((d) => d.documentType), document.driver.vehicleType);
-  const allDocsVerified = docCheck.isComplete && allDriverDocuments.length > 0 && allDriverDocuments.every((d) => d.isVerified);
+  const allDocsVerified = areRequiredDocumentsVerified(allDriverDocuments, document.driver.vehicleType);
   const hasRejectedDocs = allDriverDocuments.some((d) => !d.isVerified && d.rejectionReason);
   let newOnboardingStatus = document.driver.onboardingStatus;
   let isVerified = document.driver.isVerified;
@@ -587,7 +591,9 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireVerifie
     data: {
       onboardingStatus: newOnboardingStatus,
       isVerified,
-      ...(allDocsVerified ? { isActive: true, documentsVerifiedAt: new Date() } : { documentsVerifiedAt: null }),
+      ...(allDocsVerified
+        ? { isActive: true, documentsVerifiedAt: new Date() }
+        : { documentsVerifiedAt: null }),
       verificationNotes,
     },
   });
@@ -646,13 +652,26 @@ app.post('/api/admin/drivers/:driverId/verify-all', authenticate, requireVerifie
   }
   await prisma.driverDocument.updateMany({
     where: { driverId },
-    data: { isVerified: approved, verifiedAt: approved ? new Date() : null, verifiedBy: 'ADMIN', rejectionReason: approved ? null : 'Rejected by admin', verificationStatus: approved ? 'verified' : 'failed' },
+    data: {
+      isVerified: approved,
+      verifiedAt: approved ? new Date() : null,
+      verifiedBy: 'ADMIN',
+      rejectionReason: approved ? null : 'Rejected by admin',
+      verificationStatus: approved ? 'verified' : 'failed',
+      ...(approved ? { aiMismatchReason: null, aiVerified: true } : {}),
+    },
   });
   const newStatus = approved ? OnboardingStatus.COMPLETED : OnboardingStatus.REJECTED;
   const verificationNotes = notes || (approved ? 'All documents verified. You can now start accepting rides!' : 'Documents verification failed. Please re-upload valid documents.');
   await prisma.driver.update({
     where: { id: driverId },
-    data: { onboardingStatus: newStatus, isVerified: approved, ...(approved ? { isActive: true } : {}), documentsVerifiedAt: approved ? new Date() : null, verificationNotes },
+    data: {
+      onboardingStatus: newStatus,
+      isVerified: approved,
+      ...(approved ? { isActive: true } : { isActive: false }),
+      documentsVerifiedAt: approved ? new Date() : null,
+      verificationNotes,
+    },
   });
   void notifyDriverVerification({
     userId: driver.user.id,
@@ -707,6 +726,8 @@ app.post(
         verifiedBy: 'ADMIN', 
         rejectionReason: null,
         verificationStatus: 'verified',
+        aiMismatchReason: null,
+        aiVerified: true,
       },
     });
     

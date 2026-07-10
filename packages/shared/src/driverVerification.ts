@@ -142,3 +142,24 @@ export function checkRequiredDocuments(
   };
 }
 
+/**
+ * True when every required document TYPE has at least one verified upload.
+ *
+ * Important: drivers can have multiple rows per type (re-uploads / PUT updates
+ * that keep history). Do NOT use `documents.every(d => d.isVerified)` — a single
+ * stale failed row would incorrectly block onboarding completion.
+ */
+export function areRequiredDocumentsVerified(
+  documents: Array<{ documentType: string; isVerified: boolean }>,
+  vehicleType?: string | null,
+): boolean {
+  if (!documents.length) return false;
+  const required = getRequiredDocuments(vehicleType);
+  const verifiedTypes = new Set(
+    documents
+      .filter((d) => d.isVerified)
+      .map((d) => String(d.documentType).toUpperCase()),
+  );
+  return required.every((doc) => verifiedTypes.has(doc));
+}
+

@@ -6,11 +6,10 @@
  */
 
 import { Worker, Job } from 'bullmq';
-import { createLogger, prisma } from '@raahi/shared';
+import { createLogger, prisma, areRequiredDocumentsVerified } from '@raahi/shared';
 import { OnboardingStatus } from '@prisma/client';
 import { getConnectionOptions, VerificationJobData } from './queues';
 import { validateDocument, isVisionConfigured, DocumentType, DriverContext, crossVerifyDocuments } from './visionService';
-import { checkRequiredDocuments } from '@raahi/shared';
 
 const logger = createLogger('driver-service:worker');
 
@@ -24,6 +23,19 @@ async function processVerificationJob(job: Job<VerificationJobData>): Promise<vo
     documentId,
     documentType,
   });
+
+  // Never let a late/stale AI job undo a manual admin approval.
+  const existing = await prisma.driverDocument.findUnique({
+    where: { id: documentId },
+    select: { isVerified: true, verifiedBy: true, verificationStatus: true },
+  });
+  if (existing?.isVerified && existing.verifiedBy === 'ADMIN') {
+    logger.info('[WORKER] Skipping AI overwrite of admin-verified document', {
+      documentId,
+      documentType,
+    });
+    return;
+  }
   
   await prisma.driverDocument.update({
     where: { id: documentId },
@@ -70,6 +82,16 @@ async function processVerificationJob(job: Job<VerificationJobData>): Promise<vo
   };
   
   try {
+    // Re-check admin lock after OCR (admin may have approved while job was running).
+    const latest = await prisma.driverDocument.findUnique({
+      where: { id: documentId },
+      select: { isVerified: true, verifiedBy: true },
+    });
+    if (latest?.isVerified && latest.verifiedBy === 'ADMIN') {
+      logger.info('[WORKER] Admin approved during OCR — keeping admin decision', { documentId });
+      return;
+    }
+
     const result = await validateDocument(
       documentType as DocumentType,
       documentUrl,
@@ -124,13 +146,19 @@ async function processVerificationJob(job: Job<VerificationJobData>): Promise<vo
     });
     
     if (job.attemptsMade >= (job.opts.attempts || 3) - 1) {
-      await prisma.driverDocument.update({
+      const latest = await prisma.driverDocument.findUnique({
         where: { id: documentId },
-        data: {
-          verificationStatus: 'failed',
-          aiMismatchReason: `Verification failed: ${error.message}`,
-        },
+        select: { isVerified: true, verifiedBy: true },
       });
+      if (!(latest?.isVerified && latest.verifiedBy === 'ADMIN')) {
+        await prisma.driverDocument.update({
+          where: { id: documentId },
+          data: {
+            verificationStatus: 'failed',
+            aiMismatchReason: `Verification failed: ${error.message}`,
+          },
+        });
+      }
     }
     
     throw error;
@@ -153,10 +181,9 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
     },
   });
   
-  const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType), driver?.vehicleType);
-  const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
+  const allVerified = areRequiredDocumentsVerified(allDocs, driver?.vehicleType);
   
-  if (docCheck.isComplete && allVerified) {
+  if (allVerified) {
     // Perform cross-document verification to ensure all docs belong to same person
     const crossVerification = await crossVerifyDocuments(
       allDocs.map((d) => ({
@@ -205,6 +232,7 @@ async function checkAndCompleteOnboarding(driverId: string): Promise<void> {
       data: {
         onboardingStatus: OnboardingStatus.COMPLETED,
         isVerified: true,
+        isActive: true,
         documentsVerifiedAt: new Date(),
         verificationNotes,
       },

@@ -57,18 +57,22 @@ export interface DriverDocumentRow {
 
 /** Full document row for onboarding status lists (pending / flagged / details). */
 export function formatDocumentDetail(d: DriverDocumentRow): Record<string, unknown> {
+  // Once a document is verified (admin or AI), do not surface stale AI failure
+  // reasons to the client — those caused the driver app to keep showing
+  // "Verification Failed" after manual dashboard approval.
+  const mismatch = d.isVerified ? null : d.aiMismatchReason;
   return {
     type: d.documentType,
     url: d.documentUrl,
     uploaded_at: d.uploadedAt,
     is_verified: d.isVerified,
     verified_at: d.verifiedAt,
-    rejection_reason: d.rejectionReason,
+    rejection_reason: d.isVerified ? null : d.rejectionReason,
     ...withVisionFieldAliases({
-      verificationStatus: d.verificationStatus,
-      aiVerified: d.aiVerified,
+      verificationStatus: d.isVerified ? 'verified' : d.verificationStatus,
+      aiVerified: d.isVerified ? true : d.aiVerified,
       aiConfidence: d.aiConfidence,
-      aiMismatchReason: d.aiMismatchReason,
+      aiMismatchReason: mismatch,
     }),
   };
 }

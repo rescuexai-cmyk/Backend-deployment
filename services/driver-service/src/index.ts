@@ -7,7 +7,7 @@ import { connectDatabase, authenticate, authenticateDriver, AuthRequest, setupSw
 import { errorHandler, notFound, asyncHandler } from '@raahi/shared';
 import { createLogger, latLngToH3 } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
-import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments, getRequiredDocuments, INDEPENDENT_DRIVER_VEHICLE_TYPE } from '@raahi/shared';
+import { canDriverStartRides, DRIVER_NOT_VERIFIED_ERROR, REQUIRED_DOCUMENTS, checkRequiredDocuments, getRequiredDocuments, INDEPENDENT_DRIVER_VEHICLE_TYPE, areRequiredDocumentsVerified } from '@raahi/shared';
 import { OnboardingStatus, PenaltyStatus, DocumentType } from '@prisma/client';
 import * as DigiLocker from './digilocker';
 import { createUploadMiddleware, getDocumentUrl, getStorageConfig, isSpacesConfigured, deleteOldDocument } from './storage';
@@ -226,7 +226,7 @@ app.get('/api/driver/profile', authenticateDriver, asyncHandler(async (req: Auth
   const weekEarnings = driver.earnings.filter((e) => e.date >= weekStart).reduce((s, e) => s + e.netAmount, 0);
   const monthEarnings = driver.earnings.filter((e) => e.date >= monthStart).reduce((s, e) => s + e.netAmount, 0);
 
-  const allDocsVerified = driver.documents.length > 0 && driver.documents.every((d) => d.isVerified);
+  const allDocsVerified = areRequiredDocumentsVerified(driver.documents, driver.vehicleType);
   res.json({
     success: true,
     data: {
@@ -2143,15 +2143,15 @@ const handleDriverDocumentUpload = asyncHandler(async (req: AuthRequest, res: ex
         where: { driverId },
         select: { documentType: true, isVerified: true },
       });
-      const docCheck = checkRequiredDocuments(allDocs.map((d) => d.documentType), driver?.vehicleType);
-      const allVerified = allDocs.length > 0 && allDocs.every((d) => d.isVerified);
+      const allVerified = areRequiredDocumentsVerified(allDocs, driver?.vehicleType);
       
-      if (docCheck.isComplete && allVerified) {
+      if (allVerified) {
         await prisma.driver.update({
           where: { id: driverId },
           data: {
             onboardingStatus: OnboardingStatus.COMPLETED,
             isVerified: true,
+            isActive: true,
             documentsVerifiedAt: new Date(),
             verificationNotes: 'All documents verified. Profile photo auto-approved.',
           },
@@ -2297,13 +2297,14 @@ app.post('/api/driver/onboarding/documents/submit', authenticate, asyncHandler(a
     return;
   }
 
-  const allAiVerified = driver.documents.every((d) => d.isVerified);
-  if (allAiVerified && docCheck.isComplete) {
+  const allAiVerified = areRequiredDocumentsVerified(driver.documents, driver.vehicleType);
+  if (allAiVerified) {
     await prisma.driver.update({
       where: { id: driver.id },
       data: {
         onboardingStatus: OnboardingStatus.COMPLETED,
         isVerified: true,
+        isActive: true,
         documentsSubmittedAt: new Date(),
         documentsVerifiedAt: new Date(),
         verificationNotes: 'All documents auto-verified by AI Vision.',
@@ -2471,13 +2472,38 @@ app.post('/api/driver/documents/reverify', authenticate, asyncHandler(async (req
  *         description: Driver not found
  */
 app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: AuthRequest, res) => {
-  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id }, include: { documents: true, user: true } });
+  let driver = await prisma.driver.findFirst({ where: { userId: req.user!.id }, include: { documents: true, user: true } });
   if (!driver) {
     res.status(404).json({ success: false, message: 'Driver profile not found' });
     return;
   }
+
+  // Self-heal: required doc types are verified but driver flags were left incomplete
+  // (manual admin approve + stale AI rows / every-row check). Unlock on next open.
+  const requiredDocsVerified = areRequiredDocumentsVerified(driver.documents, driver.vehicleType);
+  if (
+    requiredDocsVerified &&
+    driver.accountStatus !== 'SUSPENDED' &&
+    driver.accountStatus !== 'TERMINATED' &&
+    (driver.onboardingStatus !== OnboardingStatus.COMPLETED || !driver.isVerified || !driver.isActive)
+  ) {
+    driver = await prisma.driver.update({
+      where: { id: driver.id },
+      data: {
+        onboardingStatus: OnboardingStatus.COMPLETED,
+        isVerified: true,
+        isActive: true,
+        documentsVerifiedAt: driver.documentsVerifiedAt ?? new Date(),
+        verificationNotes:
+          driver.verificationNotes ||
+          'All required documents verified. Account unlocked.',
+      },
+      include: { documents: true, user: true },
+    });
+    logger.info(`[ONBOARDING_STATUS] Self-healed driver ${driver.id} to COMPLETED after required docs verified`);
+  }
   
-  const allDocsVerified = driver.documents.length > 0 && driver.documents.every((d) => d.isVerified);
+  const allDocsVerified = requiredDocsVerified;
   const verifiedDocs = driver.documents.filter((d) => d.isVerified);
   const flaggedDocs = driver.documents.filter((d) => !d.isVerified && (d.verificationStatus === 'flagged' || d.verificationStatus === 'failed'));
   const pendingDocs = driver.documents.filter((d) => !d.isVerified && d.verificationStatus !== 'flagged' && d.verificationStatus !== 'failed');
@@ -2488,10 +2514,10 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   // Calculate verification progress using per-category required documents
   const requiredDocs = [...getRequiredDocuments(driver.vehicleType)];
   const uploadedDocTypes = driver.documents.map(d => d.documentType);
-  const verifiedDocTypes = verifiedDocs.map(d => d.documentType);
+  const verifiedDocTypes = [...new Set(verifiedDocs.map(d => d.documentType))];
 
   const totalSteps = requiredDocs.length + 2; // +2 for aadhaar and pan verification
-  let completedSteps = verifiedDocTypes.length;
+  let completedSteps = verifiedDocTypes.filter((t) => requiredDocs.includes(t)).length;
   if (driver.aadhaarVerified) completedSteps++;
   if (driver.panVerified) completedSteps++;
   const verificationProgress = Math.round((completedSteps / totalSteps) * 100);
@@ -2554,6 +2580,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
       verification_progress: verificationProgress,
       can_start_rides: canDriverStartRides(driver),
       verification_notes: driver.verificationNotes,
+      account_status: driver.accountStatus,
       
       // Timestamps
       joined_at: driver.joinedAt,
