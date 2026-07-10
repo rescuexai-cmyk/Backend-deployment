@@ -5,6 +5,7 @@ import type { Server as SocketServer } from 'socket.io';
 import { eventBus, CHANNELS } from './eventBus';
 import { sseManager } from './sseManager';
 import { mqttBroker } from './mqttBroker';
+import { rideStateStore } from './rideStateStore';
 
 const logger = createLogger('realtime-service');
 let io: SocketServer | null = null;
@@ -337,6 +338,65 @@ export async function updateDriverLocation(driverId: string, lat: number, lng: n
       speed,
       timestamp,
     });
+  }
+
+  // Also push into any active ride room so the passenger map moves in realtime
+  // even when the driver only hits the REST location endpoint.
+  try {
+    const activeRide = await prisma.ride.findFirst({
+      where: {
+        driverId: canonicalDriverId,
+        status: {
+          in: ['DRIVER_ASSIGNED', 'CONFIRMED', 'DRIVER_ARRIVED', 'RIDE_STARTED'],
+        },
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (activeRide) {
+      const updatedInFireball = await rideStateStore.updateRideLocation(
+        activeRide.id,
+        lat,
+        lng,
+        heading,
+        speed,
+      );
+      // If Fireball has no ride state yet, still push to SSE subscribers.
+      if (!updatedInFireball) {
+        eventBus.publish(CHANNELS.ride(activeRide.id), {
+          type: 'driver-location',
+          driverId: canonicalDriverId,
+          rideId: activeRide.id,
+          lat,
+          lng,
+          heading,
+          speed,
+          timestamp,
+        });
+      }
+      const ridePayload = {
+        rideId: activeRide.id,
+        lat,
+        lng,
+        latitude: lat,
+        longitude: lng,
+        heading,
+        speed,
+        driverLocation: {
+          latitude: lat,
+          longitude: lng,
+          heading,
+          speed,
+        },
+        timestamp,
+      };
+      if (io) {
+        io.to(`ride-${activeRide.id}`).emit('driver-location', ridePayload);
+        io.to(`ride-${activeRide.id}`).emit('driver-location-update', ridePayload);
+      }
+    }
+  } catch (rideBroadcastError) {
+    logger.debug('[H3] Active-ride location broadcast skipped', { error: rideBroadcastError });
   }
 
   // Driver-near-pickup geofence detection (one-time notification per ride).

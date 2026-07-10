@@ -25,7 +25,7 @@ import {
 } from './realtimeService';
 
 // Hybrid real-time transport imports
-import { eventBus } from './eventBus';
+import { eventBus, CHANNELS } from './eventBus';
 import { sseManager } from './sseManager';
 import { mqttBroker } from './mqttBroker';
 import { socketTransport } from './socketTransport';
@@ -716,25 +716,79 @@ io.on('connection', (socket) => {
   });
   
   // Driver location update during ride — uses RAMEN + Fireball (no DB writes)
-  socket.on('location-update', async (data: { rideId: string; lat: number; lng: number; heading?: number; speed?: number }) => {
-    if (!data.rideId || typeof data.rideId !== 'string') return;
-    if (typeof data.lat !== 'number' || typeof data.lng !== 'number') return;
+  // Accept both canonical (`location-update`) and legacy (`driver-location-update`)
+  // event names so older/newer clients both stream live cab movement.
+  const handleRideLocationUpdate = async (data: any) => {
+    if (!data) return;
+    const rideId = typeof data.rideId === 'string' ? data.rideId : null;
+    const lat = typeof data.lat === 'number'
+      ? data.lat
+      : typeof data.latitude === 'number'
+        ? data.latitude
+        : (data.driverLocation?.latitude ?? data.driverLocation?.lat);
+    const lng = typeof data.lng === 'number'
+      ? data.lng
+      : typeof data.longitude === 'number'
+        ? data.longitude
+        : (data.driverLocation?.longitude ?? data.driverLocation?.lng);
+    const heading = typeof data.heading === 'number'
+      ? data.heading
+      : (data.driverLocation?.heading);
+    const speed = typeof data.speed === 'number'
+      ? data.speed
+      : (data.driverLocation?.speed);
+
+    if (!rideId || typeof lat !== 'number' || typeof lng !== 'number') return;
     updateActivity();
-    
+
     // Update ride location in Fireball (in-memory, instant push to ride subscribers)
-    await rideStateStore.updateRideLocation(data.rideId, data.lat, data.lng, data.heading, data.speed);
-    
+    const updatedInFireball = await rideStateStore.updateRideLocation(rideId, lat, lng, heading, speed);
+    if (!updatedInFireball) {
+      // Ride may not be hydrated in Fireball yet — still push to SSE/MQTT.
+      eventBus.publish(CHANNELS.ride(rideId), {
+        type: 'driver-location',
+        driverId: currentDriverId || '',
+        rideId,
+        lat,
+        lng,
+        heading,
+        speed,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     // Update driver location in RAMEN (in-memory H3 index, async DB write)
     if (currentDriverId) {
-      await driverStateStore.updateLocation(currentDriverId, data.lat, data.lng, data.heading, data.speed);
+      await driverStateStore.updateLocation(currentDriverId, lat, lng, heading, speed);
     }
-    
-    // Legacy Socket.io broadcast (backward compatibility)
-    io.to(`ride-${data.rideId}`).emit('driver-location', {
-      ...data,
+
+    const payload = {
+      rideId,
+      lat,
+      lng,
+      latitude: lat,
+      longitude: lng,
+      heading,
+      speed,
+      etaMinutes: data.etaMinutes ?? data.eta_minutes,
+      distanceMeters: data.distanceMeters ?? data.distance_meters,
+      driverLocation: {
+        latitude: lat,
+        longitude: lng,
+        heading,
+        speed,
+      },
       timestamp: new Date().toISOString(),
-    });
-  });
+    };
+
+    // Broadcast to the ride room (passengers listening on this ride)
+    io.to(`ride-${rideId}`).emit('driver-location', payload);
+    // Also emit legacy alias for older passenger clients
+    io.to(`ride-${rideId}`).emit('driver-location-update', payload);
+  };
+
+  socket.on('location-update', handleRideLocationUpdate);
+  socket.on('driver-location-update', handleRideLocationUpdate);
   
   socket.on('disconnect', async (reason) => {
     const sessions = chatSessionsBySocket.get(socket.id);
