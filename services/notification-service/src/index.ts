@@ -125,7 +125,7 @@ app.post(
   '/api/notifications/device',
   authenticate,
   [
-    body('fcmToken').isString().notEmpty().isLength({ min: 20, max: 500 }).withMessage('fcmToken is required'),
+    body('fcmToken').isString().notEmpty().isLength({ min: 20, max: 4096 }).withMessage('fcmToken is required'),
     body('platform').isIn(['ios', 'android', 'web']).withMessage('platform must be ios, android, or web'),
     body('deviceId').optional().isString().isLength({ max: 200 }),
   ],
@@ -150,7 +150,12 @@ app.post(
       },
     });
 
-    logger.info('[DEVICE] FCM token registered', { userId, platform, hasDeviceId: !!deviceId });
+    logger.info('[DEVICE] FCM token registered', {
+      userId,
+      platform,
+      hasDeviceId: !!deviceId,
+      tokenLength: typeof fcmToken === 'string' ? fcmToken.length : 0,
+    });
 
     res.json({
       success: true,
@@ -433,9 +438,23 @@ app.post(
 
     // Send push notification if enabled and user has FCM token
     const notificationsEnabled = await isPushAllowedForUser(userId);
-    const pushSkipped = !sendPush || !user.fcmToken || !notificationsEnabled;
+    const hasFcmToken = !!user.fcmToken;
+    const pushSkipped = !sendPush || !hasFcmToken || !notificationsEnabled;
     const fcmToken = user.fcmToken;
-    logger.info('[NOTIFICATION] Push eligibility', { userId, notificationsEnabled, pushSkipped });
+    logger.info('[NOTIFICATION] Push eligibility', {
+      userId,
+      notificationsEnabled,
+      pushSkipped,
+      hasFcmToken,
+      sendPush: !!sendPush,
+      skipReason: pushSkipped
+        ? (!sendPush
+            ? 'sendPush_false'
+            : !hasFcmToken
+              ? 'no_fcm_token'
+              : 'notifications_disabled')
+        : null,
+    });
     let pushResult: { success: boolean; messageId?: string; error?: string; invalidToken?: boolean } | null = null;
     if (!pushSkipped && fcmToken) {
       pushResult = await PushService.sendPushNotification(fcmToken, {
