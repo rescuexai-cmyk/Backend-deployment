@@ -17,6 +17,7 @@ const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
 
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:5006';
+const REALTIME_SERVICE_URL = process.env.REALTIME_SERVICE_URL || 'http://localhost:5007';
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 
 function isS3Configured(): boolean {
@@ -140,18 +141,28 @@ export type DriverAdminActionEvent =
  * Send a push + in-app notification to a driver after an admin management
  * action (penalty, suspend, reactivate, terminate, driver-pass toggle).
  *
+ * Also broadcasts a Socket.IO event to `driver-{driverId}` so an already-open
+ * driver app refreshes state without waiting for FCM / app reopen.
+ *
  * Fire-and-forget: notification failure must never fail the admin action.
  */
 export async function notifyDriverAction(params: {
   userId: string;
+  driverId?: string;
   event: DriverAdminActionEvent;
   title: string;
   message: string;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
-  const { userId, event, title, message, metadata } = params;
+  const { userId, driverId, event, title, message, metadata } = params;
+  const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
+  const payloadData = {
+    type: 'DRIVER_ADMIN_ACTION',
+    event,
+    ...(metadata || {}),
+  };
+
   try {
-    const doFetch = (globalThis as any).fetch as (url: string, init?: any) => Promise<any>;
     const resp = await doFetch(`${NOTIFICATION_SERVICE_URL}/api/notifications/internal/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
@@ -161,11 +172,7 @@ export async function notifyDriverAction(params: {
         message,
         type: 'SYSTEM',
         sendPush: true,
-        data: {
-          type: 'DRIVER_ADMIN_ACTION',
-          event,
-          ...(metadata || {}),
-        },
+        data: payloadData,
       }),
     });
     if (!resp.ok) {
@@ -176,6 +183,35 @@ export async function notifyDriverAction(params: {
     }
   } catch (error: any) {
     logger.warn('[ADMIN_ACTION] Driver notification error', { userId, event, error: error.message });
+  }
+
+  // Realtime socket fan-out for drivers who already have the app open.
+  if (driverId) {
+    try {
+      const resp = await doFetch(`${REALTIME_SERVICE_URL}/internal/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
+        body: JSON.stringify({
+          room: `driver-${driverId}`,
+          event: 'admin_action',
+          data: {
+            ...payloadData,
+            title,
+            message,
+            driverId,
+            timestamp: new Date().toISOString(),
+          },
+        }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        logger.warn('[ADMIN_ACTION] Realtime broadcast failed', { driverId, event, status: resp.status, body });
+      } else {
+        logger.info('[ADMIN_ACTION] Realtime broadcast sent', { driverId, event });
+      }
+    } catch (error: any) {
+      logger.warn('[ADMIN_ACTION] Realtime broadcast error', { driverId, event, error: error.message });
+    }
   }
 }
 

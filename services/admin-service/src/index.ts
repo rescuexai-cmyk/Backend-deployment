@@ -935,6 +935,7 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: 'PENALTY_ISSUED',
       title: '⚠️ Penalty Issued',
       message: `A penalty of ₹${amount} has been applied to your account. Reason: ${reason}`,
@@ -997,6 +998,7 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: 'PENALTIES_CLEARED',
       title: '✅ Penalties Cleared',
       message: 'You are ready to go, all penalty dues cleared!',
@@ -1178,11 +1180,13 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: enabled ? 'DRIVER_PASS_ENABLED' : 'DRIVER_PASS_DISABLED',
       title: enabled ? '🎫 Driver Pass Activated' : 'Driver Pass Deactivated',
       message: enabled
         ? 'Your driver pass has been activated by admin. Go-offline penalties are waived while active.'
         : 'Your driver pass has been deactivated by admin. Standard penalty rules now apply.',
+      metadata: { hasDriverPass: enabled },
     });
 
     res.json({
@@ -1250,6 +1254,7 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: 'ACCOUNT_SUSPENDED',
       title: '🚫 Account Suspended',
       message: `Your account has been suspended. Reason: ${reason}. Contact support for assistance.`,
@@ -1317,6 +1322,7 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: 'ACCOUNT_REACTIVATED',
       title: '✅ Account Reactivated',
       message: 'Your account has been reactivated! You can now go online and start accepting rides.',
@@ -1386,6 +1392,7 @@ app.post(
 
     void notifyDriverAction({
       userId: driver.user.id,
+      driverId,
       event: 'ACCOUNT_TERMINATED',
       title: '❌ Account Terminated',
       message: `Your driver account has been terminated. Reason: ${reason}. Contact support if you believe this is an error.`,
