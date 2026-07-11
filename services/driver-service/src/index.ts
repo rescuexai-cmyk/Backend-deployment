@@ -17,6 +17,17 @@ import { isVisionConfigured } from './visionService';
 import * as PayoutService from './payoutService';
 import { formatDocumentDetail, formatVerificationSummary, withVisionFieldAliases } from './documentResponse';
 
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+function authenticateInternal(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const key = req.headers['x-internal-api-key'];
+  if (key !== INTERNAL_API_KEY) {
+    res.status(401).json({ success: false, message: 'Unauthorized' });
+    return;
+  }
+  next();
+}
+
 // Helper function to get platform config with error handling
 async function getPlatformConfig(key: string, defaultValue: string): Promise<string> {
   try {
@@ -76,6 +87,32 @@ logger.info(`[STORAGE] Using ${storageConfig.type} storage${storageConfig.bucket
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(uploadsBaseDir));
+
+/** Internal: latest PROFILE_PHOTO as a usable (presigned) URL for ride/rider UIs. */
+app.get('/internal/drivers/:driverId/profile-image', authenticateInternal, asyncHandler(async (req, res) => {
+  const driverId = req.params.driverId;
+  const doc = await prisma.driverDocument.findFirst({
+    where: { driverId, documentType: DocumentType.PROFILE_PHOTO },
+    orderBy: { uploadedAt: 'desc' },
+    select: { documentUrl: true },
+  });
+  const driver = await prisma.driver.findUnique({
+    where: { id: driverId },
+    select: { user: { select: { profileImage: true } } },
+  });
+  const raw = doc?.documentUrl || driver?.user?.profileImage || null;
+  if (!raw) {
+    res.json({ success: true, data: { url: null } });
+    return;
+  }
+  try {
+    const presigned = await getPresignedUrl(raw, 3600);
+    res.json({ success: true, data: { url: presigned || raw } });
+  } catch (error: any) {
+    logger.warn('[PROFILE_IMAGE] Presign failed', { driverId, error: error?.message });
+    res.json({ success: true, data: { url: raw } });
+  }
+}));
 
 // Setup Swagger documentation
 setupSwagger(app, {

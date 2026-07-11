@@ -30,8 +30,44 @@ import {
 } from './httpClients';
 import { calculateCancellationFee, CancellationContext } from './cancellationService';
 import { enqueueScheduledRide, cancelScheduledRideJob } from './scheduledRideQueue';
+import axios from 'axios';
 
 const logger = createLogger('ride-service');
+const DRIVER_SERVICE_URL = process.env.DRIVER_SERVICE_URL || 'http://localhost:5003';
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+/** Prefer latest PROFILE_PHOTO (presigned via driver-service) for rider-facing avatars. */
+async function resolveDriverProfileImage(
+  driverId?: string | null,
+  fallback?: string | null,
+): Promise<string | null> {
+  if (!driverId) return fallback || null;
+  try {
+    const { data } = await axios.get(
+      `${DRIVER_SERVICE_URL}/internal/drivers/${driverId}/profile-image`,
+      {
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+        timeout: 2500,
+      },
+    );
+    if (data?.data?.url) return data.data.url as string;
+  } catch (error: any) {
+    logger.warn('[RIDE] profile-image resolve via driver-service failed', {
+      driverId,
+      error: error?.message,
+    });
+  }
+  try {
+    const doc = await prisma.driverDocument.findFirst({
+      where: { driverId, documentType: 'PROFILE_PHOTO' },
+      orderBy: { uploadedAt: 'desc' },
+      select: { documentUrl: true },
+    });
+    return doc?.documentUrl || fallback || null;
+  } catch {
+    return fallback || null;
+  }
+}
 
 function isWalletTransactionsTableMissing(error: unknown): boolean {
   const e = error as { code?: string; message?: string } | null;
@@ -67,7 +103,6 @@ interface NotificationData {
 
 // Notification service URL for push notifications
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:5006';
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
 
 /**
  * Create a notification for a user AND send push notification
@@ -927,9 +962,22 @@ export async function getRideById(rideId: string, requesterId?: string) {
   
   // Only include OTP if requester is the passenger
   const includeOtp = requesterId === ride.passengerId;
+  const formatted = formatRide(ride, includeOtp);
+  if (formatted.driver?.id) {
+    formatted.driver.profileImage = await resolveDriverProfileImage(
+      formatted.driver.id,
+      formatted.driver.profileImage,
+    );
+  }
+  const driver2ProfileImage = rideAny.driver2
+    ? await resolveDriverProfileImage(
+        rideAny.driver2.id,
+        rideAny.driver2.user?.profileImage,
+      )
+    : null;
   
   return {
-    ...formatRide(ride, includeOtp),
+    ...formatted,
     passenger: rideAny.passenger,
     pickupLatitude: ride.pickupLatitude,
     pickupLongitude: ride.pickupLongitude,
@@ -943,7 +991,7 @@ export async function getRideById(rideId: string, requesterId?: string) {
       id: rideAny.driver2.id,
       firstName: rideAny.driver2.user.firstName,
       lastName: rideAny.driver2.user.lastName,
-      profileImage: rideAny.driver2.user.profileImage,
+      profileImage: driver2ProfileImage,
       phone: rideAny.driver2.user.phone,
       vehicleNumber: rideAny.driver2.vehicleNumber,
       vehicleModel: rideAny.driver2.vehicleModel,
@@ -1123,6 +1171,10 @@ export async function assignDriver(rideId: string, driverId: string) {
 
   // Broadcast the assignment (outside transaction to not block)
   try {
+    const profileImage = await resolveDriverProfileImage(
+      ride.driver?.id,
+      ride.driver?.user?.profileImage,
+    );
     await broadcastDriverAssigned(rideId, {
       id: ride.driver?.id,
       name: ride.driver?.user ? `${ride.driver.user.firstName} ${ride.driver.user.lastName || ''}`.trim() : '',
@@ -1130,7 +1182,7 @@ export async function assignDriver(rideId: string, driverId: string) {
       vehicleNumber: ride.driver?.vehicleNumber,
       vehicleModel: ride.driver?.vehicleModel,
       rating: ride.driver?.rating,
-      profileImage: ride.driver?.user?.profileImage,
+      profileImage,
     });
   } catch (e) {
     logger.error('Broadcast driver assigned failed', { error: e });
