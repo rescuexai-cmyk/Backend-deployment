@@ -450,6 +450,155 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
 
 /**
  * @openapi
+ * /api/driver/penalty/status:
+ *   get:
+ *     tags: [Penalties]
+ *     summary: Get pending penalty status + wallet balance (app go-online gate)
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Penalty status
+ */
+app.get('/api/driver/penalty/status', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  const unpaid = await prisma.driverPenalty.findMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    orderBy: { createdAt: 'asc' },
+  });
+  const unpaidTotal = unpaid.reduce((s, p) => s + p.amount, 0);
+  const oldest = unpaid[0] ?? null;
+
+  let walletBalance = 0;
+  try {
+    const wallet = await PayoutService.getDriverWallet(driver.id);
+    walletBalance = wallet.availableBalance ?? 0;
+  } catch (e: any) {
+    logger.warn(`[PENALTY] Wallet lookup failed for ${driver.id}: ${e?.message || e}`);
+  }
+
+  res.json({
+    success: true,
+    data: {
+      hasPendingPenalty: unpaidTotal > 0,
+      hasPenalty: unpaidTotal > 0,
+      penaltyAmount: unpaidTotal,
+      penaltyId: oldest?.id ?? null,
+      penaltyReason: oldest?.reason ?? null,
+      penalty: oldest
+        ? {
+            id: oldest.id,
+            amount: unpaidTotal,
+            reason: oldest.reason,
+            status: oldest.status,
+          }
+        : null,
+      wallet: { balance: walletBalance, available: walletBalance },
+      walletBalance,
+      canGoOnline: unpaidTotal === 0,
+    },
+  });
+}));
+
+/**
+ * @openapi
+ * /api/driver/penalty/clear-with-wallet:
+ *   post:
+ *     tags: [Penalties]
+ *     summary: Clear pending penalties using wallet balance
+ *     security:
+ *       - bearerAuth: []
+ */
+app.post('/api/driver/penalty/clear-with-wallet', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  const unpaid = await prisma.driverPenalty.findMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (unpaid.length === 0) {
+    res.json({ success: true, message: 'No pending penalties', newWalletBalance: undefined });
+    return;
+  }
+
+  const totalDue = unpaid.reduce((s, p) => s + p.amount, 0);
+  const wallet = await PayoutService.getDriverWallet(driver.id);
+  if ((wallet.availableBalance ?? 0) < totalDue) {
+    res.status(400).json({
+      success: false,
+      message: `Insufficient wallet balance. Need ₹${totalDue}, have ₹${wallet.availableBalance ?? 0}`,
+    });
+    return;
+  }
+
+  for (const p of unpaid) {
+    await PayoutService.debitPenalty(driver.id, p.amount, p.id, p.reason || 'Penalty');
+  }
+
+  const now = new Date();
+  await prisma.driverPenalty.updateMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    data: { status: PenaltyStatus.PAID, paidAt: now },
+  });
+
+  const updatedWallet = await PayoutService.getDriverWallet(driver.id);
+  logger.info(`[PENALTY] Driver ${driver.id} cleared ${unpaid.length} penalties via wallet, ₹${totalDue}`);
+  res.json({
+    success: true,
+    message: `Penalty of ₹${totalDue} paid from wallet.`,
+    newWalletBalance: updatedWallet.availableBalance,
+  });
+}));
+
+/**
+ * @openapi
+ * /api/driver/penalty/clear-with-upi:
+ *   post:
+ *     tags: [Penalties]
+ *     summary: Mark pending penalties paid after UPI (manual confirm)
+ *     security:
+ *       - bearerAuth: []
+ */
+app.post('/api/driver/penalty/clear-with-upi', authenticateDriver, asyncHandler(async (req: AuthRequest, res) => {
+  const driver = await prisma.driver.findFirst({ where: { userId: req.user!.id } });
+  if (!driver) {
+    res.status(404).json({ success: false, message: 'Driver not found' });
+    return;
+  }
+
+  const unpaid = await prisma.driverPenalty.findMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+  });
+  if (unpaid.length === 0) {
+    res.json({ success: true, message: 'No pending penalties' });
+    return;
+  }
+
+  const totalPaid = unpaid.reduce((s, p) => s + p.amount, 0);
+  const now = new Date();
+  await prisma.driverPenalty.updateMany({
+    where: { driverId: driver.id, status: PenaltyStatus.PENDING },
+    data: { status: PenaltyStatus.PAID, paidAt: now },
+  });
+
+  logger.info(`[PENALTY] Driver ${driver.id} cleared ${unpaid.length} penalties via UPI confirm, ₹${totalPaid}, tx=${req.body?.transactionId || 'n/a'}`);
+  res.json({
+    success: true,
+    message: `Penalty of ₹${totalPaid} paid. You can go online now.`,
+  });
+}));
+
+/**
+ * @openapi
  * /api/driver/penalties:
  *   get:
  *     tags: [Penalties]

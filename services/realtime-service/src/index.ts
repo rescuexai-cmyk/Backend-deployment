@@ -402,6 +402,38 @@ io.on('connection', (socket) => {
     updateActivity();
     await registerDriver(inputId, 'join-driver');
   });
+
+  // Lightweight personal-room join for admin actions while Offline.
+  // Does NOT join available-drivers and does NOT require isOnline=true.
+  socket.on('join-driver-inbox', async (inputId: string) => {
+    if (!inputId || typeof inputId !== 'string') {
+      logger.warn(`[SOCKET] join-driver-inbox called with invalid ID: ${inputId}`);
+      return;
+    }
+    updateActivity();
+
+    const driverId = await resolveDriverId(inputId);
+    if (!driverId) {
+      logger.warn(`[SOCKET] join-driver-inbox: could not resolve driver for ${inputId}`);
+      return;
+    }
+
+    currentDriverId = driverId;
+    socket.join(`driver-${driverId}`);
+    connectedDrivers.set(socket.id, driverId);
+    if (!driverSockets.has(driverId)) {
+      driverSockets.set(driverId, new Set());
+    }
+    driverSockets.get(driverId)!.add(socket.id);
+
+    logger.info(`[SOCKET] Driver ${driverId} joined admin inbox room driver-${driverId} (socket: ${socket.id})`);
+    socket.emit('registration-success', {
+      driverId,
+      eventName: 'join-driver-inbox',
+      rooms: [`driver-${driverId}`],
+      inboxOnly: true,
+    });
+  });
   
   socket.on('leave-driver', async (inputId: string) => {
     if (!inputId || typeof inputId !== 'string') return;
