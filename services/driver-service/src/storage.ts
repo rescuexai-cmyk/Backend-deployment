@@ -183,7 +183,15 @@ export const getDocumentUrl = (file: Express.Multer.File & { key?: string; locat
  * Check if a document URL is an S3 URL (supports both legacy DO Spaces and AWS S3)
  */
 const isS3Url = (documentUrl: string): boolean => {
-  return documentUrl.includes('amazonaws.com') || documentUrl.includes('digitaloceanspaces.com');
+  const lower = documentUrl.toLowerCase();
+  if (lower.includes('amazonaws.com') || lower.includes('digitaloceanspaces.com')) {
+    return true;
+  }
+  // CloudFront / CDN URLs still map to private S3 objects and need GetObject signing.
+  if (AWS_CLOUDFRONT_DOMAIN && lower.includes(AWS_CLOUDFRONT_DOMAIN.toLowerCase())) {
+    return true;
+  }
+  return false;
 };
 
 /**
@@ -286,11 +294,19 @@ export const getS3Client = (): S3Client | null => s3Client;
  */
 export const extractKeyFromUrl = (documentUrl: string): string | null => {
   try {
-    if (!isS3Url(documentUrl)) {
+    const url = new URL(documentUrl);
+    const host = url.hostname.toLowerCase();
+    const isKnownStorage =
+      host.includes('.s3.') ||
+      host.includes('amazonaws.com') ||
+      host.includes('digitaloceanspaces.com') ||
+      (!!AWS_CLOUDFRONT_DOMAIN && host.includes(AWS_CLOUDFRONT_DOMAIN.toLowerCase()));
+    if (!isKnownStorage && !isS3Url(documentUrl)) {
       return null;
     }
-    const url = new URL(documentUrl);
-    return url.pathname.substring(1); // Remove leading slash
+    // pathname is "/LICENSE/driverId_LICENSE.jpg" → "LICENSE/driverId_LICENSE.jpg"
+    const key = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    return key || null;
   } catch {
     return null;
   }
@@ -376,6 +392,12 @@ export const getPresignedUrl = async (documentUrl: string, expiresIn: number = 3
   if (!isS3Configured() || !s3Client) {
     logger.warn('[STORAGE] Cannot generate presigned URL: S3 not configured');
     return null;
+  }
+
+  // If already a valid S3 presigned URL, return as-is (don't double-sign / break).
+  const lower = documentUrl.toLowerCase();
+  if (lower.includes('x-amz-signature=') && lower.includes('x-amz-credential=')) {
+    return documentUrl;
   }
 
   const key = extractKeyFromUrl(documentUrl);
