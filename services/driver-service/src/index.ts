@@ -2653,17 +2653,25 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   }
   
   const allDocsVerified = requiredDocsVerified;
-  const verifiedDocs = driver.documents.filter((d) => d.isVerified);
-  const flaggedDocs = driver.documents.filter((d) => !d.isVerified && (d.verificationStatus === 'flagged' || d.verificationStatus === 'failed'));
-  const pendingDocs = driver.documents.filter((d) => !d.isVerified && d.verificationStatus !== 'flagged' && d.verificationStatus !== 'failed');
-
   const isIndependentDriver = driver.vehicleType === INDEPENDENT_DRIVER_VEHICLE_TYPE;
   const driverCategory = isIndependentDriver ? 'independent_driver' : 'vehicle_owner';
 
   // Calculate verification progress using per-category required documents
   const requiredDocs = [...getRequiredDocuments(driver.vehicleType)];
-  const uploadedDocTypes = driver.documents.map(d => d.documentType);
-  const verifiedDocTypes = [...new Set(verifiedDocs.map(d => d.documentType))];
+
+  // Latest upload wins per type (re-upload keeps older rows until cleanup).
+  const latestDocsByTypeForStatus = new Map<string, (typeof driver.documents)[number]>();
+  for (const doc of driver.documents) {
+    const existing = latestDocsByTypeForStatus.get(doc.documentType);
+    if (!existing || doc.uploadedAt > existing.uploadedAt) {
+      latestDocsByTypeForStatus.set(doc.documentType, doc);
+    }
+  }
+  const latestDocumentsForStatus = Array.from(latestDocsByTypeForStatus.values());
+  const uploadedDocTypes = latestDocumentsForStatus.map((d) => d.documentType);
+  const verifiedDocTypes = latestDocumentsForStatus
+    .filter((d) => d.isVerified)
+    .map((d) => d.documentType);
 
   const totalSteps = requiredDocs.length + 2; // +2 for aadhaar and pan verification
   let completedSteps = verifiedDocTypes.filter((t) => requiredDocs.includes(t)).length;
@@ -2672,6 +2680,9 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
   const verificationProgress = Math.round((completedSteps / totalSteps) * 100);
 
   // Presign private S3/Spaces URLs so the driver app can preview documents in-app.
+  // Always expose the latest upload per documentType so previews aren't stuck on the old file.
+  const latestDocuments = latestDocumentsForStatus;
+
   const withPreviewUrl = async (doc: (typeof driver.documents)[number]) => {
     const formatted = formatDocumentDetail(doc);
     try {
@@ -2689,10 +2700,17 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
     return formatted;
   };
 
+  const latestPending = latestDocuments.filter(
+    (d) => !d.isVerified && d.verificationStatus !== 'flagged' && d.verificationStatus !== 'failed',
+  );
+  const latestFlagged = latestDocuments.filter(
+    (d) => !d.isVerified && (d.verificationStatus === 'flagged' || d.verificationStatus === 'failed'),
+  );
+
   const [pendingDetails, flaggedDetails, documentDetails] = await Promise.all([
-    Promise.all(pendingDocs.map(withPreviewUrl)),
-    Promise.all(flaggedDocs.map(withPreviewUrl)),
-    Promise.all(driver.documents.map(withPreviewUrl)),
+    Promise.all(latestPending.map(withPreviewUrl)),
+    Promise.all(latestFlagged.map(withPreviewUrl)),
+    Promise.all(latestDocuments.map(withPreviewUrl)),
   ]);
   
   res.json({

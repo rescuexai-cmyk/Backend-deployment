@@ -571,6 +571,20 @@ app.post('/api/admin/documents/:documentId/verify', authenticate, requireVerifie
         : {}),
     },
   });
+  // After admin approval of a re-upload, retire older rows of the same type
+  // so the driver app preview stops pointing at the previous file.
+  if (approved) {
+    const deleted = await prisma.driverDocument.deleteMany({
+      where: {
+        driverId: document.driverId,
+        documentType: document.documentType,
+        id: { not: documentId },
+      },
+    });
+    if (deleted.count > 0) {
+      logger.info(`[ADMIN] Retired ${deleted.count} older ${document.documentType} row(s) after approval`);
+    }
+  }
   const allDriverDocuments = await prisma.driverDocument.findMany({ where: { driverId: document.driverId } });
   const allDocsVerified = areRequiredDocumentsVerified(allDriverDocuments, document.driver.vehicleType);
   const hasRejectedDocs = allDriverDocuments.some((d) => !d.isVerified && d.rejectionReason);

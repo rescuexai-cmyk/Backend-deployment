@@ -134,6 +134,24 @@ async function processVerificationJob(job: Job<VerificationJobData>): Promise<vo
         verifiedAt,
       },
     });
+
+    // Drop older uploads of the same type so previews/status stay on the new file.
+    if (isVerified) {
+      const deleted = await prisma.driverDocument.deleteMany({
+        where: {
+          driverId,
+          documentType: documentType as any,
+          id: { not: documentId },
+        },
+      });
+      if (deleted.count > 0) {
+        logger.info('[WORKER] Retired older document rows after AI verify', {
+          documentId,
+          documentType,
+          retired: deleted.count,
+        });
+      }
+    }
     
     if (result.isValid) {
       await checkAndCompleteOnboarding(driverId);
