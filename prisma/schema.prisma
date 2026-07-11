@@ -293,6 +293,10 @@ model Ride {
   promoCode         String?                 // e.g. "FIRST50"
   promoId           String?                 // FK-ish reference to promos.id (loose, no relation)
   discountAmount    Float     @default(0)   // ₹ discount already reflected in totalFare
+
+  // Immutable quote snapshot from pricing-service (line items + rates).
+  // Frontend must display this as-is — no local fare math.
+  fareBreakdown     Json?
   
   // Rating fields (per-ride rating)
   passengerRating   Int?      // 1-5 rating given by passenger to driver

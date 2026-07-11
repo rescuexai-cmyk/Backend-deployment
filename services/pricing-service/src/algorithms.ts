@@ -77,6 +77,7 @@ export function calculateBaseFare(params: {
   distanceFare: number;
   timeFare: number;
   minimumFare: number;
+  minimumFareApplied: boolean;
   breakdown: { startingFee: number; ratePerKm: number; ratePerMin: number; vehicleMultiplier: number };
 } {
   const { distanceKm, timeMin } = params;
@@ -91,8 +92,10 @@ export function calculateBaseFare(params: {
   let baseFare = rawFare * (p.multiplier !== 1 ? p.multiplier : 1);
   
   // Apply minimum fare floor
+  let minimumFareApplied = false;
   if (baseFare < p.minimumFare) {
     baseFare = p.minimumFare;
+    minimumFareApplied = true;
   }
 
   return {
@@ -100,6 +103,7 @@ export function calculateBaseFare(params: {
     distanceFare: Math.round(distanceFare * 100) / 100,
     timeFare: Math.round(timeFare * 100) / 100,
     minimumFare: p.minimumFare,
+    minimumFareApplied,
     breakdown: {
       startingFee: p.startingFee,
       ratePerKm: p.ratePerKm,

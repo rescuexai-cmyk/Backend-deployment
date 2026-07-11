@@ -62,12 +62,17 @@ export interface PricingRequest {
 }
 
 export interface EstimateResponse {
+  /** Starting fee component (not the full algorithm total). */
+  startingFee: number;
+  /** @deprecated Prefer startingFee — kept as alias of startingFee for older clients. */
   baseFare: number;
   distanceFare: number;
   timeFare: number;
   surgeMultiplier: number;
+  surgeAmount: number;
   totalFare: number;
   minimumFare: number;
+  minimumFareApplied: boolean;
   distance: number;
   distanceKm: number;
   estimatedDuration: number;
@@ -82,6 +87,17 @@ export interface EstimateResponse {
     startingFee: number;
     ratePerKm: number;
     ratePerMin: number;
+    distanceKm: number;
+    durationMin: number;
+    distanceFare: number;
+    timeFare: number;
+    surgeMultiplier: number;
+    surgeAmount: number;
+    subtotal: number;
+    discount: number;
+    totalFare: number;
+    minimumFare: number;
+    minimumFareApplied: boolean;
     vehicleMultiplier: number;
     dynamicMultiplier: number;
   };
@@ -402,6 +418,17 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
     isPeakHour,
   });
   const totalFare = Math.max(base.minimumFare, v2.riderFare);
+  const minimumFareApplied =
+    base.minimumFareApplied || v2.riderFare < base.minimumFare;
+  const startingFee = round2(base.breakdown.startingFee);
+  const surgeAmount = round2(
+    Math.max(0, totalFare - (startingFee + base.distanceFare + base.timeFare)),
+  );
+  // When min fare lifts the total above component sum, don't call the gap "surge".
+  const displaySurgeAmount = minimumFareApplied && dynamic.surgeMultiplier <= 1
+    ? 0
+    : surgeAmount;
+  const subtotal = round2(startingFee + base.distanceFare + base.timeFare);
 
   // Track burn on quoted demand (approximate but real-time for guardrails).
   await recordBurnMetricDelta({
@@ -414,27 +441,42 @@ export async function calculateFare(request: PricingRequest): Promise<EstimateRe
   });
 
   logger.info(
-    `[PRICING] ${city}/${vehicle} | ${round2(distanceKm)}km | ${timeMin}min | base=₹${base.baseFare} | surge=${dynamic.surgeMultiplier}x | total=₹${totalFare}`
+    `[PRICING] ${city}/${vehicle} | ${round2(distanceKm)}km | ${timeMin}min | start=₹${startingFee} | dist=₹${base.distanceFare} | time=₹${base.timeFare} | surge=${dynamic.surgeMultiplier}x | total=₹${totalFare}`
   );
 
   const dist = round2(distanceKm);
+  const duration = timeMin;
   return {
-    baseFare: round2(base.baseFare),
-    distanceFare: base.distanceFare,
-    timeFare: base.timeFare,
+    startingFee,
+    baseFare: startingFee,
+    distanceFare: round2(base.distanceFare),
+    timeFare: round2(base.timeFare),
     surgeMultiplier: dynamic.surgeMultiplier,
+    surgeAmount: displaySurgeAmount,
     totalFare,
     minimumFare: base.minimumFare,
+    minimumFareApplied,
     distance: dist,
     distanceKm: dist,
-    estimatedDuration: timeMin,
-    estimatedDurationMin: timeMin,
+    estimatedDuration: duration,
+    estimatedDurationMin: duration,
     vehicleType: vehicle,
     city,
     breakdown: {
-      startingFee: base.breakdown.startingFee,
+      startingFee,
       ratePerKm: base.breakdown.ratePerKm,
       ratePerMin: base.breakdown.ratePerMin,
+      distanceKm: dist,
+      durationMin: duration,
+      distanceFare: round2(base.distanceFare),
+      timeFare: round2(base.timeFare),
+      surgeMultiplier: dynamic.surgeMultiplier,
+      surgeAmount: displaySurgeAmount,
+      subtotal,
+      discount: 0,
+      totalFare,
+      minimumFare: base.minimumFare,
+      minimumFareApplied,
       vehicleMultiplier: base.breakdown.vehicleMultiplier,
       dynamicMultiplier: dynamic.totalDynamicMultiplier,
     },

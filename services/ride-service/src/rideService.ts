@@ -220,6 +220,78 @@ function generateRideOtp(): string {
 }
 
 /**
+ * Build the fare breakdown payload the app displays.
+ * Prefer the immutable pricing snapshot; fall back to stored columns only.
+ * No client-side fare math — this is the single source of truth.
+ */
+function buildRideFareBreakdown(ride: any): Record<string, unknown> {
+  const snap = ride.fareBreakdown && typeof ride.fareBreakdown === 'object'
+    ? { ...ride.fareBreakdown }
+    : null;
+
+  if (snap && (snap.startingFee != null || snap.totalFare != null)) {
+    return {
+      startingFee: Number(snap.startingFee ?? ride.baseFare ?? 0),
+      ratePerKm: Number(snap.ratePerKm ?? 0),
+      ratePerMin: Number(snap.ratePerMin ?? 0),
+      distanceKm: Number(snap.distanceKm ?? ride.distance ?? 0),
+      durationMin: Number(snap.durationMin ?? ride.duration ?? 0),
+      distanceFare: Number(snap.distanceFare ?? ride.distanceFare ?? 0),
+      timeFare: Number(snap.timeFare ?? ride.timeFare ?? 0),
+      surgeMultiplier: Number(snap.surgeMultiplier ?? ride.surgeMultiplier ?? 1),
+      surgeAmount: Number(snap.surgeAmount ?? ride.surgeFare ?? 0),
+      subtotal: Number(
+        snap.subtotal ??
+          (Number(snap.startingFee ?? ride.baseFare ?? 0) +
+            Number(snap.distanceFare ?? ride.distanceFare ?? 0) +
+            Number(snap.timeFare ?? ride.timeFare ?? 0)),
+      ),
+      discount: Number(snap.discount ?? ride.discountAmount ?? 0),
+      totalFare: Number(snap.totalFare ?? ride.totalFare ?? 0),
+      minimumFare: Number(snap.minimumFare ?? 0),
+      minimumFareApplied: !!snap.minimumFareApplied,
+      tolls: Number(snap.tolls ?? ride.tolls ?? 0),
+      waitingCharge: Number(snap.waitingCharge ?? 0),
+      parkingFees: Number(snap.parkingFees ?? ride.parkingFees ?? 0),
+      airportCharge: Number(snap.airportCharge ?? 0),
+      extraStopsCharge: Number(snap.extraStopsCharge ?? 0),
+      gstPercent: Number(snap.gstPercent ?? 0),
+      gstAmount: Number(snap.gstAmount ?? 0),
+      promoCode: snap.promoCode ?? ride.promoCode ?? null,
+    };
+  }
+
+  // Legacy rides (no snapshot): expose stored columns only — no invented rates.
+  const startingFee = Number(ride.baseFare ?? 0);
+  const distanceFare = Number(ride.distanceFare ?? 0);
+  const timeFare = Number(ride.timeFare ?? 0);
+  return {
+    startingFee,
+    ratePerKm: 0,
+    ratePerMin: 0,
+    distanceKm: Number(ride.distance ?? 0),
+    durationMin: Number(ride.duration ?? 0),
+    distanceFare,
+    timeFare,
+    surgeMultiplier: Number(ride.surgeMultiplier ?? 1),
+    surgeAmount: Number(ride.surgeFare ?? 0),
+    subtotal: startingFee + distanceFare + timeFare,
+    discount: Number(ride.discountAmount ?? 0),
+    totalFare: Number(ride.totalFare ?? 0),
+    minimumFare: 0,
+    minimumFareApplied: false,
+    tolls: Number(ride.tolls ?? 0),
+    waitingCharge: 0,
+    parkingFees: Number(ride.parkingFees ?? 0),
+    airportCharge: 0,
+    extraStopsCharge: 0,
+    gstPercent: 0,
+    gstAmount: 0,
+    promoCode: ride.promoCode ?? null,
+  };
+}
+
+/**
  * Format ride for API response
  * @param ride - The ride object from database
  * @param includeOtp - Whether to include the OTP (only for passenger)
@@ -247,11 +319,19 @@ function formatRide(ride: any, includeOtp: boolean = false) {
       : [],
     distance: ride.distance,
     duration: ride.duration,
+    // baseFare column = starting fee component (after pricing fix).
     baseFare: ride.baseFare,
+    startingFee: ride.fareBreakdown?.startingFee ?? ride.baseFare,
     distanceFare: ride.distanceFare,
     timeFare: ride.timeFare,
     surgeMultiplier: ride.surgeMultiplier,
+    surgeAmount: ride.fareBreakdown?.surgeAmount ?? ride.surgeFare ?? 0,
     totalFare: ride.totalFare,
+    discountAmount: ride.discountAmount ?? 0,
+    promoCode: ride.promoCode ?? null,
+    minimumFareApplied: !!ride.fareBreakdown?.minimumFareApplied,
+    breakdown: buildRideFareBreakdown(ride),
+    fareBreakdown: buildRideFareBreakdown(ride),
     status: ride.status,
     paymentMethod: ride.paymentMethod,
     paymentStatus: ride.paymentStatus,
@@ -422,6 +502,28 @@ export async function createRide(req: CreateRideRequest) {
   
   logger.info(`[RIDE] Creating ride: rideType=${rideType}, rescueMultiDriver=${rescueMultiDriver}, isScheduled=${!!isScheduled}`);
 
+  const startingFee = Number(
+    pricing.startingFee ?? pricing.breakdown?.startingFee ?? pricing.baseFare ?? 0,
+  );
+  const fareBreakdownSnapshot = {
+    ...(pricing.breakdown || {}),
+    startingFee,
+    distanceFare: Number(pricing.distanceFare ?? 0),
+    timeFare: Number(pricing.timeFare ?? 0),
+    surgeMultiplier: Number(pricing.surgeMultiplier ?? 1),
+    surgeAmount: Number(pricing.surgeAmount ?? 0),
+    subtotal: Number(pricing.breakdown?.subtotal ?? startingFee + Number(pricing.distanceFare ?? 0) + Number(pricing.timeFare ?? 0)),
+    discount: Number(promoContext?.discountAmount ?? 0),
+    totalFare: Number(effectiveTotalFare),
+    minimumFare: Number(pricing.minimumFare ?? 0),
+    minimumFareApplied: !!pricing.minimumFareApplied,
+    distanceKm: Number(pricing.distanceKm ?? pricing.distance ?? 0),
+    durationMin: Number(pricing.estimatedDurationMin ?? pricing.estimatedDuration ?? 0),
+    ratePerKm: Number(pricing.breakdown?.ratePerKm ?? 0),
+    ratePerMin: Number(pricing.breakdown?.ratePerMin ?? 0),
+    promoCode: promoContext?.code ?? null,
+  };
+
   const ride = await prisma.ride.create({
     data: {
       passengerId: req.passengerId,
@@ -433,11 +535,14 @@ export async function createRide(req: CreateRideRequest) {
       dropAddress: req.dropAddress,
       distance: pricing.distance,
       duration: pricing.estimatedDuration,
-      baseFare: pricing.baseFare,
+      // Store starting-fee component (not algorithm total).
+      baseFare: startingFee,
       distanceFare: pricing.distanceFare,
       timeFare: pricing.timeFare,
       surgeMultiplier: pricing.surgeMultiplier,
+      surgeFare: Number(pricing.surgeAmount ?? 0),
       totalFare: effectiveTotalFare,
+      fareBreakdown: fareBreakdownSnapshot,
       promoCode: promoContext?.code ?? null,
       promoId: promoContext?.promoId ?? null,
       discountAmount: promoContext?.discountAmount ?? 0,
