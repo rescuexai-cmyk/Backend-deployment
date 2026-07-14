@@ -523,6 +523,49 @@ app.get(
   }),
 );
 
+/**
+ * Resolve whether Raahi currently operates at a lat/lng (active zone geofence).
+ * Used by the rider app for first-install / city-switch welcome notifications.
+ */
+app.get(
+  '/api/pricing/city-availability',
+  [
+    query('lat').isFloat({ min: -90, max: 90 }),
+    query('lng').isFloat({ min: -180, max: 180 }),
+  ],
+  asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+
+    const lat = parseFloat(req.query.lat as string);
+    const lng = parseFloat(req.query.lng as string);
+    const { resolveZone, listZones, normalizeCity } = require('@raahi/shared');
+
+    const resolvedCode = normalizeCity(await resolveZone(lat, lng));
+    const zones = await listZones();
+    const match = zones.find(
+      (z: { code: string; isActive: boolean }) =>
+        z.isActive && normalizeCity(z.code) === resolvedCode,
+    );
+
+    const rawName = (match?.name as string | undefined) || resolvedCode;
+    // "Gurgaon (Gurugram, Haryana)" → "Gurgaon"
+    const cityName = String(rawName).split('(')[0].trim() || resolvedCode;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        available: Boolean(match),
+        cityCode: match?.code ?? resolvedCode,
+        cityName,
+      },
+    });
+  }),
+);
+
 // ============================================================
 // Marketplace policy controls (v2 scalability operations)
 // ============================================================
