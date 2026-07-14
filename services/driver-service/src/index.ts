@@ -282,6 +282,8 @@ app.get('/api/driver/profile', authenticateDriver, asyncHandler(async (req: Auth
       earnings: { today: todayEarnings, week: weekEarnings, month: monthEarnings, total: driver.totalEarnings },
       hours_online: secondsToHours(driver.totalOnlineSeconds),
       is_online: driver.isOnline,
+      has_driver_pass: driver.hasDriverPass === true,
+      account_status: driver.accountStatus,
       current_location: { latitude: driver.currentLatitude ?? null, longitude: driver.currentLongitude ?? null },
       notifications_enabled: driver.notificationsEnabled,
     },
@@ -352,6 +354,30 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
           isVerified: driver.isVerified,
           onboardingStatus: driver.onboardingStatus,
         },
+      });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.id },
+      select: { email: true, emailVerified: true },
+    });
+    if (!user?.email) {
+      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} has no email`);
+      res.status(403).json({
+        success: false,
+        message: 'Add and verify your email before going online.',
+        code: 'EMAIL_REQUIRED',
+      });
+      return;
+    }
+    if (!user.emailVerified) {
+      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} email not verified`);
+      res.status(403).json({
+        success: false,
+        message: 'Verify your email before going online.',
+        code: 'EMAIL_NOT_VERIFIED',
+        email: user.email,
       });
       return;
     }
@@ -1964,10 +1990,16 @@ app.put(
       return;
     }
     
-    // Update user's email
+    // Update user's email (changing email requires re-verification before go-online)
     await prisma.user.update({
       where: { id: req.user!.id },
-      data: { email: email.toLowerCase() },
+      data: {
+        email: email.toLowerCase(),
+        emailVerified: false,
+        emailVerifiedAt: null,
+        emailVerificationOtp: null,
+        emailVerificationOtpExpiresAt: null,
+      },
     });
     
     // Update driver onboarding status
@@ -1982,6 +2014,7 @@ app.put(
       data: {
         driver_id: driver.id,
         email: email.toLowerCase(),
+        email_verified: false,
         next_step: 'LANGUAGE_SELECTION',
       },
     });
@@ -2765,6 +2798,7 @@ app.get('/api/driver/onboarding/status', authenticate, asyncHandler(async (req: 
       // Personal info
       full_name: `${driver.user.firstName} ${driver.user.lastName || ''}`.trim(),
       email: driver.user.email,
+      email_verified: driver.user.emailVerified ?? false,
       phone: driver.user.phone,
       preferred_language: driver.preferredLanguage,
       
@@ -3271,12 +3305,18 @@ app.get('/api/driver/subscription/status', authenticateDriver, asyncHandler(asyn
   }
 
   const now = new Date();
-  const isActive = subscription.validTill && subscription.validTill > now;
+  const paidActive = Boolean(subscription.validTill && subscription.validTill > now);
+  const hasDriverPass = driver.hasDriverPass === true;
+  // Admin-granted pass bypasses the ₹39 daily fee gate.
+  const allowOnline = paidActive || hasDriverPass;
   
-  let status: 'active' | 'expired' | 'never_purchased';
+  let status: 'active' | 'expired' | 'never_purchased' | 'admin_pass';
   let message: string;
   
-  if (isActive) {
+  if (hasDriverPass) {
+    status = 'admin_pass';
+    message = 'Admin driver pass is active. Daily fee and go-offline penalties are waived.';
+  } else if (paidActive) {
     status = 'active';
     message = 'Your daily pass is active. You can accept rides.';
   } else if (subscription.lastPaidAt) {
@@ -3287,19 +3327,20 @@ app.get('/api/driver/subscription/status', authenticateDriver, asyncHandler(asyn
     message = 'Pay ₹39 to start taking rides today.';
   }
 
-  logger.info(`[SUBSCRIPTION] Status check for driver ${driver.id}: ${status}, validTill: ${subscription.validTill}`);
+  logger.info(`[SUBSCRIPTION] Status check for driver ${driver.id}: ${status}, allowOnline=${allowOnline}, hasDriverPass=${hasDriverPass}, validTill: ${subscription.validTill}`);
 
   res.json({
     success: true,
     data: {
       driverId: driver.id,
-      allowOnline: isActive,
-      isActive,
+      allowOnline,
+      isActive: allowOnline,
+      hasDriverPass,
       validTill: subscription.validTill?.toISOString() ?? null,
       lastPaidAt: subscription.lastPaidAt?.toISOString() ?? null,
       status,
       message,
-      fee: DAILY_PLATFORM_FEE,
+      fee: hasDriverPass ? 0 : DAILY_PLATFORM_FEE,
       durationHours: SUBSCRIPTION_DURATION_HOURS,
     },
   });

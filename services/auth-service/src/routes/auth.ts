@@ -7,6 +7,8 @@ import * as AuthService from '../authService';
 import * as FirebaseAuth from '../firebaseAuth';
 import * as storage from '../storage';
 import { createLogger } from '@raahi/shared';
+import { getSmtpStatus } from '../emailService';
+import * as EmailVerification from '../emailVerification';
 
 const logger = createLogger('auth-routes');
 const router = express.Router();
@@ -666,6 +668,78 @@ router.post(
     }
     const result = await AuthService.authenticateWithGoogle(req.body.idToken);
     res.status(200).json({ success: true, message: 'Google authentication successful', data: result });
+  })
+);
+
+// ─── Apple Authentication ───────────────────────────────────────────────
+
+/**
+ * @openapi
+ * /api/auth/apple:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Apple sign-in
+ *     description: Authenticate using Apple identity token from Sign in with Apple
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [identityToken]
+ *             properties:
+ *               identityToken:
+ *                 type: string
+ *               nonce:
+ *                 type: string
+ *                 description: SHA-256 hex of the raw nonce used on device (optional but recommended)
+ *               email:
+ *                 type: string
+ *               firstName:
+ *                 type: string
+ *               lastName:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Authentication successful
+ *       400:
+ *         description: Validation or token verification failed
+ */
+router.post(
+  '/apple',
+  [
+    body('identityToken').isString().notEmpty(),
+    body('nonce').optional().isString(),
+    body('email').optional().isEmail(),
+    body('firstName').optional().isString(),
+    body('lastName').optional().isString(),
+  ],
+  asyncHandler(async (req, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    try {
+      const result = await AuthService.authenticateWithApple({
+        identityToken: req.body.identityToken,
+        nonce: req.body.nonce,
+        email: req.body.email,
+        firstName: req.body.firstName,
+        lastName: req.body.lastName,
+      });
+      res.status(200).json({
+        success: true,
+        message: 'Apple authentication successful',
+        data: result,
+      });
+    } catch (error: any) {
+      res.status(400).json({
+        success: false,
+        message: error.message || 'Apple authentication failed',
+        code: 'APPLE_AUTH_FAILED',
+      });
+    }
   })
 );
 
@@ -1350,6 +1424,83 @@ router.delete(
         return;
       }
       throw error;
+    }
+  })
+);
+
+// ─── Email verification (SMTP OTP) ──────────────────────────────────────
+
+router.get(
+  '/smtp/status',
+  authenticate,
+  asyncHandler(async (_req: AuthRequest, res: Response) => {
+    const status = await getSmtpStatus(true);
+    res.status(200).json({ success: true, data: status });
+  })
+);
+
+router.get(
+  '/email-verification/status',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const data = await EmailVerification.getEmailVerificationStatus(req.user!.id);
+    res.status(200).json({ success: true, data });
+  })
+);
+
+router.post(
+  '/email-verification/send',
+  authenticate,
+  [body('email').optional().isEmail()],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    try {
+      const data = await EmailVerification.sendEmailVerificationOtp(
+        req.user!.id,
+        req.body.email,
+      );
+      res.status(200).json({ success: true, data, message: data.message });
+    } catch (error: any) {
+      const code = error.code || 'EMAIL_VERIFICATION_FAILED';
+      const status =
+        code === 'RATE_LIMITED' ? 429 :
+        code === 'EMAIL_ALREADY_IN_USE' ? 409 :
+        code === 'SMTP_NOT_CONFIGURED' ? 503 :
+        code === 'EMAIL_REQUIRED' ? 400 : 400;
+      res.status(status).json({
+        success: false,
+        message: error.message || 'Failed to send verification email',
+        code,
+        retryAfterSeconds: error.retryAfterSeconds,
+      });
+    }
+  })
+);
+
+router.post(
+  '/email-verification/verify',
+  authenticate,
+  [body('otp').isString().isLength({ min: 6, max: 6 })],
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+      return;
+    }
+    try {
+      const data = await EmailVerification.verifyEmailOtp(req.user!.id, req.body.otp);
+      res.status(200).json({ success: true, data, message: data.message });
+    } catch (error: any) {
+      const code = error.code || 'EMAIL_VERIFICATION_FAILED';
+      res.status(400).json({
+        success: false,
+        message: error.message || 'Email verification failed',
+        code,
+      });
     }
   })
 );

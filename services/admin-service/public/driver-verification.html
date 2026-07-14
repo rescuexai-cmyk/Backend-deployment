@@ -460,7 +460,9 @@
     }
 
     function driverPassPill(has) {
-      return has ? '<span class="pill on">Pass ✓</span>' : '';
+      return has
+        ? '<span class="pill on" title="Waives daily fee + stop-riding penalties">Pass ✓</span>'
+        : '';
     }
 
     let driverSearchDebounce = null;
@@ -637,6 +639,9 @@
         $('actionReason').placeholder = 'e.g. Suspension period completed';
       } else if (action === 'pass') {
         $('actionReasonField').style.display = 'none';
+        $('actionWarning').textContent = driver.has_driver_pass
+          ? 'Revoking pass restores the ₹39 daily fee and ₹10 stop-riding penalties.'
+          : 'Granting pass waives the ₹39 daily fee and ₹10 stop-riding penalties, and clears pending stop-riding dues.';
       }
 
       $('actionOverlay').classList.add('show');

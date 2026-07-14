@@ -99,6 +99,13 @@ services:
       TRUECALLER_CLIENT_ID: ${TRUECALLER_CLIENT_ID}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-raahi-internal-service-key}
       ALLOW_DEV_OTP: ${ALLOW_DEV_OTP:-false}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-com.rhi.raahi}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
       # S3 access for profile photo uploads (presigned URLs)
       AWS_S3_REGION: ${AWS_S3_REGION:-}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}

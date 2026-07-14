@@ -11,7 +11,7 @@ import { prisma } from '@raahi/shared';
 import { canDriverStartRides, REQUIRED_DOCUMENTS, COMPLETED_ONBOARDING_STATUS, checkRequiredDocuments, areRequiredDocumentsVerified } from '@raahi/shared';
 import { bannerUploadMiddleware, uploadBannerImage } from './bannerUpload';
 import { presignDocumentUrl, notifyDriverVerification, notifyDriverAction } from './driverDocs';
-import { OnboardingStatus, DriverAccountStatus } from '@prisma/client';
+import { OnboardingStatus, DriverAccountStatus, PenaltyStatus } from '@prisma/client';
 
 const logger = createLogger('admin-service');
 const app = express();
@@ -1190,6 +1190,26 @@ app.post(
       data: { hasDriverPass: enabled },
     });
 
+    // Granting pass should immediately unblock go-online: clear pending stop-riding penalties.
+    let clearedPenalties = 0;
+    if (enabled) {
+      const cleared = await prisma.driverPenalty.updateMany({
+        where: {
+          driverId,
+          status: PenaltyStatus.PENDING,
+          reason: 'STOP_RIDING',
+        },
+        data: {
+          status: PenaltyStatus.PAID,
+          paidAt: new Date(),
+        },
+      });
+      clearedPenalties = cleared.count;
+      if (clearedPenalties > 0) {
+        logger.info(`[ADMIN] Cleared ${clearedPenalties} STOP_RIDING penalty(ies) for driver ${driverId} on pass grant`);
+      }
+    }
+
     logger.info(`[ADMIN] Driver pass ${enabled ? 'enabled' : 'disabled'} for driver ${driverId}`);
 
     void notifyDriverAction({
@@ -1198,10 +1218,21 @@ app.post(
       event: enabled ? 'DRIVER_PASS_ENABLED' : 'DRIVER_PASS_DISABLED',
       title: enabled ? '🎫 Driver Pass Activated' : 'Driver Pass Deactivated',
       message: enabled
-        ? 'Your driver pass has been activated by admin. Go-offline penalties are waived while active.'
-        : 'Your driver pass has been deactivated by admin. Standard penalty rules now apply.',
-      metadata: { hasDriverPass: enabled },
+        ? 'Your driver pass is active. Daily fee and go-offline penalties are waived.'
+        : 'Your driver pass has been deactivated. Standard fee and penalty rules now apply.',
+      metadata: { hasDriverPass: enabled, clearedPenalties },
     });
+
+    if (enabled && clearedPenalties > 0) {
+      void notifyDriverAction({
+        userId: driver.user.id,
+        driverId,
+        event: 'PENALTIES_CLEARED',
+        title: 'Penalties Cleared',
+        message: `${clearedPenalties} stop-riding penalty(ies) cleared with your driver pass.`,
+        metadata: { clearedCount: clearedPenalties, source: 'driver_pass_grant' },
+      });
+    }
 
     res.json({
       success: true,
@@ -1210,6 +1241,7 @@ app.post(
         driver_id: driverId,
         driver_name: `${driver.user.firstName} ${driver.user.lastName}`.trim(),
         has_driver_pass: enabled,
+        cleared_penalties: clearedPenalties,
       },
     });
   }),

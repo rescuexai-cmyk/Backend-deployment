@@ -4,6 +4,7 @@ import { prisma } from '@raahi/shared';
 import { createLogger } from '@raahi/shared';
 import * as FirebaseAuth from './firebaseAuth';
 import { OnboardingStatus, PenaltyStatus } from '@prisma/client';
+import { verifyAppleIdentityToken } from './appleAuth';
 
 const logger = createLogger('auth-service');
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -25,6 +26,7 @@ export interface UserProfile {
   lastName?: string;
   profileImage?: string;
   isVerified: boolean;
+  emailVerified: boolean;
   isActive: boolean;
   createdAt: Date;
   lastLoginAt?: Date;
@@ -90,6 +92,7 @@ async function saveRefreshToken(userId: string, token: string): Promise<void> {
 function toUserProfile(user: {
   id: string; email: string | null; phone: string; firstName: string;
   lastName: string | null; profileImage: string | null; isVerified: boolean;
+  emailVerified?: boolean;
   isActive: boolean; createdAt: Date; lastLoginAt: Date | null;
 }, userType: UserType): UserProfile {
   return {
@@ -100,6 +103,7 @@ function toUserProfile(user: {
     lastName: user.lastName ?? undefined,
     profileImage: user.profileImage ?? undefined,
     isVerified: user.isVerified,
+    emailVerified: user.emailVerified ?? false,
     isActive: user.isActive,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt ?? undefined,
@@ -121,6 +125,7 @@ export async function resolveUserType(userId: string): Promise<UserType> {
 async function buildUserProfile(user: {
   id: string; email: string | null; phone: string; firstName: string;
   lastName: string | null; profileImage: string | null; isVerified: boolean;
+  emailVerified?: boolean;
   isActive: boolean; createdAt: Date; lastLoginAt: Date | null;
 }): Promise<UserProfile> {
   const userType = await resolveUserType(user.id);
@@ -308,6 +313,8 @@ export async function authenticateWithGoogle(idToken: string): Promise<{ user: U
         lastName: family_name ?? undefined,
         profileImage: picture ?? undefined,
         isVerified: true,
+        emailVerified: true,
+        emailVerifiedAt: new Date(),
       },
     });
     logger.info(`[AUTH] Created new user via Google: ${user.id}`);
@@ -319,6 +326,10 @@ export async function authenticateWithGoogle(idToken: string): Promise<{ user: U
         profileImage: picture || user.profileImage,
         firstName: user.firstName === 'User' && given_name ? given_name : user.firstName,
         lastName: user.lastName || family_name || undefined,
+        // Trust Google-provided email ownership when the stored email matches.
+        ...(user.email === email && !user.emailVerified
+          ? { emailVerified: true, emailVerifiedAt: new Date() }
+          : {}),
       },
     });
     logger.info(`[AUTH] Existing user logged in via Google: ${user.id}`);
@@ -329,6 +340,98 @@ export async function authenticateWithGoogle(idToken: string): Promise<{ user: U
   await applyTestDriverOverrides(user.id, user.phone);
 
   const requiresPhone = user.phone.startsWith('google_') || user.phone === '';
+
+  return {
+    user: await buildUserProfile(user),
+    tokens,
+    isNewUser,
+    requiresPhone,
+  };
+}
+
+// ─── Apple Authentication ───────────────────────────────────────────────
+
+export async function authenticateWithApple(params: {
+  identityToken: string;
+  nonce?: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+}): Promise<{ user: UserProfile; tokens: AuthTokens; isNewUser: boolean; requiresPhone: boolean }> {
+  logger.info('[AUTH] Authenticating with Apple');
+
+  const payload = await verifyAppleIdentityToken(params.identityToken, params.nonce);
+  const appleId = payload.sub;
+  const emailFromToken = payload.email?.toLowerCase();
+  const emailFromClient = params.email?.trim().toLowerCase();
+  const email = emailFromToken || emailFromClient || undefined;
+  const firstName = params.firstName?.trim() || 'User';
+  const lastName = params.lastName?.trim() || undefined;
+  const placeholderPhone = `apple_${appleId}`;
+
+  logger.info(`[AUTH] Apple auth for sub=${appleId} email=${email || '(none)'}`);
+
+  let user =
+    (await prisma.user.findUnique({ where: { phone: placeholderPhone } })) ||
+    (email ? await prisma.user.findUnique({ where: { email } }) : null);
+
+  let isNewUser = false;
+
+  if (!user) {
+    isNewUser = true;
+    const markEmailVerified = Boolean(email);
+    user = await prisma.user.create({
+      data: {
+        email: email ?? null,
+        phone: placeholderPhone,
+        firstName,
+        lastName,
+        isVerified: true,
+        ...(markEmailVerified
+          ? { emailVerified: true, emailVerifiedAt: new Date() }
+          : {}),
+      },
+    });
+    logger.info(`[AUTH] Created new user via Apple: ${user.id}`);
+  } else {
+    const updates: Record<string, unknown> = {
+      lastLoginAt: new Date(),
+    };
+    if (user.firstName === 'User' && firstName !== 'User') {
+      updates.firstName = firstName;
+    }
+    if (!user.lastName && lastName) {
+      updates.lastName = lastName;
+    }
+    if (!user.email && email) {
+      updates.email = email;
+      updates.emailVerified = true;
+      updates.emailVerifiedAt = new Date();
+    } else if (email && user.email === email && !user.emailVerified) {
+      updates.emailVerified = true;
+      updates.emailVerifiedAt = new Date();
+    }
+    // If we found by email but phone is still a different social placeholder, keep existing phone.
+    // If user somehow has empty phone, bind apple placeholder only when safe.
+    if (!user.phone || user.phone === '') {
+      updates.phone = placeholderPhone;
+    }
+
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: updates,
+    });
+    logger.info(`[AUTH] Existing user logged in via Apple: ${user.id}`);
+  }
+
+  const tokens = generateTokens(user.id);
+  await saveRefreshToken(user.id, tokens.refreshToken);
+  await applyTestDriverOverrides(user.id, user.phone);
+
+  const requiresPhone =
+    user.phone.startsWith('apple_') ||
+    user.phone.startsWith('google_') ||
+    user.phone === '';
 
   return {
     user: await buildUserProfile(user),
@@ -532,7 +635,7 @@ export async function addPhoneWithFirebase(
     throw new Error('User not found');
   }
 
-  if (currentUser.phone && !currentUser.phone.startsWith('google_') && currentUser.phone !== '') {
+  if (currentUser.phone && !currentUser.phone.startsWith('google_') && !currentUser.phone.startsWith('apple_') && currentUser.phone !== '') {
     throw new Error('Phone number already set. Use profile update to change it.');
   }
 
@@ -689,9 +792,27 @@ export async function updateUserProfile(
   }
 
   try {
+    const currentUser = await prisma.user.findUnique({ where: { id: userId } });
+    if (!currentUser) throw new Error('User not found');
+
+    const emailChanged =
+      filteredUpdates.email !== undefined &&
+      filteredUpdates.email !== (currentUser.email || '').toLowerCase();
+
     const user = await prisma.user.update({
       where: { id: userId },
-      data: { ...filteredUpdates, updatedAt: new Date() },
+      data: {
+        ...filteredUpdates,
+        ...(emailChanged
+          ? {
+              emailVerified: false,
+              emailVerifiedAt: null,
+              emailVerificationOtp: null,
+              emailVerificationOtpExpiresAt: null,
+            }
+          : {}),
+        updatedAt: new Date(),
+      },
     });
     logger.info(`[AUTH] User profile updated for ${userId}: ${Object.keys(filteredUpdates).join(', ')}`);
     return buildUserProfile(user);
