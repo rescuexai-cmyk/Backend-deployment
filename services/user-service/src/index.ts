@@ -19,6 +19,61 @@ import {
 const logger = createLogger('user-service');
 const app = express();
 const PORT = process.env.PORT || 5002;
+const NOTIFICATION_SERVICE_URL =
+  process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:5006';
+const INTERNAL_API_KEY =
+  process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
+
+async function notifyDriverLostItem(params: {
+  driverUserId: string;
+  rideId: string;
+  category: string;
+  ticketId: string;
+}): Promise<void> {
+  try {
+    const resp = await fetch(
+      `${NOTIFICATION_SERVICE_URL}/api/notifications/internal/create`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-api-key': INTERNAL_API_KEY,
+        },
+        body: JSON.stringify({
+          userId: params.driverUserId,
+          title: 'Lost item report',
+          message: `A rider reported a lost ${params.category} from your recent trip. Please check your vehicle and contact support if found.`,
+          type: 'SUPPORT',
+          sendPush: true,
+          data: {
+            type: 'LOST_ITEM_REPORT',
+            rideId: params.rideId,
+            ticketId: params.ticketId,
+            category: params.category,
+          },
+        }),
+      }
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      logger.warn('[SUPPORT] Lost-item driver notify failed', {
+        status: resp.status,
+        body,
+        driverUserId: params.driverUserId,
+      });
+    } else {
+      logger.info('[SUPPORT] Driver notified of lost-item report', {
+        driverUserId: params.driverUserId,
+        rideId: params.rideId,
+      });
+    }
+  } catch (error: any) {
+    logger.warn('[SUPPORT] Lost-item driver notify error', {
+      error: error?.message,
+      driverUserId: params.driverUserId,
+    });
+  }
+}
 
 function authenticateInternal(req: express.Request, res: express.Response, next: express.NextFunction) {
   const internalApiKey = process.env.INTERNAL_API_KEY || 'raahi-internal-service-key';
@@ -585,6 +640,7 @@ app.post(
     body('description').isString().notEmpty().trim().isLength({ min: 10, max: MAX_DESCRIPTION_LENGTH }).withMessage(`Description is required (10-${MAX_DESCRIPTION_LENGTH} chars)`),
     body('priority').optional().isIn(['low', 'medium', 'high']).withMessage('Priority must be low, medium, or high'),
     body('driver_id').optional().isString().trim().withMessage('Driver ID must be a string'),
+    body('ride_id').optional().isString().trim().withMessage('Ride ID must be a string'),
   ],
   asyncHandler(async (req: AuthRequest, res) => {
     const errors = validationResult(req);
@@ -593,7 +649,28 @@ app.post(
       return;
     }
 
-    const { issue_type, description, priority, driver_id } = req.body;
+    const { issue_type, description, priority, driver_id, ride_id } = req.body;
+
+    let resolvedDriverId: string | null = driver_id || null;
+    let rideOwned = false;
+
+    if (ride_id) {
+      const ride = await prisma.ride.findFirst({
+        where: { id: ride_id, passengerId: req.user!.id },
+        select: { id: true, driverId: true, status: true },
+      });
+      if (!ride) {
+        res.status(404).json({
+          success: false,
+          message: 'Ride not found for this user',
+        });
+        return;
+      }
+      rideOwned = true;
+      if (!resolvedDriverId && ride.driverId) {
+        resolvedDriverId = ride.driverId;
+      }
+    }
 
     const priorityMap: { [key: string]: 'LOW' | 'MEDIUM' | 'HIGH' } = {
       low: 'LOW',
@@ -601,23 +678,61 @@ app.post(
       high: 'HIGH',
     };
 
+    const isLostItem = String(issue_type).toLowerCase().startsWith('lost item');
+    const ticketPriority = isLostItem
+      ? 'HIGH'
+      : priorityMap[priority || 'medium'];
+
+    const ticketDescription = ride_id && !String(description).includes(ride_id)
+      ? `${description}\n\n[ride_id=${ride_id}]`
+      : description;
+
     const ticket = await prisma.supportTicket.create({
       data: {
         userId: req.user!.id,
-        driverId: driver_id || null,
+        driverId: resolvedDriverId,
         issueType: issue_type,
-        description,
-        priority: priorityMap[priority || 'medium'],
+        description: ticketDescription,
+        priority: ticketPriority,
       },
+    });
+
+    // Lost & Found: push the assigned driver so they can check the vehicle.
+    if (isLostItem && resolvedDriverId) {
+      const driver = await prisma.driver.findUnique({
+        where: { id: resolvedDriverId },
+        select: { userId: true },
+      });
+      if (driver?.userId) {
+        const categoryMatch = String(issue_type).match(/Lost Item\s*[—\-]\s*(.+)/i);
+        void notifyDriverLostItem({
+          driverUserId: driver.userId,
+          rideId: ride_id || 'unknown',
+          category: categoryMatch?.[1]?.trim() || 'item',
+          ticketId: ticket.id,
+        });
+      }
+    }
+
+    logger.info('[SUPPORT] Ticket created', {
+      ticketId: ticket.id,
+      userId: req.user!.id,
+      rideId: ride_id || null,
+      rideOwned,
+      isLostItem,
+      driverId: resolvedDriverId,
     });
 
     res.status(201).json({
       success: true,
-      message: 'Support request submitted successfully',
+      message: isLostItem
+        ? 'Lost item report submitted successfully'
+        : 'Support request submitted successfully',
       data: {
         request_id: ticket.id,
         user_id: req.user!.id,
         driver_id: ticket.driverId,
+        ride_id: ride_id || null,
         issue_type: ticket.issueType,
         description: ticket.description,
         priority: ticket.priority.toLowerCase(),
