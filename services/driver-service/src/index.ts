@@ -358,29 +358,8 @@ app.patch('/api/driver/status', authenticateDriver, [body('online').isBoolean(),
       return;
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: req.user!.id },
-      select: { email: true, emailVerified: true },
-    });
-    if (!user?.email) {
-      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} has no email`);
-      res.status(403).json({
-        success: false,
-        message: 'Add and verify your email before going online.',
-        code: 'EMAIL_REQUIRED',
-      });
-      return;
-    }
-    if (!user.emailVerified) {
-      logger.info(`[DRIVER_STATUS] Blocked go-online: driver ${driver.id} email not verified`);
-      res.status(403).json({
-        success: false,
-        message: 'Verify your email before going online.',
-        code: 'EMAIL_NOT_VERIFIED',
-        email: user.email,
-      });
-      return;
-    }
+    // Email verification is optional — do not block going online when
+    // email is missing/unverified (SMTP may be unavailable).
   }
   
   // When driver tries to go ONLINE: block if account is suspended or terminated
