@@ -406,3 +406,22 @@ export async function getRideStateFromFireball(rideId: string): Promise<Record<s
     return null;
   }
 }
+
+/**
+ * Update ride location via Fireball (in-memory, no DB write, instant push).
+ */
+export async function updateRideLocationViaFireball(rideId: string, lat: number, lng: number, heading?: number, speed?: number) {
+  try {
+    await axios.post(
+      `${REALTIME_SERVICE_URL}/internal/ride-location`,
+      { rideId, lat, lng, heading, speed },
+      {
+        timeout: 2000,
+        headers: { 'x-internal-api-key': INTERNAL_API_KEY },
+      }
+    );
+  } catch (error) {
+    // Non-critical - location updates are high frequency
+    logger.debug('Fireball ride-location failed', { error: (error as Error).message });
+  }
+}
