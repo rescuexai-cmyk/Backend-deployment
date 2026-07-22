@@ -208,6 +208,8 @@ app.use('/api/driver/onboarding/document/upload', createProxyMiddleware(uploadPr
 app.use('/api/driver/documents', createProxyMiddleware(uploadProxyOptions));
 app.use('/api/driver', createProxyMiddleware({ target: DRIVER_SERVICE, ...proxyOptions }));
 app.use('/api/rides', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
+// Public passenger trip share page (HTML) — live map for share links.
+app.use('/ride/share', createProxyMiddleware({ target: RIDE_SERVICE, ...proxyOptions }));
 app.use('/api/pricing', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));
 // Promo codes live on the pricing-service (validate/apply are user-facing)
 app.use('/api/promo', createProxyMiddleware({ target: PRICING_SERVICE, ...proxyOptions }));

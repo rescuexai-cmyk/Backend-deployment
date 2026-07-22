@@ -389,20 +389,20 @@ export async function verifyOtpViaFireball(rideId: string, otp: string): Promise
 }
 
 /**
- * Update ride location via Fireball (in-memory, no DB write, instant push).
+ * Fireball: read in-memory ride state (includes live driverLat/Lng).
  */
-export async function updateRideLocationViaFireball(rideId: string, lat: number, lng: number, heading?: number, speed?: number) {
+export async function getRideStateFromFireball(rideId: string): Promise<Record<string, any> | null> {
   try {
-    await axios.post(
-      `${REALTIME_SERVICE_URL}/internal/ride-location`,
-      { rideId, lat, lng, heading, speed },
+    const { data } = await axios.get(
+      `${REALTIME_SERVICE_URL}/internal/ride-state/${rideId}`,
       {
         timeout: 2000,
         headers: { 'x-internal-api-key': INTERNAL_API_KEY },
       }
     );
-  } catch (error) {
-    // Non-critical - location updates are high frequency
-    logger.debug('Fireball ride-location failed', { error: (error as Error).message });
+    if (data?.success && data?.data) return data.data as Record<string, any>;
+    return null;
+  } catch {
+    return null;
   }
 }

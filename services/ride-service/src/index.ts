@@ -38,6 +38,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', service: 'ride-service', timestamp: new Date().toISOString() });
 });
 
+// Public live trip share page (no auth). Token validated by the JSON API the page polls.
+app.get('/ride/share/:token', (req, res) => {
+  res.sendFile(path.resolve(__dirname, '../public/ride-share.html'));
+});
+
 app.use('/api/rides', rideRoutes);
 
 app.use(notFound);

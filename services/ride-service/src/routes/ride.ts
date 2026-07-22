@@ -6,7 +6,7 @@ import { asyncHandler } from '@raahi/shared';
 import { prisma } from '@raahi/shared';
 import { canDriverStartRides, DRIVER_NOT_VERIFIED_RIDE_ERROR } from '@raahi/shared';
 import * as rideService from '../rideService';
-import { broadcastRideChatMessage, broadcastRideChatRead } from '../httpClients';
+import { broadcastRideChatMessage, broadcastRideChatRead, getRideStateFromFireball } from '../httpClients';
 
 const router = express.Router();
 const NOTIFICATION_SERVICE_URL = process.env.NOTIFICATION_SERVICE_URL || 'http://notification-service:5006';
@@ -371,24 +371,18 @@ router.get('/share/:token', asyncHandler(async (req: AuthRequest, res: Response)
     where: { token: req.params.token },
     include: {
       ride: {
-        select: {
-          id: true,
-          status: true,
-          pickupAddress: true,
-          dropAddress: true,
-          pickupLatitude: true,
-          pickupLongitude: true,
-          dropLatitude: true,
-          dropLongitude: true,
-          createdAt: true,
-          driverId: true,
-        },
         include: {
+          passenger: {
+            select: { firstName: true, lastName: true, phone: true },
+          },
           driver: {
             select: {
-              user: { select: { firstName: true, lastName: true } },
               vehicleNumber: true,
               vehicleModel: true,
+              vehicleType: true,
+              currentLatitude: true,
+              currentLongitude: true,
+              user: { select: { firstName: true, lastName: true } },
             },
           },
         },
@@ -399,24 +393,63 @@ router.get('/share/:token', asyncHandler(async (req: AuthRequest, res: Response)
     res.status(404).json({ success: false, message: 'Share link invalid or expired' });
     return;
   }
+
   const ride = record.ride;
+  const live = await getRideStateFromFireball(ride.id);
+
+  const passengerName =
+    `${ride.passenger?.firstName || ''} ${ride.passenger?.lastName || ''}`.trim() ||
+    (live?.passengerName as string | undefined) ||
+    'Passenger';
+
+  const driverName = ride.driver
+    ? `${ride.driver.user?.firstName || ''} ${ride.driver.user?.lastName || ''}`.trim() || 'Driver'
+    : (live?.driverName as string | undefined) || null;
+
+  const vehicleLat =
+    (typeof live?.driverLat === 'number' ? live.driverLat : null) ??
+    ride.driver?.currentLatitude ??
+    null;
+  const vehicleLng =
+    (typeof live?.driverLng === 'number' ? live.driverLng : null) ??
+    ride.driver?.currentLongitude ??
+    null;
+
   res.status(200).json({
     success: true,
     data: {
       rideId: ride.id,
-      status: ride.status,
+      status: live?.status || ride.status,
+      vehicleType: ride.vehicleType || live?.vehicleType || null,
       pickupAddress: ride.pickupAddress,
       dropAddress: ride.dropAddress,
       pickup: { lat: ride.pickupLatitude, lng: ride.pickupLongitude },
       drop: { lat: ride.dropLatitude, lng: ride.dropLongitude },
       createdAt: ride.createdAt,
-      driver: ride.driver
+      passenger: {
+        name: passengerName,
+      },
+      driver: (ride.driver || driverName)
         ? {
-            name: `${ride.driver.user?.firstName || ''} ${ride.driver.user?.lastName || ''}`.trim() || 'Driver',
-            vehicleNumber: ride.driver.vehicleNumber,
-            vehicleModel: ride.driver.vehicleModel,
+            name: driverName || 'Driver',
+            vehicleNumber:
+              ride.driver?.vehicleNumber || live?.driverVehicleNumber || null,
+            vehicleModel:
+              ride.driver?.vehicleModel || live?.driverVehicleModel || null,
+            vehicleType: ride.driver?.vehicleType || ride.vehicleType || null,
           }
         : null,
+      vehicleLocation:
+        vehicleLat != null && vehicleLng != null
+          ? {
+              lat: vehicleLat,
+              lng: vehicleLng,
+              heading:
+                typeof live?.driverHeading === 'number' ? live.driverHeading : null,
+              updatedAt: new Date().toISOString(),
+            }
+          : null,
+      expiresAt: record.expiresAt,
     },
   });
 }));
@@ -2007,8 +2040,12 @@ router.post(
     await prisma.rideShareToken.create({
       data: { rideId: ride.id, token, expiresAt },
     });
-    const baseUrl = process.env.GATEWAY_URL || process.env.FRONTEND_URL || 'https://app.raahi.com';
-    const shareUrl = `${baseUrl}/ride/share/${token}`;
+    const baseUrl =
+      process.env.PUBLIC_SHARE_BASE_URL ||
+      process.env.GATEWAY_URL ||
+      process.env.FRONTEND_URL ||
+      'https://api.raahionrescue.com';
+    const shareUrl = `${baseUrl.replace(/\/$/, '')}/ride/share/${token}`;
     res.status(201).json({
       success: true,
       message: 'Share link created',
